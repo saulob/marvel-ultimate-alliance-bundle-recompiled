@@ -44,6 +44,7 @@ mua_add_test(shader_storage_repair_tests headless SOURCES src/shader_storage_rep
 mua_add_test(resolve_order_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(audio_pcm_firewall_tests headless)
 mua_add_test(sound_stream_ring_tests headless DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/default")
+mua_add_test(save_diagnostics_tests headless DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/default")
 mua_add_test(sdk_fix_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(runtime_config_tests headless
     DEFINES MUA_STAGED_CONFIG="$<TARGET_FILE_DIR:marvel_ultimate_alliance>/marvel_ultimate_alliance.toml"

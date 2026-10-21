@@ -185,6 +185,7 @@ set(MUA_SOURCES
     src/log_path.cpp
     src/platform.cpp
     src/recomp_image.cpp
+    src/save_diagnostics.cpp
     src/session_log.cpp
     src/settings.cpp
     src/shader_storage_repair.cpp

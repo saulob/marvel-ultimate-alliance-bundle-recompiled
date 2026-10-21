@@ -116,7 +116,7 @@ try {
 
     $headless = @('aspect_ratio', 'audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'graphics_adapter', 'keyboard', 'launcher_quit',
                   'lifecycle', 'log_path', 'multisampling', 'relaunch', 'resolve_order', 'runtime_config',
-                  'sdk_fix', 'shader_storage_repair', 'sound_stream_ring', 'user_data', 'window_host',
+                  'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'sound_stream_ring', 'user_data', 'window_host',
                   'window_placement') | ForEach-Object { "mua_$($_)_tests" }
     $runtime = @('active_log_tests', 'filesystem_mapping_tests', 'log_filter_tests', 'physical_heap_stress',
                  'settings_tests', 'shutdown_order_tests', 'title_thread_shutdown_tests',
