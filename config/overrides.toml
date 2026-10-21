@@ -1,0 +1,29 @@
+# Manual analysis fixes for Marvel Ultimate Alliance Gold Edition (default.xex, title 415607DA)
+
+[functions]
+# Leaf bodies with no .pdata entry that follow a this-adjusting thunk (addi r3, r3, 12; b) and are reached only by its tail call.
+0x8217E500 = { end = 0x8217E59C }
+0x82261000 = { end = 0x8226109C }
+0x82263298 = { end = 0x82263334 }
+0x82263340 = { end = 0x822633DC }
+0x8227A1B8 = { end = 0x8227A254 }
+0x8227A260 = { end = 0x8227A2FC }
+0x8227A3A8 = { end = 0x8227A454 }
+0x82328E10 = { end = 0x82328EAC }
+0x82358D18 = { end = 0x82358DB4 }
+0x823B2748 = { end = 0x823B27E4 }
+0x823EAFB0 = { end = 0x823EB04C }
+
+# Tail-call target between two .pdata functions: loads a pointer, returns early on null, else jumps through a table slot.
+0x8263BB78 = { end = 0x8263BB98 }
+
+# Vcall thunk followed by a function that no pointer or branch starts; GapFill split it at the blr of its early-exit path.
+0x82543C70 = { end = 0x82543C80 }
+0x82543C80 = { end = 0x82543D1C }
+
+# Sanitizes the mixed frame before XAudioSubmitRenderDriverFrame in sub_824AF110; r4 is the frame address.
+[[midasm_hook]]
+address = 0x824AF158
+name = "mua_audio_pcm_firewall"
+registers = ["r4"]
+after_instruction = false

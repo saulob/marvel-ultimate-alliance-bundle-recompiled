@@ -1,0 +1,43 @@
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index dd321a5..5227177 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -434,10 +434,13 @@ bool D3D12RenderTargetCache::Initialize() {
+         msaa_2x_supported_ = false;
+       }
+     }
+-    if (!msaa_2x_supported_) {
++    if (msaa_2x_supported_) {
++      REXGPU_INFO("Guest 2x MSAA render targets: host 2x MSAA");
++    } else {
+       REXGPU_WARN(
+-          "2x MSAA is not supported, emulated via top-left and bottom-right "
+-          "samples of 4x MSAA");
++          "Guest 2x MSAA render targets: host 4x MSAA, top-left and bottom-right samples ({})",
++          REXCVAR_GET(native_2x_msaa) ? "2x MSAA is unsupported for a needed format"
++                                      : "native_2x_msaa is off");
+     }
+ 
+     descriptor_pool_color_ = std::make_unique<ui::d3d12::D3D12CpuDescriptorPool>(
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 126fb0a..96712d1 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -965,6 +965,17 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+               sizeof(last_update_framebuffer_attachments_));
+   last_update_framebuffer_ = VK_NULL_HANDLE;
+ 
++  if (path_ == Path::kHostRenderTargets) {
++    if (msaa_2x_attachments_supported_) {
++      REXGPU_INFO("Guest 2x MSAA render targets: host 2x MSAA");
++    } else {
++      REXGPU_WARN(
++          "Guest 2x MSAA render targets: host 4x MSAA, top-left and bottom-right samples ({})",
++          REXCVAR_GET(native_2x_msaa) ? "2x MSAA is unsupported for a needed format"
++                                      : "native_2x_msaa is off");
++    }
++  }
++
+   InitializeCommon();
+   return true;
+ }

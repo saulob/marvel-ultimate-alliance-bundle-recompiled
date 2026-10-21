@@ -1,0 +1,103 @@
+diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
+--- a/include/rex/audio/xma/context.h
++++ b/include/rex/audio/xma/context.h
+@@ -13,6 +13,7 @@
+ 
+ #include <array>
+ #include <atomic>
++#include <bit>
+ #include <mutex>
+ 
+ #include <rex/kernel.h>
+@@ -124,6 +125,21 @@
+                           sizeof(XMA_CONTEXT_DATA) / 4);
+   }
+ 
++  // Guest words are big-endian; the masked update is a CAS so host fields never overwrite a
++  // guest-written neighbour in the same word.
++  static void UpdateWord(void* ptr, uint32_t index, uint32_t mask, uint32_t value) {
++    if (!mask) {
++      return;
++    }
++    std::atomic_ref<uint32_t> word(reinterpret_cast<uint32_t*>(ptr)[index]);
++    uint32_t previous = word.load(std::memory_order_relaxed);
++    uint32_t next;
++    do {
++      next = std::byteswap((std::byteswap(previous) & ~mask) | (value & mask));
++    } while (!word.compare_exchange_weak(previous, next, std::memory_order_release,
++                                         std::memory_order_relaxed));
++  }
++
+   bool IsInputBufferValid(uint8_t buffer_index) const {
+     return buffer_index == 0 ? input_buffer_0_valid : input_buffer_1_valid;
+   }
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -98,6 +98,10 @@
+   }
+ 
+   std::lock_guard<std::mutex> lock(lock_);
++  // A concurrent Work() may have consumed the enable while this call waited for the lock.
++  if (!is_allocated() || !is_enabled()) {
++    return false;
++  }
+   set_is_enabled(false);
+ 
+   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
+@@ -407,27 +411,39 @@
+ 
+ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+                                     const XMA_CONTEXT_DATA& initial_data, uint8_t* context_ptr) {
+-  XMA_CONTEXT_DATA fresh(context_ptr);
+-
+-  fresh.loop_count = data.loop_count;
+-  fresh.output_buffer_write_offset = data.output_buffer_write_offset;
++  uint32_t mask = 31u << 27;
++  uint32_t value = uint32_t(data.output_buffer_write_offset) << 27;
++  if (data.loop_count != initial_data.loop_count) {
++    mask |= 255u << 12;
++    value |= uint32_t(data.loop_count) << 12;
++  }
+   if (initial_data.input_buffer_0_valid && !data.input_buffer_0_valid) {
+-    fresh.input_buffer_0_valid = 0;
++    mask |= 1u << 20;
+   }
+   if (initial_data.input_buffer_1_valid && !data.input_buffer_1_valid) {
+-    fresh.input_buffer_1_valid = 0;
+-  }
++    mask |= 1u << 21;
++  }
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 0, mask, value);
+ 
+   if (initial_data.output_buffer_valid && !data.output_buffer_valid) {
+-    fresh.output_buffer_valid = 0;
+-  }
+-
+-  fresh.input_buffer_read_offset = data.input_buffer_read_offset;
+-  fresh.error_status = data.error_status;
+-  fresh.current_buffer = data.current_buffer;
+-  fresh.output_buffer_read_offset = data.output_buffer_read_offset;
+-
+-  fresh.Store(context_ptr);
++    XMA_CONTEXT_DATA::UpdateWord(context_ptr, 1, 1u << 31, 0);
++  }
++
++  mask = 0;
++  value = 0;
++  if (data.input_buffer_read_offset != initial_data.input_buffer_read_offset) {
++    mask |= 0x03FFFFFFu;
++    value |= uint32_t(data.input_buffer_read_offset);
++  }
++  if (data.error_status != initial_data.error_status) {
++    mask |= 31u << 26;
++    value |= uint32_t(data.error_status) << 26;
++  }
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 2, mask, value);
++
++  if (data.current_buffer != initial_data.current_buffer) {
++    XMA_CONTEXT_DATA::UpdateWord(context_ptr, 4, 1u << 31, uint32_t(data.current_buffer) << 31);
++  }
+ }
+ 
+ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {

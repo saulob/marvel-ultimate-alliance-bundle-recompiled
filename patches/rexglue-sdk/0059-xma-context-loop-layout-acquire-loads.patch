@@ -1,0 +1,35 @@
+diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
+--- a/include/rex/audio/xma/context.h
++++ b/include/rex/audio/xma/context.h
+@@ -63,10 +63,10 @@ struct XMA_CONTEXT_DATA {
+   uint32_t input_buffer_1_packet_count : 12;  // XMASetInputBuffer1, number of
+                                               // 2KB packets. Max 4095 packets.
+                                               // These packets form a block.
+-  uint32_t loop_subframe_end : 2;             // +12bit, XMAPlaybackSetLoop
++  uint32_t loop_subframe_start : 2;           // +12bit
++  uint32_t loop_subframe_end : 3;             // +14bit, XMAPlaybackSetLoop
+                                               // dwLoopSubframeEnd: last loop frame
+                                               // plays subframes 0..end
+-  uint32_t unk_dword_1_a : 3;                 // +14bit
+   uint32_t loop_subframe_skip : 3;            // +17bit, XMAPlaybackSetLoop
+                                               // dwLoopSubframeSkip: subframes to
+                                               // discard at loop start; 4 = whole
+@@ -116,8 +116,16 @@ struct XMA_CONTEXT_DATA {
+   uint32_t unk_dwords_10_15[6];  // reserved?
+ 
+   explicit XMA_CONTEXT_DATA(const void* ptr) {
+-    memory::copy_and_swap(reinterpret_cast<uint32_t*>(this), reinterpret_cast<const uint32_t*>(ptr),
+-                          sizeof(XMA_CONTEXT_DATA) / 4);
++    auto snapshot = reinterpret_cast<uint32_t*>(this);
++    for (size_t i = 0; i < sizeof(XMA_CONTEXT_DATA) / 4; ++i) {
++      snapshot[i] = LoadWord(ptr, i);
++    }
++  }
++
++  // Acquire per word: a published output position also makes the PCM written before it visible.
++  static uint32_t LoadWord(const void* ptr, size_t index) {
++    std::atomic_ref<uint32_t> word(const_cast<uint32_t*>(static_cast<const uint32_t*>(ptr))[index]);
++    return std::byteswap(word.load(std::memory_order_acquire));
+   }
+ 
+   void Store(void* ptr) {

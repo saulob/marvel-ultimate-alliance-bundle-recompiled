@@ -1,0 +1,59 @@
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..3ebbd22 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -24,6 +24,8 @@
+ 
+ #include <imgui.h>
+ 
++#include <SDL3/SDL.h>
++
+ namespace rex {
+ namespace ui {
+ 
+@@ -86,6 +88,37 @@ void ApplyDefaultStyle(ImGuiStyle& style) {
+   style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
+ }
+ 
++// The runtime renders ImGui draw lists itself and never reads the requested
++// cursor shape, so nothing would honor ImGui::SetMouseCursor. Apply it to the
++// OS cursor here; system cursors are created once and reused.
++void ApplyMouseCursor() {
++  static SDL_Cursor* cursors[ImGuiMouseCursor_COUNT] = {};
++  static ImGuiMouseCursor applied = ImGuiMouseCursor_COUNT;
++  if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_NoMouseCursorChange) {
++    return;
++  }
++  ImGuiMouseCursor cursor = ImGui::GetMouseCursor();
++  if (cursor < 0 || cursor >= ImGuiMouseCursor_COUNT) {
++    cursor = ImGuiMouseCursor_Arrow;
++  }
++  if (cursor == applied) {
++    return;
++  }
++  static const SDL_SystemCursor kShapes[ImGuiMouseCursor_COUNT] = {
++      SDL_SYSTEM_CURSOR_DEFAULT,     SDL_SYSTEM_CURSOR_TEXT,        SDL_SYSTEM_CURSOR_MOVE,
++      SDL_SYSTEM_CURSOR_NS_RESIZE,   SDL_SYSTEM_CURSOR_EW_RESIZE,   SDL_SYSTEM_CURSOR_NESW_RESIZE,
++      SDL_SYSTEM_CURSOR_NWSE_RESIZE, SDL_SYSTEM_CURSOR_POINTER,     SDL_SYSTEM_CURSOR_WAIT,
++      SDL_SYSTEM_CURSOR_PROGRESS,    SDL_SYSTEM_CURSOR_NOT_ALLOWED,
++  };
++  if (!cursors[cursor]) {
++    cursors[cursor] = SDL_CreateSystemCursor(kShapes[cursor]);
++  }
++  if (cursors[cursor]) {
++    SDL_SetCursor(cursors[cursor]);
++    applied = cursor;
++  }
++}
++
+ }  // namespace
+ 
+ ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallback font_setup,
+@@ -421,6 +454,7 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   }
+   dialog_loop_next_index_ = SIZE_MAX;
+ 
++  ApplyMouseCursor();
+   ImGui::Render();
+   ImDrawData* draw_data = ImGui::GetDrawData();
+   if (draw_data) {

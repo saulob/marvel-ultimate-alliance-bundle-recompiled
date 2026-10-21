@@ -1,0 +1,167 @@
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -13,6 +13,7 @@
+ #include <cstring>
+ #include <filesystem>
+ #include <map>
++#include <unordered_map>
+ 
+ #include <rex/assert.h>
+ #include <rex/chrono/clock.h>
+@@ -119,6 +120,26 @@
+   }
+ }
+ 
++// Physical mouse buttons held, per drawer. Mouse input goes to ImGui as queued events, so a press and release between
++// two frames still make a click, and ImGui's own button state lags them. Kept outside the class so its layout stays
++// the same.
++std::unordered_map<const ImGuiDrawer*, uint32_t> mouse_buttons_down;
++
++// Releases the physical mouse buttons held in ImGui; returns whether any were.
++bool ReleaseMouseButtons(const ImGuiDrawer* drawer, ImGuiIO& io) {
++  auto it = mouse_buttons_down.find(drawer);
++  if (it == mouse_buttons_down.end() || !it->second) {
++    return false;
++  }
++  for (int button = 0; button < ImGuiMouseButton_COUNT; ++button) {
++    if (it->second & (uint32_t(1) << button)) {
++      io.AddMouseButtonEvent(button, false);
++    }
++  }
++  it->second = 0;
++  return true;
++}
++
+ }  // namespace
+ 
+ ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallback font_setup,
+@@ -137,7 +158,7 @@
+     window_->RemoveInputListener(this);
+     if (internal_state_) {
+       ImGui::SetCurrentContext(internal_state_);
+-      if (touch_pointer_id_ == TouchEvent::kPointerIDNone && ImGui::IsAnyMouseDown()) {
++      if (ReleaseMouseButtons(this, ImGui::GetIO())) {
+         window_->ReleaseMouse();
+       }
+     }
+@@ -146,6 +167,7 @@
+     ImGui::DestroyContext(internal_state_);
+     internal_state_ = nullptr;
+   }
++  mouse_buttons_down.erase(this);
+ }
+ 
+ void ImGuiDrawer::AddDialog(ImGuiDialog* dialog) {
+@@ -463,7 +485,7 @@
+ 
+   if (reset_mouse_position_after_next_frame_) {
+     reset_mouse_position_after_next_frame_ = false;
+-    io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
++    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+   }
+ 
+   // Detaching is deferred if the last dialog is removed during drawing, perform
+@@ -557,12 +579,14 @@
+       break;
+     }
+   }
+-  if (button >= 0 && button < std::size(io.MouseDown)) {
+-    if (!io.MouseDown[button]) {
+-      if (!ImGui::IsAnyMouseDown()) {
++  if (button >= 0) {
++    uint32_t& buttons_down = mouse_buttons_down[this];
++    if (!(buttons_down & (uint32_t(1) << button))) {
++      if (!buttons_down) {
+         window_->CaptureMouse();
+       }
+-      io.MouseDown[button] = true;
++      buttons_down |= uint32_t(1) << button;
++      io.AddMouseButtonEvent(button, true);
+     }
+   }
+ }
+@@ -589,10 +613,12 @@
+       break;
+     }
+   }
+-  if (button >= 0 && button < std::size(io.MouseDown)) {
+-    if (io.MouseDown[button]) {
+-      io.MouseDown[button] = false;
+-      if (!ImGui::IsAnyMouseDown()) {
++  if (button >= 0) {
++    uint32_t& buttons_down = mouse_buttons_down[this];
++    if (buttons_down & (uint32_t(1) << button)) {
++      buttons_down &= ~(uint32_t(1) << button);
++      io.AddMouseButtonEvent(button, false);
++      if (!buttons_down) {
+         window_->ReleaseMouse();
+       }
+     }
+@@ -602,7 +628,7 @@
+ void ImGuiDrawer::OnMouseWheel(MouseEvent& e) {
+   SwitchToPhysicalMouseAndUpdateMousePosition(e);
+   auto& io = GetIO();
+-  io.MouseWheel += float(e.scroll_y()) / float(MouseEvent::kScrollPerDetent);
++  io.AddMouseWheelEvent(0.0f, float(e.scroll_y()) / float(MouseEvent::kScrollPerDetent));
+ }
+ 
+ void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
+@@ -613,8 +639,7 @@
+     // The latest pointer needs to be controlling the ImGui mouse.
+     if (touch_pointer_id_ == TouchEvent::kPointerIDNone) {
+       // Switching from the mouse to touch input.
+-      if (ImGui::IsAnyMouseDown()) {
+-        std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
++      if (ReleaseMouseButtons(this, io)) {
+         window_->ReleaseMouse();
+       }
+     }
+@@ -626,24 +651,25 @@
+   }
+   UpdateMousePosition(e.x(), e.y());
+   if (action == TouchEvent::Action::kUp || action == TouchEvent::Action::kCancel) {
+-    io.MouseDown[0] = false;
++    io.AddMouseButtonEvent(0, false);
+     touch_pointer_id_ = TouchEvent::kPointerIDNone;
+     // Make sure that after a touch, the ImGui mouse isn't hovering over
+     // anything.
+     reset_mouse_position_after_next_frame_ = true;
+   } else {
+-    io.MouseDown[0] = true;
++    io.AddMouseButtonEvent(0, true);
+     reset_mouse_position_after_next_frame_ = false;
+   }
+ }
+ 
+ void ImGuiDrawer::ClearInput() {
+   auto& io = GetIO();
+-  if (touch_pointer_id_ == TouchEvent::kPointerIDNone && ImGui::IsAnyMouseDown()) {
++  if (ReleaseMouseButtons(this, io)) {
+     window_->ReleaseMouse();
+   }
+-  io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+-  std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
++  io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
++  // A touch holds button 0 without being counted as a physical button.
++  io.AddMouseButtonEvent(0, false);
+   io.ClearInputKeys();
+   touch_pointer_id_ = TouchEvent::kPointerIDNone;
+   reset_mouse_position_after_next_frame_ = false;
+@@ -677,15 +703,14 @@
+ void ImGuiDrawer::UpdateMousePosition(float x, float y) {
+   auto& io = GetIO();
+   float physical_to_logical = float(window_->GetMediumDpi()) / float(window_->GetDpi());
+-  io.MousePos.x = x * physical_to_logical;
+-  io.MousePos.y = y * physical_to_logical;
++  io.AddMousePosEvent(x * physical_to_logical, y * physical_to_logical);
+ }
+ 
+ void ImGuiDrawer::SwitchToPhysicalMouseAndUpdateMousePosition(const MouseEvent& e) {
+   if (touch_pointer_id_ != TouchEvent::kPointerIDNone) {
+     touch_pointer_id_ = TouchEvent::kPointerIDNone;
+     auto& io = GetIO();
+-    std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
++    io.AddMouseButtonEvent(0, false);
+     // Nothing needs to be done regarding CaptureMouse and ReleaseMouse - all
+     // buttons as well as mouse capture have been released when switching to
+     // touch input, the mouse is never captured during touch input, and now

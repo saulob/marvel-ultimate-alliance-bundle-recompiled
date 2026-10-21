@@ -1,0 +1,32 @@
+Draw extent estimate: a negative scissor edge is not "8192 or more" (clang -Wsign-compare).
+
+EstimateMaxY clamps the window scissor bottom and right to int32_t after adding the signed window offset, so they can
+be negative, and then compared them with the unsigned xenos::kTexture2DCubeMaxWidthHeight: the comparison was done
+in unsigned arithmetic and a negative edge counted as at least 8192. That check only exists to detect Direct3D 9's
+8192x8192 "no scissor" case and run the vertex shader on the CPU for unclipped draws
+(execute_unclipped_draw_vs_on_cpu without ..._with_scissor). A negative scissor edge already gives max_y 0, so the
+CPU pass could not raise it; it only cost a CPU vertex shader run and could move min_y above max_y. The edges are
+now compared as signed values, as Xenia intends; non-negative scissors behave exactly as before.
+
+diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+index 4187835..68c315e 100644
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -378,7 +378,7 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+         estimate_vertex_max_y = true;
+       } else {
+         estimate_vertex_max_y = false;
+-        if (scissor_bottom >= xenos::kTexture2DCubeMaxWidthHeight) {
++        if (scissor_bottom >= int32_t(xenos::kTexture2DCubeMaxWidthHeight)) {
+           // Handle just the usual special 8192x8192 case in Direct3D 9 - 8192
+           // may be a normal render target height (80x8192 is well within the
+           // EDRAM size, for instance), no need to process the vertices on the
+@@ -388,7 +388,7 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+             scissor_right += pa_sc_window_offset.window_x_offset;
+           }
+           scissor_right = std::min(scissor_right, int32_t(pa_sc_screen_scissor_br.br_x));
+-          if (scissor_right >= xenos::kTexture2DCubeMaxWidthHeight) {
++          if (scissor_right >= int32_t(xenos::kTexture2DCubeMaxWidthHeight)) {
+             estimate_vertex_max_y = true;
+           }
+         }

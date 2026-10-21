@@ -1,0 +1,182 @@
+Adapted from crackdown-xbox360-recompiled patches/rexglue-sdk/0063 (the fault description; the page-recovery part of
+that patch is not used), itself from Unowa001/crackdown-recomp. Diagnostics only: the fault is still unhandled.
+Copyright (c) 2026, Jerrod (Unowa001). BSD 3-Clause License, see packaging/licenses/THIRD-PARTY-LICENSES.txt.
+
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <cstddef>
+ #include <cstring>
+ #include <utility>
+ 
+@@ -26,8 +27,11 @@
+ #include <rex/math.h>
+ #include <rex/stream.h>
+ #include <rex/system/function_dispatcher.h>
++#include <rex/system/guest_fault_region.h>
+ #include <rex/system/mmio_handler.h>
++#include <rex/system/thread_state.h>
+ #include <rex/system/xmemory.h>
++#include <rex/system/xthread.h>
+ #include <rex/thread.h>
+ 
+ // TODO(benvanik): move xbox.h out
+@@ -531,6 +535,76 @@
+   return mmio_handler_->LookupRange(virtual_address);
+ }
+ 
++namespace {
++
++// Guest code keeps the PCR in r13; its stack fields are only trusted when that page is readable.
++GuestStackBounds CurrentGuestStack(Memory* memory, const ::PPCContext& ctx) {
++  const uint32_t pcr_address = ctx.r13.u32;
++  BaseHeap* heap = memory->LookupHeap(pcr_address);
++  if (!pcr_address || !heap) {
++    return {};
++  }
++  const uint32_t pcr_page = pcr_address & ~(heap->page_size() - 1);
++  const uint32_t fields_end = pcr_address + offsetof(system::X_KPCR, alt_stack_base_ptr);
++  HeapAllocationInfo info{};
++  if (!heap->QueryRegionInfo(pcr_page, &info) ||
++      !(info.state & memory::kMemoryAllocationCommit) ||
++      !(info.protect & memory::kMemoryProtectRead) || fields_end > pcr_page + info.region_size) {
++    return {};
++  }
++  const auto* pcr = memory->TranslateVirtual<const system::X_KPCR*>(pcr_address);
++  return {pcr->stack_end_ptr, pcr->stack_base_ptr};
++}
++
++struct GuestFaultDescription {
++  uint32_t page = 0;
++  HeapAllocationInfo info{};
++  GuestStackBounds stack;
++  GuestFaultRegion region = GuestFaultRegion::kFree;
++};
++
++bool DescribeGuestFault(Memory* memory, BaseHeap* heap, const ::PPCContext& ctx,
++                        uint32_t guest_address, GuestFaultDescription& out) {
++  const uint32_t page_size = heap->page_size();
++  out.page = guest_address & ~(page_size - 1);
++  if (!heap->QueryRegionInfo(out.page, &out.info)) {
++    return false;
++  }
++  out.stack = CurrentGuestStack(memory, ctx);
++  out.region = ClassifyGuestFaultRegion(
++      out.page, page_size, (out.info.state & memory::kMemoryAllocationReserve) != 0,
++      (out.info.state & memory::kMemoryAllocationCommit) != 0,
++      out.info.protect == memory::kMemoryProtectNoAccess, out.stack);
++  return true;
++}
++
++
++void LogUnhandledGuestFault(Memory* memory, BaseHeap* heap, uint32_t guest_address,
++                            bool is_write) {
++  const auto* thread_state = runtime::ThreadState::Get();
++  if (!thread_state) {
++    return;
++  }
++  const ::PPCContext& ctx = *thread_state->context();
++  GuestFaultDescription fault;
++  if (!DescribeGuestFault(memory, heap, ctx, guest_address, fault)) {
++    return;
++  }
++  const int64_t offset_from_stack_base =
++      fault.stack.known() ? int64_t(guest_address) - int64_t(fault.stack.base) : 0;
++  REXSYS_ERROR(
++      "[SAVE_CRASH] Guest {} fault: addr=0x{:08X} region={} alloc=0x{:08X}+0x{:X} state={} "
++      "protect={} stack_limit=0x{:08X} stack_base=0x{:08X} offset_from_stack_base={:+#x} "
++      "r1=0x{:08X} lr=0x{:08X} thread=0x{:X}",
++      is_write ? "write" : "read", guest_address, GuestFaultRegionName(fault.region),
++      fault.info.allocation_base, fault.info.allocation_size, fault.info.state, fault.info.protect,
++      fault.stack.limit, fault.stack.base, offset_from_stack_base, ctx.r1.u32, uint32_t(ctx.lr),
++      thread_state->thread_id());
++}
++
++
++}  // namespace
++
+ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+                                      void* host_address, bool is_write) {
+   // Access via physical_membase_ is special, when need to bypass everything
+@@ -547,6 +621,9 @@
+         "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+         is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+         rex::thread::current_thread_id());
++    if (heap) {
++      LogUnhandledGuestFault(this, heap, virtual_address, is_write);
++    }
+     return false;
+   }
+ 
+--- /dev/null
++++ b/include/rex/system/guest_fault_region.h
+@@ -0,0 +1,66 @@
++#pragma once
++
++#include <cstdint>
++
++namespace rex::memory {
++
++// Bounds of the faulting thread's stack, as published in its PCR.
++struct GuestStackBounds {
++  uint32_t limit = 0;
++  uint32_t base = 0;
++
++  constexpr bool known() const { return base > limit; }
++};
++
++enum class GuestFaultRegion {
++  kFree,
++  kReserved,
++  kCommitted,
++  kNoAccess,
++  kOwnStack,
++  kOwnStackGuard,
++  kOwnStackAbove,
++};
++
++// Stacks are allocated with one no-access guard page below the limit and one above the base.
++constexpr GuestFaultRegion ClassifyGuestFaultRegion(uint32_t page, uint32_t page_size,
++                                                    bool reserved, bool committed,
++                                                    bool no_access, GuestStackBounds stack) {
++  if (stack.known()) {
++    if (page >= stack.limit && page < stack.base) {
++      return GuestFaultRegion::kOwnStack;
++    }
++    if (page == stack.base || page + page_size == stack.limit) {
++      return GuestFaultRegion::kOwnStackGuard;
++    }
++    if (page == stack.base + page_size) {
++      return GuestFaultRegion::kOwnStackAbove;
++    }
++  }
++  if (committed) {
++    return no_access ? GuestFaultRegion::kNoAccess : GuestFaultRegion::kCommitted;
++  }
++  return reserved ? GuestFaultRegion::kReserved : GuestFaultRegion::kFree;
++}
++
++constexpr const char* GuestFaultRegionName(GuestFaultRegion region) {
++  switch (region) {
++    case GuestFaultRegion::kFree:
++      return "free";
++    case GuestFaultRegion::kReserved:
++      return "reserved";
++    case GuestFaultRegion::kCommitted:
++      return "committed";
++    case GuestFaultRegion::kNoAccess:
++      return "no_access";
++    case GuestFaultRegion::kOwnStack:
++      return "own_stack";
++    case GuestFaultRegion::kOwnStackGuard:
++      return "own_stack_guard";
++    case GuestFaultRegion::kOwnStackAbove:
++      return "own_stack_above";
++  }
++  return "unknown";
++}
++
++}  // namespace rex::memory

@@ -1,0 +1,69 @@
+diff --git a/include/rex/platform/dynlib.h b/include/rex/platform/dynlib.h
+index e3fc40d..718d34f 100644
+--- a/include/rex/platform/dynlib.h
++++ b/include/rex/platform/dynlib.h
+@@ -31,6 +31,8 @@ class DynamicLibrary {
+   DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
+ 
+   bool Load(const std::filesystem::path& path, SymbolResolution mode = SymbolResolution::kLazy);
++  // Takes a reference to a library the process has already loaded; never loads one.
++  bool LoadExisting(const std::filesystem::path& path);
+   void Close();
+   explicit operator bool() const { return handle_ != nullptr; }
+ 
+diff --git a/src/core/dynlib_posix.cpp b/src/core/dynlib_posix.cpp
+index fcfd6c9..cd58006 100644
+--- a/src/core/dynlib_posix.cpp
++++ b/src/core/dynlib_posix.cpp
+@@ -31,6 +31,12 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution mo
+   return handle_ != nullptr;
+ }
+ 
++bool DynamicLibrary::LoadExisting(const std::filesystem::path& path) {
++  Close();
++  handle_ = dlopen(path.c_str(), RTLD_NOLOAD | RTLD_LAZY);
++  return handle_ != nullptr;
++}
++
+ void DynamicLibrary::Close() {
+   if (handle_) {
+     dlclose(handle_);
+diff --git a/src/core/dynlib_win.cpp b/src/core/dynlib_win.cpp
+index a402c75..62aafa6 100644
+--- a/src/core/dynlib_win.cpp
++++ b/src/core/dynlib_win.cpp
+@@ -31,6 +31,16 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution /*
+   return handle_ != nullptr;
+ }
+ 
++bool DynamicLibrary::LoadExisting(const std::filesystem::path& path) {
++  Close();
++  // Without GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT this adds a reference, which Close releases.
++  HMODULE module = nullptr;
++  if (GetModuleHandleExW(0, path.c_str(), &module)) {
++    handle_ = static_cast<void*>(module);
++  }
++  return handle_ != nullptr;
++}
++
+ void DynamicLibrary::Close() {
+   if (handle_) {
+     FreeLibrary(static_cast<HMODULE>(handle_));
+diff --git a/src/ui/renderdoc_api.cpp b/src/ui/renderdoc_api.cpp
+index e1a5287..1d443de 100644
+--- a/src/ui/renderdoc_api.cpp
++++ b/src/ui/renderdoc_api.cpp
+@@ -25,10 +25,9 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
+ 
+   pRENDERDOC_GetAPI get_api = nullptr;
+ 
+-  // Try to load the RenderDoc library. If RenderDoc is attached, the library
+-  // should already be loaded into the process and this will increment the
+-  // reference count. If not attached, the load will fail and we return nullptr.
+-  if (!renderdoc_api->library_.Load(platform::lib_names::kRenderDoc)) {
++  // Loading the library here would itself activate RenderDoc, so only use it
++  // when it is already in the process.
++  if (!renderdoc_api->library_.LoadExisting(platform::lib_names::kRenderDoc)) {
+     return nullptr;
+   }
+   get_api = renderdoc_api->library_.GetSymbol<pRENDERDOC_GetAPI>("RENDERDOC_GetAPI");

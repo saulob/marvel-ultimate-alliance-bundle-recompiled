@@ -1,0 +1,100 @@
+Adapted from patches/sdk/0006-codegen-fused-vmaddfp-vnmsubfp-and-double-precision-vmsum.patch in Unowa001/crackdown-recomp
+(the double-precision vmsum part), through crackdown-xbox360-recompiled patches/rexglue-sdk/0095. The accumulation order is
+Xenia's DOT_PRODUCT_3/4 (BSD). rexglue-sdk pull request 379 describes the overflow behaviour.
+Copyright (c) 2026, Jerrod (Unowa001). BSD 3-Clause License, see packaging/licenses/THIRD-PARTY-LICENSES.txt.
+
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -39,8 +39,10 @@
+ 
+ #include <atomic>
+ #include <cassert>
++#include <cmath>
+ #include <csetjmp>
+ #include <cstdlib>
++#include <limits>
+ #include <stdexcept>
+ #include <string_view>
+ #include <unordered_map>
+@@ -254,6 +256,50 @@
+   do { if (enable) ctx.fpscr.enableFlushMode(); else ctx.fpscr.disableFlushMode(); } while (0)
+ 
+ //=============================================================================
++// Vector Dot Products (vmsum3fp128 / vmsum4fp128)
++//=============================================================================
++
++// Xenon accumulates the products in double, rounds once to float and adds in the order of Xenia's
++// DOT_PRODUCT_3/4. A finite sum that overflows float gives the default NaN, not infinity as dpps does.
++// Guest element i is host lane 3 - i.
++
++namespace rex::ppc {
++namespace detail {
++inline simde__m128 VmsumResult(simde__m128d sum) {
++  const double total = simde_mm_cvtsd_f64(sum);
++  float result = float(total);
++  if (std::isinf(result) && std::isfinite(total)) {
++    result = std::numeric_limits<float>::quiet_NaN();
++  }
++  return simde_mm_set1_ps(result);
++}
++
++// {w * w', z * z'} and {y * y', x * x'}.
++inline void VmsumProducts(simde__m128 a, simde__m128 b, simde__m128d& wz, simde__m128d& yx) {
++  wz = simde_mm_mul_pd(simde_mm_cvtps_pd(a), simde_mm_cvtps_pd(b));
++  yx = simde_mm_mul_pd(simde_mm_cvtps_pd(simde_mm_movehl_ps(a, a)),
++                       simde_mm_cvtps_pd(simde_mm_movehl_ps(b, b)));
++}
++}  // namespace detail
++
++// (x + z) + y
++inline simde__m128 simde_mm_vmsum3fp(simde__m128 a, simde__m128 b) {
++  simde__m128d wz, yx;
++  detail::VmsumProducts(a, b, wz, yx);
++  const simde__m128d pairs = simde_mm_add_pd(yx, wz);
++  return detail::VmsumResult(simde_mm_add_sd(simde_mm_unpackhi_pd(pairs, pairs), yx));
++}
++
++// (x + z) + (y + w)
++inline simde__m128 simde_mm_vmsum4fp(simde__m128 a, simde__m128 b) {
++  simde__m128d wz, yx;
++  detail::VmsumProducts(a, b, wz, yx);
++  const simde__m128d pairs = simde_mm_add_pd(yx, wz);
++  return detail::VmsumResult(simde_mm_add_sd(simde_mm_unpackhi_pd(pairs, pairs), pairs));
++}
++}  // namespace rex::ppc
++
++//=============================================================================
+ // Misc
+ //=============================================================================
+ 
+--- a/src/codegen/builders/vector.cpp
++++ b/src/codegen/builders/vector.cpp
+@@ -184,22 +184,21 @@
+ //=============================================================================
+ 
+ bool build_vmsum3fp128(BuilderContext& ctx) {
+-  // 3-element dot product accounting for guest->host vector element reversal
+-  // 0xEF = dot(yzw) with result broadcast to all elements (see constants doc)
++  // 3-element dot product, result broadcast to all elements (rex::ppc::simde_mm_vmsum3fp in the generated PCH)
+   ctx.emit_set_flush_mode(true);
+   ctx.println(
+-      "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
+-      "simde_mm_load_ps({}.f32), 0xEF));",
++      "\tsimde_mm_store_ps({}.f32, rex::ppc::simde_mm_vmsum3fp(simde_mm_load_ps({}.f32), "
++      "simde_mm_load_ps({}.f32)));",
+       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
+   return true;
+ }
+ 
+ bool build_vmsum4fp128(BuilderContext& ctx) {
+-  // 4-element dot product: 0xFF = all 4 elements, result to all (see constants doc)
++  // 4-element dot product, result broadcast to all elements (rex::ppc::simde_mm_vmsum4fp in the generated PCH)
+   ctx.emit_set_flush_mode(true);
+   ctx.println(
+-      "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
+-      "simde_mm_load_ps({}.f32), 0xFF));",
++      "\tsimde_mm_store_ps({}.f32, rex::ppc::simde_mm_vmsum4fp(simde_mm_load_ps({}.f32), "
++      "simde_mm_load_ps({}.f32)));",
+       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
+   return true;
+ }

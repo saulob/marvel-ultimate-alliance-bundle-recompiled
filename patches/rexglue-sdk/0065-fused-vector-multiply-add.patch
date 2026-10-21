@@ -1,0 +1,139 @@
+Adapted from patches/sdk/0006-codegen-fused-vmaddfp-vnmsubfp-and-double-precision-vmsum.patch in Unowa001/crackdown-recomp
+(the fused multiply-add part), through crackdown-xbox360-recompiled patches/rexglue-sdk/0095; the vmsum part is 0062.
+Copyright (c) 2026, Jerrod (Unowa001). BSD 3-Clause License, see packaging/licenses/THIRD-PARTY-LICENSES.txt.
+
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -256,6 +256,100 @@
+   do { if (enable) ctx.fpscr.enableFlushMode(); else ctx.fpscr.disableFlushMode(); } while (0)
+ 
+ //=============================================================================
++// Vector Multiply-Add (vmaddfp, vmaddfp128, vmaddcfp128, vnmsubfp, vnmsubfp128)
++//=============================================================================
++// The VMX unit rounds a multiply-add once, like Xenia's MUL_ADD_V128 (vfmadd213ps); a separate
++// multiply and add rounds twice. Titles that normalize with vrsqrtefp and a Newton-Raphson step
++// rely on the single rounding to keep a unit length within an ulp of 1.0. Without FMA3 the result is
++// still fused: a float product is exact in double, TwoSum gives the exact error of the double sum,
++// and rounding that sum to odd before rounding it to float gives the correctly rounded result
++// (Boldo and Melquiond, "Emulation of FMA and correctly rounded sums: proved algorithms using
++// rounding to odd", 2008). An x64 build without -mfma checks the CPU once and uses vfmadd213ps
++// when it has FMA3, so both paths give the same bits and no CPU is required to have FMA3. Runs
++// under the VMX flush mode, so denormal inputs read as zero and a denormal result flushes to zero.
++
++#if defined(__FMA__) || defined(__aarch64__) || defined(_M_ARM64)
++#define REX_PPC_NATIVE_FMA 1
++#include <simde/x86/fma.h>
++#elif (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__))
++#define REX_PPC_DISPATCH_FMA 1
++#endif
++
++namespace rex::ppc {
++namespace detail {
++// a * b + c for two lanes holding floats, rounded to odd at double precision.
++inline simde__m128d FusedToOdd(simde__m128d a, simde__m128d b, simde__m128d c) {
++  const simde__m128d product = simde_mm_mul_pd(a, b);
++  const simde__m128d sum = simde_mm_add_pd(product, c);
++  const simde__m128d c_part = simde_mm_sub_pd(sum, product);
++  const simde__m128d error = simde_mm_add_pd(
++      simde_mm_sub_pd(product, simde_mm_sub_pd(sum, c_part)), simde_mm_sub_pd(c, c_part));
++  // An inexact sum with an even last bit moves one ulp towards its error. A NaN or infinite sum
++  // has a NaN error and is left as it is.
++  const simde__m128i inexact = simde_mm_castpd_si128(simde_mm_andnot_pd(
++      simde_mm_cmpeq_pd(error, simde_mm_setzero_pd()), simde_mm_cmpord_pd(error, error)));
++  const simde__m128i bits = simde_mm_castpd_si128(sum);
++  const simde__m128i one = simde_mm_set1_epi64x(1);
++  const simde__m128i even =
++      simde_mm_cmpeq_epi64(simde_mm_and_si128(bits, one), simde_mm_setzero_si128());
++  // +1 moves away from zero when the error has the sum's sign, -1 moves towards zero otherwise.
++  const simde__m128i opposite =
++      simde_mm_srli_epi64(simde_mm_xor_si128(bits, simde_mm_castpd_si128(error)), 63);
++  const simde__m128i step = simde_mm_sub_epi64(one, simde_mm_slli_epi64(opposite, 1));
++  return simde_mm_castsi128_pd(
++      simde_mm_add_epi64(bits, simde_mm_and_si128(step, simde_mm_and_si128(inexact, even))));
++}
++
++inline simde__m128 EmulatedVmaddfp(simde__m128 a, simde__m128 b, simde__m128 c) {
++  const simde__m128d low =
++      FusedToOdd(simde_mm_cvtps_pd(a), simde_mm_cvtps_pd(b), simde_mm_cvtps_pd(c));
++  const simde__m128d high = FusedToOdd(simde_mm_cvtps_pd(simde_mm_movehl_ps(a, a)),
++                                       simde_mm_cvtps_pd(simde_mm_movehl_ps(b, b)),
++                                       simde_mm_cvtps_pd(simde_mm_movehl_ps(c, c)));
++  return simde_mm_movelh_ps(simde_mm_cvtpd_ps(low), simde_mm_cvtpd_ps(high));
++}
++
++#if defined(REX_PPC_DISPATCH_FMA)
++// FMA3, and the OS saving the AVX state that VEX encodings need.
++inline bool HostHasFma() {
++  uint32_t regs[4];
++  __asm__("cpuid" : "=a"(regs[0]), "=b"(regs[1]), "=c"(regs[2]), "=d"(regs[3]) : "a"(1u), "c"(0u));
++  constexpr uint32_t kFmaOsxsaveAvx = (1u << 12) | (1u << 27) | (1u << 28);
++  if ((regs[2] & kFmaOsxsaveAvx) != kFmaOsxsaveAvx) {
++    return false;
++  }
++  uint32_t xcr0[2];
++  __asm__("xgetbv" : "=a"(xcr0[0]), "=d"(xcr0[1]) : "c"(0u));
++  return (xcr0[0] & 6u) == 6u;
++}
++
++inline const bool kHostHasFma = HostHasFma();
++#endif
++}  // namespace detail
++
++inline simde__m128 simde_mm_vmaddfp(simde__m128 a, simde__m128 b, simde__m128 c) {
++#if defined(REX_PPC_NATIVE_FMA)
++  return simde_mm_fmadd_ps(a, b, c);
++#else
++#if defined(REX_PPC_DISPATCH_FMA)
++  if (detail::kHostHasFma) {
++    // a = a * b + c: NaN operands win in a, b, c order, as in the emulation.
++    __asm__("vfmadd213ps %2, %1, %0" : "+x"(a) : "x"(b), "x"(c));
++    return a;
++  }
++#endif
++  return detail::EmulatedVmaddfp(a, b, c);
++#endif
++}
++
++// -(a * b - c), negated by flipping the sign bit.
++inline simde__m128 simde_mm_vnmsubfp(simde__m128 a, simde__m128 b, simde__m128 c) {
++  const simde__m128 sign = simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)));
++  return simde_mm_xor_ps(simde_mm_vmaddfp(a, b, simde_mm_xor_ps(c, sign)), sign);
++}
++}  // namespace rex::ppc
++
++//=============================================================================
+ // Vector Dot Products (vmsum3fp128 / vmsum4fp128)
+ //=============================================================================
+ 
+--- a/src/codegen/builders/vector.cpp
++++ b/src/codegen/builders/vector.cpp
+@@ -91,23 +91,22 @@
+ }
+ 
+ bool build_vmaddfp(BuilderContext& ctx) {
++  // Fused (one rounding) like the hardware; see rex::ppc::simde_mm_vmaddfp in the generated PCH.
+   ctx.emit_set_flush_mode(true);
+   ctx.println(
+-      "\tsimde_mm_store_ps({}.f32, simde_mm_add_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), "
+-      "simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)));",
++      "\tsimde_mm_store_ps({}.f32, rex::ppc::simde_mm_vmaddfp(simde_mm_load_ps({}.f32), "
++      "simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)));",
+       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
+       ctx.v(ctx.insn.operands[3]));
+   return true;
+ }
+ 
+ bool build_vnmsubfp(BuilderContext& ctx) {
+-  // vnmsubfp: vD = -(vA * vB - vC) - negation done by XOR with sign bit (0x80000000)
++  // vnmsubfp: vD = -(vA * vB - vC), fused like vmaddfp, negated by flipping the sign bit
+   ctx.emit_set_flush_mode(true);
+   ctx.println(
+-      "\tsimde_mm_store_ps({}.f32, "
+-      "simde_mm_xor_ps(simde_mm_sub_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), "
+-      "simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)), "
+-      "simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));",
++      "\tsimde_mm_store_ps({}.f32, rex::ppc::simde_mm_vnmsubfp(simde_mm_load_ps({}.f32), "
++      "simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)));",
+       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
+       ctx.v(ctx.insn.operands[3]));
+   return true;

@@ -1,0 +1,47 @@
+THIRD-PARTY LICENSES
+====================
+
+The licenses of the other components this project is built with (ReXGlue SDK 0.10.0, whose license is in
+ReXGlue-LICENSE.txt, and the libraries it bundles) are listed with their own releases. This file holds the notice for the
+code adapted from Unowa001/crackdown-recomp, which has to travel with every distribution.
+
+========================================================================
+Unowa001/crackdown-recomp, vector multiply-add and dot products, XMA context guards, audio event reset
+========================================================================
+
+Source: https://github.com/Unowa001/crackdown-recomp (patches/sdk/0003 and 0006, commit 7a152d0;
+crackdown/src/hooks_events.cpp, commit c23c6ff)
+License: BSD 3-Clause
+
+patches/rexglue-sdk/0062 and 0065 are adapted from 0006 and 0066 from 0003, through the Crackdown PC port's
+patches/rexglue-sdk/0095 and 0096, and the ResetEvent hook in src/sound_stream_ring.cpp from the one in hooks_events.cpp.
+Each patch starts with the same attribution.
+
+BSD 3-Clause License
+
+Copyright (c) 2026, Jerrod (Unowa001)
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

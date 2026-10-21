@@ -1,0 +1,37 @@
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+index 47f0f4a..814357a 100644
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
+ 
+ #include <rex/assert.h>
+@@ -945,12 +946,18 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+   xenos::CopySampleSelect sample_select = SanitizeCopySampleSelect(
+       rb_copy_control.copy_sample_select, rb_surface_info.msaa_samples, is_depth);
+   if (rb_copy_control.copy_sample_select != sample_select) {
+-    REXGPU_WARN(
+-        "Incorrect resolve sample selected for {}-sample {}: {}, treating like "
+-        "{}",
+-        1 << uint32_t(rb_surface_info.msaa_samples), is_depth ? "depth" : "color",
+-        static_cast<uint32_t>(rb_copy_control.copy_sample_select),
+-        static_cast<uint32_t>(sample_select));
++    static std::atomic<uint64_t> logged_sample_selects;
++    const uint64_t log_bit =
++        uint64_t(1) << ((uint32_t(rb_surface_info.msaa_samples) & 3) << 4 |
++                        uint32_t(is_depth) << 3 | (uint32_t(rb_copy_control.copy_sample_select) & 7));
++    if (!(logged_sample_selects.fetch_or(log_bit) & log_bit)) {
++      REXGPU_WARN(
++          "Incorrect resolve sample selected for {}-sample {}: {}, treating like "
++          "{} (logged once per combination)",
++          1 << uint32_t(rb_surface_info.msaa_samples), is_depth ? "depth" : "color",
++          static_cast<uint32_t>(rb_copy_control.copy_sample_select),
++          static_cast<uint32_t>(sample_select));
++    }
+   }
+   info_out.copy_dest_coordinate_info.copy_sample_select = sample_select;
+   // Get the format to pass to the shader in a unified way - for depth (for

@@ -1,0 +1,120 @@
+diff --git a/include/rex/graphics/pipeline/texture/invalid_fetch_log.h b/include/rex/graphics/pipeline/texture/invalid_fetch_log.h
+new file mode 100644
+index 0000000..529a862
+--- /dev/null
++++ b/include/rex/graphics/pipeline/texture/invalid_fetch_log.h
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++
++namespace rex::graphics {
++
++enum class InvalidFetchLogDecision { kLog, kLogOverflow, kSuppress };
++
++// Not synchronized; the caller serializes access.
++class InvalidFetchLogTracker {
++ public:
++  using Signature = std::array<uint32_t, 6>;
++  static constexpr size_t kMaxSignatures = 16;
++
++  InvalidFetchLogDecision Check(const Signature& signature) {
++    for (size_t i = 0; i < count_; ++i) {
++      if (signatures_[i] == signature) {
++        return InvalidFetchLogDecision::kSuppress;
++      }
++    }
++    if (count_ < kMaxSignatures) {
++      signatures_[count_++] = signature;
++      return InvalidFetchLogDecision::kLog;
++    }
++    if (overflow_reported_) {
++      return InvalidFetchLogDecision::kSuppress;
++    }
++    overflow_reported_ = true;
++    return InvalidFetchLogDecision::kLogOverflow;
++  }
++
++  size_t count() const { return count_; }
++
++ private:
++  std::array<Signature, kMaxSignatures> signatures_{};
++  size_t count_ = 0;
++  bool overflow_reported_ = false;
++};
++
++}  // namespace rex::graphics
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 917ac7b..331a51d 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstdint>
++#include <mutex>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -20,6 +21,7 @@
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/texture/cache.h>
+ #include <rex/graphics/pipeline/texture/info.h>
++#include <rex/graphics/pipeline/texture/invalid_fetch_log.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/xenos.h>
+@@ -133,6 +135,18 @@ REXCVAR_DEFINE_BOOL(pre_mask_resolve_l2_block, true, "GPU",
+ 
+ namespace rex::graphics {
+ 
++namespace {
++
++InvalidFetchLogDecision CheckInvalidTextureFetchLog(const xenos::xe_gpu_texture_fetch_t& fetch) {
++  static std::mutex mutex;
++  static InvalidFetchLogTracker tracker;
++  std::lock_guard<std::mutex> lock(mutex);
++  return tracker.Check(
++      {fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5});
++}
++
++}  // namespace
++
+ const TextureCache::LoadShaderInfo TextureCache::load_shader_info_[kLoadShaderCount] = {
+     // k8bpb
+     {3, 4, 1, 4},
+@@ -1014,12 +1028,26 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
+       if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
+         break;
+       }
+-      REXGPU_WARN(
+-          "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) "
+-          "has \"invalid\" type! This is incorrect behavior, but you can try "
+-          "bypassing this by launching Xenia with "
+-          "--gpu_allow_invalid_fetch_constants=true.",
+-          fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5);
++      switch (CheckInvalidTextureFetchLog(fetch)) {
++        case InvalidFetchLogDecision::kLog:
++          REXGPU_WARN(
++              "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) "
++              "has \"invalid\" type! This is incorrect behavior, but you can try "
++              "bypassing this by launching Xenia with "
++              "--gpu_allow_invalid_fetch_constants=true. (logged once per value)",
++              fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4,
++              fetch.dword_5);
++          break;
++        case InvalidFetchLogDecision::kLogOverflow:
++          REXGPU_WARN(
++              "Additional distinct invalid texture fetch constants are being suppressed "
++              "(first: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X})",
++              fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4,
++              fetch.dword_5);
++          break;
++        case InvalidFetchLogDecision::kSuppress:
++          break;
++      }
+       return;
+     default:
+       REXGPU_WARN(

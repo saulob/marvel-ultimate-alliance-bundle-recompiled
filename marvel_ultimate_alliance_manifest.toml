@@ -1,0 +1,11 @@
+[project]
+name = "marvel_ultimate_alliance"
+sdk_version = "0.10.0"
+game_root = "game/extracted"
+
+[entrypoint]
+file_path = "game/extracted/default.xex"
+out_directory_path = "generated/default"
+includes = ["config/overrides.toml", "config/discovered-functions.toml"]
+setjmp_address = 0x8285E7F0
+longjmp_address = 0x8285E6D0

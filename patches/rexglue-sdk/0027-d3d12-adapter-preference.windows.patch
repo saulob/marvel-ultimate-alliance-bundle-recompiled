@@ -1,0 +1,70 @@
+diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
+index bf8252b..7f30a54 100644
+--- a/src/ui/d3d12/d3d12_provider.cpp
++++ b/src/ui/d3d12/d3d12_provider.cpp
+@@ -18,8 +18,11 @@
+ #include <rex/ui/d3d12/d3d12_presenter.h>
+ #include <rex/ui/d3d12/d3d12_provider.h>
+ 
++#include <dxgi1_6.h>
+ #include <malloc.h>
+ 
++#pragma comment(lib, "advapi32.lib")
++
+ REXCVAR_DEFINE_BOOL(d3d12_debug, false, "UI/D3D12", "Enable Direct3D 12 and DXGI debug layer")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+@@ -39,6 +42,28 @@ REXCVAR_DEFINE_INT32(d3d12_queue_priority, 1, "UI/D3D12",
+ 
+ namespace rex::ui::d3d12 {
+ 
++namespace {
++
++// The player's choice for this program in the Windows graphics settings: 1 power saving, 2 high
++// performance, 0 if none.
++uint32_t GetUserGpuPreference() {
++  wchar_t path[1024];
++  DWORD path_length = GetModuleFileNameW(nullptr, path, DWORD(std::size(path)));
++  if (!path_length || path_length >= std::size(path)) {
++    return 0;
++  }
++  wchar_t value[256];
++  DWORD value_size = sizeof(value);
++  if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", path,
++                   RRF_RT_REG_SZ, nullptr, value, &value_size) != ERROR_SUCCESS) {
++    return 0;
++  }
++  const wchar_t* preference = wcsstr(value, L"GpuPreference=");
++  return preference ? uint32_t(wcstoul(preference + 14, nullptr, 10)) : 0;
++}
++
++}  // namespace
++
+ bool D3D12Provider::IsD3D12APIAvailable() {
+   HMODULE library_d3d12 = LoadLibraryW(L"D3D12.dll");
+   if (!library_d3d12) {
+@@ -250,10 +275,22 @@ bool D3D12Provider::Initialize() {
+     return false;
+   }
+ 
+-  // Choose the adapter.
++  // Choose the adapter: by default the highest-performance one, unless the player asked Windows for
++  // power saving.
++  Microsoft::WRL::ComPtr<IDXGIFactory6> dxgi_factory_6;
++  bool enum_by_preference = REXCVAR_GET(d3d12_adapter) == -1 &&
++                            SUCCEEDED(dxgi_factory->QueryInterface(IID_PPV_ARGS(&dxgi_factory_6)));
++  DXGI_GPU_PREFERENCE gpu_preference = GetUserGpuPreference() == 1
++                                           ? DXGI_GPU_PREFERENCE_MINIMUM_POWER
++                                           : DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE;
++  auto enum_adapter = [&](uint32_t index, IDXGIAdapter1** adapter_out) {
++    return enum_by_preference ? dxgi_factory_6->EnumAdapterByGpuPreference(
++                                    index, gpu_preference, IID_PPV_ARGS(adapter_out))
++                              : dxgi_factory->EnumAdapters1(index, adapter_out);
++  };
+   uint32_t adapter_index = 0;
+   IDXGIAdapter1* adapter = nullptr;
+-  while (dxgi_factory->EnumAdapters1(adapter_index, &adapter) == S_OK) {
++  while (enum_adapter(adapter_index, &adapter) == S_OK) {
+     DXGI_ADAPTER_DESC1 adapter_desc;
+     if (SUCCEEDED(adapter->GetDesc1(&adapter_desc))) {
+       if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device),

@@ -1,0 +1,24 @@
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -212,15 +212,18 @@
+             break;
+         }
+       }
+-      if (!SDL_PutAudioStreamData(stream, data, len)) {
++      const bool submitted = SDL_PutAudioStreamData(stream, data, len);
++      if (!submitted) {
+         REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
+-        driver->frames_unused_.push(buffer);
+-        break;
+       }
+       driver->frames_unused_.push(buffer);
+ 
++      // Return the credit even when SDL rejects the write, or a device error shrinks the queue for good.
+       auto ret = driver->semaphore_->Release(1, nullptr);
+       assert_true(ret);
++      if (!submitted) {
++        break;
++      }
+       additional_amount -= len;
+     }
+   }

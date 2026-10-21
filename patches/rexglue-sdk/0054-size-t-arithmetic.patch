@@ -1,0 +1,61 @@
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 1b3acdb..b9cbe4f 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -1348,7 +1348,7 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+       index_buffer_info.guest_base = vgt_dma_base & ~(index_size_bytes - 1);
+       index_buffer_info.endianness = vgt_dma_size.swap_mode;
+       index_buffer_info.format = vgt_draw_initiator.index_size;
+-      index_buffer_info.length = vgt_dma_size.num_words * index_size_bytes;
++      index_buffer_info.length = size_t(vgt_dma_size.num_words) * index_size_bytes;
+       index_buffer_info.count = vgt_draw_initiator.num_indices;
+     } break;
+     case xenos::SourceSelect::kImmediate: {
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 5e53d78..3314bc9 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -2166,15 +2166,17 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+     } else {
+       if (protect_system_page_first != UINT32_MAX) {
+         rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
+-                             (i - protect_system_page_first) * system_page_size_, protect_access);
++                             size_t(i - protect_system_page_first) * system_page_size_,
++                             protect_access);
+         protect_system_page_first = UINT32_MAX;
+       }
+     }
+   }
+   if (protect_system_page_first != UINT32_MAX) {
+-    rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
+-                         (system_page_last + 1 - protect_system_page_first) * system_page_size_,
+-                         protect_access);
++    rex::memory::Protect(
++        protect_base + protect_system_page_first * system_page_size_,
++        size_t(system_page_last + 1 - protect_system_page_first) * system_page_size_,
++        protect_access);
+   }
+ }
+ 
+@@ -2307,16 +2309,17 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+       } else {
+         if (unprotect_system_page_first != UINT32_MAX) {
+           rex::memory::Protect(protect_base + unprotect_system_page_first * system_page_size_,
+-                               (i - unprotect_system_page_first) * system_page_size_,
++                               size_t(i - unprotect_system_page_first) * system_page_size_,
+                                rex::memory::PageAccess::kReadWrite);
+           unprotect_system_page_first = UINT32_MAX;
+         }
+       }
+     }
+     if (unprotect_system_page_first != UINT32_MAX) {
+-      rex::memory::Protect(protect_base + unprotect_system_page_first * system_page_size_,
+-                           (system_page_last + 1 - unprotect_system_page_first) * system_page_size_,
+-                           rex::memory::PageAccess::kReadWrite);
++      rex::memory::Protect(
++          protect_base + unprotect_system_page_first * system_page_size_,
++          size_t(system_page_last + 1 - unprotect_system_page_first) * system_page_size_,
++          rex::memory::PageAccess::kReadWrite);
+     }
+   }
+ 

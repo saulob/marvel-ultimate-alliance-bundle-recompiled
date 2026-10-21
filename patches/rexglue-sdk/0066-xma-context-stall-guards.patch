@@ -1,0 +1,67 @@
+Adapted from patches/sdk/0003-audio-XMA-context-guards-from-Xenia-for-stalls-on-hi.patch in Unowa001/crackdown-recomp,
+through crackdown-xbox360-recompiled patches/rexglue-sdk/0096.
+Copyright (c) 2026, Jerrod (Unowa001). BSD 3-Clause License, see packaging/licenses/THIRD-PARTY-LICENSES.txt.
+
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -121,6 +121,9 @@ bool XmaContext::Work() {
+     }
+     Consume(&output_rb, &data);
+     data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
++    if (output_rb.empty()) {
++      data.output_buffer_valid = 0;
++    }
+     StoreContextMerged(data, initial_data, context_ptr);
+     return true;
+   }
+@@ -137,17 +140,46 @@ bool XmaContext::Work() {
+   }
+ 
+   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
++    const uint32_t pre_decode_offset = data.input_buffer_read_offset;
++    const uint8_t pre_remaining_subframes = current_frame_remaining_subframes_;
++
+     Decode(&data);
+     Consume(&output_rb, &data);
+ 
+-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
++    // Don't abandon a partially consumed frame: Consume() hands over at most
++    // subframe_decode_count blocks per pass, so the pass that exhausts the
++    // input usually leaves the rest of the frame undelivered. is_enabled_ is
++    // already cleared and only XMAEnableContext sets it again, so nothing
++    // else would ever deliver it. Keep draining until the frame is out.
++    if ((!data.IsAnyInputBufferValid() || data.error_status == 4) &&
++        current_frame_remaining_subframes_ == 0) {
++      break;
++    }
++
++    // No progress: Decode didn't move the read offset and produced no frame.
++    // Only meaningful when no subframes were pending on entry (with pending
++    // subframes Decode skips on purpose while Consume drains).
++    if (pre_remaining_subframes == 0 && data.input_buffer_read_offset == pre_decode_offset &&
++        current_frame_remaining_subframes_ == 0) {
+       break;
+     }
+   }
+ 
+-  data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
++  if (initial_data.IsAnyInputBufferValid()) {
++    data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
++  } else if (data.output_buffer_write_offset != data.output_buffer_read_offset) {
++    // Starved on input: some titles use write_offset == read_offset as their
++    // stall detector, so make them equal.
++    data.output_buffer_write_offset = data.output_buffer_read_offset;
++    data.output_buffer_valid = 0;
++  }
+ 
+-  if (output_rb.empty()) {
++  // Invalidate output only when the ring is full (no free blocks left), not
++  // merely when read == write. An *empty* ring also has read == write, and
++  // invalidating it after an input underrun (e.g. a long host hitch) leaves
++  // the context dead: the game only re-validates output after draining a
++  // full buffer.
++  if (remaining_subframe_blocks_in_output_buffer_ == 0 && output_rb.empty()) {
+     data.output_buffer_valid = 0;
+   }
+ 

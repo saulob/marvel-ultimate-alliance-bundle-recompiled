@@ -1,0 +1,176 @@
+ReXGlue development commit 01ac2a3 (rexglue-sdk, after v0.10.0): truncate overwrites in place and release the CRT file object.
+
+diff --git a/src/filesystem/devices/host_path_entry.cpp b/src/filesystem/devices/host_path_entry.cpp
+index d0dce00..6650400 100644
+--- a/src/filesystem/devices/host_path_entry.cpp
++++ b/src/filesystem/devices/host_path_entry.cpp
+@@ -75,11 +75,20 @@ bool HostPathEntry::Truncate() {
+   if (is_read_only() || (attributes_ & kFileAttributeDirectory)) {
+     return false;
+   }
+-  auto file = rex::filesystem::OpenFile(host_path_, "wb");
+-  if (!file) {
+-    return false;
++  auto file_handle = rex::filesystem::FileHandle::OpenExisting(
++      host_path_, FileAccess::kGenericWrite,
++      static_cast<HostPathDevice*>(device_)->allow_share_delete());
++  if (file_handle) {
++    if (!file_handle->SetLength(0)) {
++      return false;
++    }
++  } else {
++    auto file = rex::filesystem::OpenFile(host_path_, "wb");
++    if (!file) {
++      return false;
++    }
++    fclose(file);
+   }
+-  fclose(file);
+   size_ = 0;
+   allocation_size_ = 0;
+   return true;
+@@ -112,11 +121,16 @@ bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
+   if (entry->attributes() & kFileAttributeDirectory) {
+     // Delete entire directory and contents.
+     auto removed = std::filesystem::remove_all(full_path, ec);
+-    return removed >= 1 && removed != static_cast<std::uintmax_t>(-1);
++    if (removed < 1 || removed == static_cast<std::uintmax_t>(-1)) {
++      return false;
++    }
+   } else {
+     // Delete file.
+-    return !std::filesystem::is_directory(full_path) && std::filesystem::remove(full_path, ec);
++    if (std::filesystem::is_directory(full_path, ec) || !std::filesystem::remove(full_path, ec)) {
++      return false;
++    }
+   }
++  return std::filesystem::status(full_path, ec).type() == std::filesystem::file_type::not_found;
+ }
+ 
+ X_STATUS HostPathEntry::RenameEntryInternal(const std::vector<std::string_view>& path_parts) {
+diff --git a/src/filesystem/virtual_file_system.cpp b/src/filesystem/virtual_file_system.cpp
+index a1b4dad..682b23d 100644
+--- a/src/filesystem/virtual_file_system.cpp
++++ b/src/filesystem/virtual_file_system.cpp
+@@ -292,11 +292,12 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
+         assert_always();
+         return X_STATUS_ACCESS_DENIED;
+       case FileDisposition::kSuperscede:
+-        // Replace (by delete + recreate).
+-        if (!entry->Delete()) {
+-          return X_STATUS_ACCESS_DENIED;
++        if (!entry->Truncate()) {
++          if (!entry->Delete()) {
++            return X_STATUS_ACCESS_DENIED;
++          }
++          entry = nullptr;
+         }
+-        entry = nullptr;
+         *out_action = FileAction::kSuperseded;
+         break;
+       case FileDisposition::kOpen:
+@@ -306,12 +307,11 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
+         break;
+       case FileDisposition::kOverwrite:
+       case FileDisposition::kOverwriteIf:
+-        // Overwrite by delete + recreate, or truncate if delete fails
+-        // (host file may be briefly locked by cloud sync, AV, etc.).
+-        if (entry->Delete()) {
++        if (!entry->Truncate()) {
++          if (!entry->Delete()) {
++            return X_STATUS_ACCESS_DENIED;
++          }
+           entry = nullptr;
+-        } else if (!entry->Truncate()) {
+-          return X_STATUS_ACCESS_DENIED;
+         }
+         *out_action = FileAction::kOverwritten;
+         break;
+diff --git a/src/kernel/crt/file.cpp b/src/kernel/crt/file.cpp
+index e74a44e..1fe75ab 100644
+--- a/src/kernel/crt/file.cpp
++++ b/src/kernel/crt/file.cpp
+@@ -78,8 +78,9 @@ u32 CreateFileA_entry(mapped_string lpFileName, u32 dwDesiredAccess, u32 dwShare
+     return kInvalidHandleValue;
+   }
+ 
+-  auto* xfile = new rex::system::XFile(ks, vfs_file, true);
+-  auto handle = xfile->handle();
++  auto file =
++      rex::system::object_ref<rex::system::XFile>(new rex::system::XFile(ks, vfs_file, true));
++  auto handle = file->handle();
+   REXKRNL_NOISY_DEBUG("rexcrt_CreateFileA: '{}' -> handle={:#x}", path, handle);
+   return handle;
+ }
+@@ -285,7 +286,8 @@ u32 FindFirstFileA_entry(mapped_string lpFileName, mapped_void lpFindFileData) {
+     return kInvalidHandleValue;
+   }
+ 
+-  auto* xfile = new rex::system::XFile(ks, vfs_file, true);
++  auto xfile =
++      rex::system::object_ref<rex::system::XFile>(new rex::system::XFile(ks, vfs_file, true));
+   xfile->SetFindPattern(pattern);
+ 
+   auto* entry = xfile->FindNext();
+diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
+index 1fb1e16..27f851e 100644
+--- a/src/kernel/xam/xam_content.cpp
++++ b/src/kernel/xam/xam_content.cpp
+@@ -160,16 +160,12 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+         // Close any existing mount under this root name first.
+         // Games may reuse the same root without explicitly closing.
+         content_manager->CloseContent(root_name);
+-        if (content_manager->ContentExists(xuid, content_data)) {
+-          content_manager->DeleteContent(xuid, content_data);
+-        }
+-        // Check filesystem state after deletion attempt to decide
+-        // whether to create fresh or open existing.
+-        if (content_manager->ContentExists(xuid, content_data)) {
+-          disposition = kDispositionState::Open;
+-        } else {
+-          disposition = kDispositionState::Create;
++        if (content_manager->ContentExists(xuid, content_data) &&
++            content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
++          result = X_ERROR_ACCESS_DENIED;
++          break;
+         }
++        disposition = kDispositionState::Create;
+         break;
+       case 3:  // OPEN_EXISTING
+                // Open only if exists.
+@@ -193,9 +189,8 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+           result = X_ERROR_PATH_NOT_FOUND;
+         } else {
+           content_manager->CloseContent(root_name);
+-          content_manager->DeleteContent(xuid, content_data);
+-          if (content_manager->ContentExists(xuid, content_data)) {
+-            disposition = kDispositionState::Open;
++          if (content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
++            result = X_ERROR_ACCESS_DENIED;
+           } else {
+             disposition = kDispositionState::Create;
+           }
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..d6efd1c 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -375,7 +375,8 @@ X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_D
+   auto package_path = ResolvePackagePath(xuid, data);
+   std::error_code ec;
+   auto dir_removed = std::filesystem::remove_all(package_path, ec);
+-  if (ec) {
++  if (ec ||
++      std::filesystem::status(package_path, ec).type() != std::filesystem::file_type::not_found) {
+     return X_ERROR_ACCESS_DENIED;
+   }
+ 
+@@ -427,7 +428,8 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+ 
+   std::error_code ec;
+   auto dir_removed = std::filesystem::remove_all(package_path, ec);
+-  if (ec) {
++  if (ec ||
++      std::filesystem::status(package_path, ec).type() != std::filesystem::file_type::not_found) {
+     return X_ERROR_ACCESS_DENIED;
+   }
+ 

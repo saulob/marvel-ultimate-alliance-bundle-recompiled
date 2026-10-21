@@ -1,0 +1,24 @@
+diff --git a/src/kernel/xam/xam_enum.cpp b/src/kernel/xam/xam_enum.cpp
+index 9dcab94..fdce845 100644
+--- a/src/kernel/xam/xam_enum.cpp
++++ b/src/kernel/xam/xam_enum.cpp
+@@ -35,6 +35,10 @@ using namespace rex::system::xam;
+ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, mapped_void buffer_ptr,
+                         uint32_t buffer_size, uint32_t* items_returned, uint32_t overlapped_ptr) {
+   assert_true(flags == 0);
++  // Titles may ignore the error code and still read the count.
++  if (items_returned) {
++    *items_returned = 0;
++  }
+ 
+   auto e = REX_KERNEL_OBJECTS()->LookupObject<XEnumerator>(handle);
+   if (!e) {
+@@ -73,7 +77,7 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, mapped_void buffer_ptr,
+ 
+ u32 XamEnumerate_entry(u32 handle, u32 flags, mapped_void buffer, u32 buffer_length,
+                        mapped_u32 items_returned, ppc_ptr_t<XAM_OVERLAPPED> overlapped) {
+-  uint32_t dummy;
++  uint32_t dummy = 0;
+   auto result =
+       xeXamEnumerate(handle, flags, buffer, buffer_length,
+                      !overlapped.guest_address() ? &dummy : nullptr, overlapped.guest_address());

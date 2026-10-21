@@ -1,0 +1,23 @@
+# ReXGlue runtime settings, read from <exe dir>/marvel_ultimate_alliance.toml.
+# The launcher writes the player's choices to <user data>/settings.toml, which is loaded after this file.
+gpu_plugin = "xenos"
+
+# Keyboard emulates the Xbox 360 pad next to a connected controller, with ReXGlue's default bindings.
+mnk_mode = true
+# Empty skips the optional gamecontrollerdb.txt load; SDL's built-in mappings still apply.
+hid_mappings_file = ""
+
+# ReXGlue's compatibility option: use texture fetch constants of invalid type instead of rejecting the fetch.
+gpu_allow_invalid_fetch_constants = true
+
+# EDRAM in pixel shaders (rasterizer-ordered views) instead of host render targets, whose EDRAM dumps lose the movie
+# render target. ReXGlue falls back to host render targets on GPUs without rasterizer-ordered views.
+render_target_path_d3d12 = "rov"
+# A frame may wait this long in total for pipelines prepared in the background before drawing without them (patch 0048).
+async_shader_wait_ms = 16
+
+# Default game window: 853x480 logical, centered on the primary display. Logical pixels are scaled by the display scale.
+fullscreen = false
+monitor = 1
+window_width = 853
+window_height = 480

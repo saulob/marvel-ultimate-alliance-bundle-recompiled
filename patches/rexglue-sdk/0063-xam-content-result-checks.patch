@@ -1,0 +1,49 @@
+ReXGlue development commit ee20900 (rexglue-sdk, after v0.10.0): compare content results against X_ERROR_SUCCESS.
+
+diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
+index 27f851e..86c4353 100644
+--- a/src/kernel/xam/xam_content.cpp
++++ b/src/kernel/xam/xam_content.cpp
+@@ -204,14 +204,14 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+     uint32_t content_license = 0;
+     if (disposition == kDispositionState::Create) {
+       result = content_manager->CreateContent(root_name, xuid, content_data);
+-      if (XSUCCEEDED(result)) {
++      if (result == X_ERROR_SUCCESS) {
+         content_manager->WriteContentHeaderFile(xuid, content_data);
+       }
+     } else if (disposition == kDispositionState::Open) {
+       result = content_manager->OpenContent(root_name, xuid, content_data, content_license);
+     }
+ 
+-    if (license_mask_ptr && XSUCCEEDED(result)) {
++    if (license_mask_ptr && result == X_ERROR_SUCCESS) {
+       *license_mask_ptr = content_license;
+     }
+ 
+@@ -335,7 +335,7 @@ u32 XamContentGetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
+ 
+   *buffer_size_ptr = uint32_t(buffer.size());
+ 
+-  if (XSUCCEEDED(result)) {
++  if (result == X_ERROR_SUCCESS) {
+     // Write data, if we were given a pointer.
+     // This may have just been a size query.
+     if (buffer_ptr) {
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index d6efd1c..d0c7bfd 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -155,9 +155,9 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
+       continue;
+     }
+ 
+-    XCONTENT_AGGREGATE_DATA content_data;
+-    if (XSUCCEEDED(ReadContentHeaderFile(rex::path_to_utf8(file_info.name), xuid, title_id,
+-                                         content_type, content_data))) {
++    XCONTENT_AGGREGATE_DATA content_data{};
++    if (ReadContentHeaderFile(rex::path_to_utf8(file_info.name), xuid, title_id, content_type,
++                              content_data) == X_ERROR_SUCCESS) {
+       result.emplace_back(std::move(content_data));
+     } else {
+       content_data.device_id = device_id;

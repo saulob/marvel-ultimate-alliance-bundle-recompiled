@@ -1,0 +1,71 @@
+diff --git a/include/rex/audio/conversion.h b/include/rex/audio/conversion.h
+--- a/include/rex/audio/conversion.h
++++ b/include/rex/audio/conversion.h
+@@ -22,6 +22,11 @@
+ namespace rex::audio::conversion {
+ 
+ #if REX_ARCH_AMD64
++inline __m128 WeightedChannel(__m128 samples, float weight) {
++  // Excluded channels must not propagate NaN through multiplication by zero.
++  return weight == 0.0f ? _mm_setzero_ps() : _mm_mul_ps(samples, _mm_set1_ps(weight));
++}
++
+ inline void sequential_6_BE_to_interleaved_6_LE(float* output, const float* input,
+                                                 size_t ch_sample_count, const SurroundMix& mix,
+                                                 float gain) {
+@@ -63,7 +68,8 @@
+   const __m128 hi = _mm_set1_ps(1.0f);
+   const size_t count = ch_sample_count * 6;
+   for (size_t i = 0, phase = 0; i < count; i += 4, phase = (phase + 1) % 3) {
+-    const __m128 v = _mm_mul_ps(_mm_loadu_ps(&output[i]), w[phase]);
++    const __m128 included = _mm_cmpneq_ps(w[phase], _mm_setzero_ps());
++    const __m128 v = _mm_mul_ps(_mm_and_ps(_mm_loadu_ps(&output[i]), included), w[phase]);
+     _mm_storeu_ps(&output[i], _mm_min_ps(_mm_max_ps(v, lo), hi));
+   }
+ }
+@@ -75,9 +81,6 @@
+ 
+   const __m128i byte_swap_shuffle =
+       _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+-  const __m128 center = _mm_set1_ps(fold.center);
+-  const __m128 lfe = _mm_set1_ps(fold.lfe);
+-  const __m128 surround = _mm_set1_ps(fold.surround);
+   const __m128 scale = _mm_set1_ps(fold.scale * gain);
+   const __m128 lo = _mm_set1_ps(-1.0f);
+   const __m128 hi = _mm_set1_ps(1.0f);
+@@ -99,9 +102,9 @@
+     br = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_castps_si128(br), byte_swap_shuffle));
+ 
+     // Center and LFE land on both sides.
+-    const __m128 mid = _mm_add_ps(_mm_mul_ps(fc, center), _mm_mul_ps(lf, lfe));
+-    __m128 left = _mm_mul_ps(_mm_add_ps(_mm_add_ps(fl, mid), _mm_mul_ps(bl, surround)), scale);
+-    __m128 right = _mm_mul_ps(_mm_add_ps(_mm_add_ps(fr, mid), _mm_mul_ps(br, surround)), scale);
++    const __m128 mid = _mm_add_ps(WeightedChannel(fc, fold.center), WeightedChannel(lf, fold.lfe));
++    __m128 left = _mm_mul_ps(_mm_add_ps(_mm_add_ps(fl, mid), WeightedChannel(bl, fold.surround)), scale);
++    __m128 right = _mm_mul_ps(_mm_add_ps(_mm_add_ps(fr, mid), WeightedChannel(br, fold.surround)), scale);
+     left = _mm_min_ps(_mm_max_ps(left, lo), hi);
+     right = _mm_min_ps(_mm_max_ps(right, lo), hi);
+ 
+@@ -117,7 +120,7 @@
+       gain, gain, mix.center * gain, mix.lfe * gain, mix.surround * gain, mix.surround * gain};
+   for (size_t sample = 0; sample < ch_sample_count; sample++) {
+     for (size_t channel = 0; channel < 6; channel++) {
+-      const float v = rex::byte_swap(input[channel * ch_sample_count + sample]) * w[channel];
++      const float v = w[channel] == 0.0f ? 0.0f : rex::byte_swap(input[channel * ch_sample_count + sample]) * w[channel];
+       output[sample * 6 + channel] = std::clamp(v, -1.0f, 1.0f);
+     }
+   }
+@@ -137,9 +140,10 @@
+     const float bl = rex::byte_swap(input[4 * ch_sample_count + sample]);
+     const float br = rex::byte_swap(input[5 * ch_sample_count + sample]);
+     // Center and LFE land on both sides.
+-    const float mid = fc * fold.center + lf * fold.lfe;
+-    output[sample * 2] = std::clamp((fl + mid + bl * fold.surround) * scale, -1.0f, 1.0f);
+-    output[sample * 2 + 1] = std::clamp((fr + mid + br * fold.surround) * scale, -1.0f, 1.0f);
++    const float mid = (fold.center == 0.0f ? 0.0f : fc * fold.center) +
++                      (fold.lfe == 0.0f ? 0.0f : lf * fold.lfe);
++    output[sample * 2] = std::clamp((fl + mid + (fold.surround == 0.0f ? 0.0f : bl * fold.surround)) * scale, -1.0f, 1.0f);
++    output[sample * 2 + 1] = std::clamp((fr + mid + (fold.surround == 0.0f ? 0.0f : br * fold.surround)) * scale, -1.0f, 1.0f);
+   }
+ }
+ #endif

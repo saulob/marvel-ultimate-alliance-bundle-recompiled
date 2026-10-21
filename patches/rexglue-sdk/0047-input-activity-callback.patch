@@ -1,0 +1,96 @@
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..340c463 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <functional>
+ #include <memory>
+ #include <vector>
+ 
+@@ -67,6 +68,11 @@ class InputSystem : public system::IInputSystem {
+   std::vector<InputDriver*> device_owners_;
+ };
+ 
++/// Called on the input polling thread when a device's state changes. Passive:
++/// the state returned to the guest is not altered.
++void SetInputActivityCallback(
++    std::function<void(DeviceId device, const X_INPUT_GAMEPAD& gamepad)> callback);
++
+ /// Create a default InputSystem with SDL + NOP drivers.
+ /// In tool mode, only the NOP driver is added.
+ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode);
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..e46f4b3 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -11,6 +11,9 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstring>
++#include <mutex>
++#include <unordered_map>
+ 
+ #include <rex/dbg.h>
+ #include <rex/input/device_assignment.h>
+@@ -37,6 +40,27 @@ namespace {
+ // flag and never reads this value.
+ constexpr uint32_t kSyntheticOrdinal = UINT32_MAX;
+ 
++std::mutex g_input_activity_mutex;
++std::function<void(DeviceId, const X_INPUT_GAMEPAD&)> g_input_activity_callback;
++std::unordered_map<uint64_t, X_INPUT_GAMEPAD> g_last_device_gamepad;
++
++void NotifyInputActivity(DeviceId id, const X_INPUT_GAMEPAD& gamepad) {
++  std::lock_guard lock(g_input_activity_mutex);
++  auto [it, inserted] = g_last_device_gamepad.try_emplace(static_cast<uint64_t>(id), gamepad);
++  if (!inserted && std::memcmp(&it->second, &gamepad, sizeof(gamepad)) == 0) {
++    return;
++  }
++  it->second = gamepad;
++  if (g_input_activity_callback) {
++    g_input_activity_callback(id, gamepad);
++  }
++}
++
++void ForgetInputActivity(DeviceId id) {
++  std::lock_guard lock(g_input_activity_mutex);
++  g_last_device_gamepad.erase(static_cast<uint64_t>(id));
++}
++
+ }  // namespace
+ 
+ InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
+@@ -71,6 +95,13 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+   }
+ }
+ 
++void SetInputActivityCallback(
++    std::function<void(DeviceId, const X_INPUT_GAMEPAD&)> callback) {
++  std::lock_guard lock(g_input_activity_mutex);
++  g_input_activity_callback = std::move(callback);
++  g_last_device_gamepad.clear();
++}
++
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+@@ -141,6 +172,7 @@ void InputSystem::RefreshDevices() {
+     if (std::none_of(seen.begin(), seen.end(),
+                      [&](const DeviceInfo& d) { return d.id == old.id; })) {
+       active_devices_.Forget(old.id);
++      ForgetInputActivity(old.id);
+       changed = true;
+     }
+   }
+@@ -233,6 +265,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+     if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
+       continue;
+     }
++    NotifyInputActivity(id, state.gamepad);
+     active_devices_.Observe(user_index, id, state.gamepad);
+     if (!any) {
+       merged = state;

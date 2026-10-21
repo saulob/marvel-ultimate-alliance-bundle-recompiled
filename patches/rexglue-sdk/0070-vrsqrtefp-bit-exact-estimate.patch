@@ -1,0 +1,109 @@
+diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
+--- a/src/codegen/builders/vector.cpp
++++ b/src/codegen/builders/vector.cpp
+@@ -133,10 +133,10 @@
+ }
+ 
+ bool build_vrsqrtefp(BuilderContext& ctx) {
+-  // TODO: see if we can use rsqrt safely
++  // Titles refine the estimate with one Newton-Raphson step and rely on it staying below the
++  // true value; an exact 1/sqrt can round a normalized dot product above 1.0.
+   ctx.emit_set_flush_mode(true);
+-  ctx.emit_vec_fp_unary_expr(
+-      "simde_mm_div_ps(simde_mm_set1_ps(1), simde_mm_sqrt_ps(simde_mm_load_ps({vA}.f32)))");
++  ctx.emit_vec_fp_unary_expr("rex::ppc::simde_mm_vrsqrtefp(simde_mm_load_ps({vA}.f32))");
+   return true;
+ }
+ 
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -46,6 +46,88 @@
+ #include <unordered_map>
+ 
+ //=============================================================================
++// Vector Reciprocal Square Root Estimate (vrsqrtefp / vrsqrtefp128)
++//=============================================================================
++// Bit-exact model of the VMX estimate, ported from Xenia Canary
++// (src/xenia/cpu/backend/x64/x64_backend.cc, ComputeNormalVRsqrteTableValue and
++// EmitScalarVRsqrteHelper, BSD license).
++
++namespace rex::ppc {
++namespace detail {
++inline constexpr uint32_t kVRsqrteCoefficients[32] = {
++    0x568B4FD, 0x4F3AF97, 0x48DAAA5, 0x435A618, 0x3E7A1E4, 0x3A29DFE, 0x3659A5C, 0x32E96F8,
++    0x2FC93CA, 0x2D090CE, 0x2A88DFE, 0x2838B57, 0x26188D4, 0x2438673, 0x2268431, 0x20B820B,
++    0x3D27FFA, 0x3807C29, 0x33878AA, 0x2F97572, 0x2C27279, 0x2926FB7, 0x2666D26, 0x23F6AC0,
++    0x21D6881, 0x1FD6665, 0x1E16468, 0x1C76287, 0x1AF60C1, 0x1995F12, 0x1855D79, 0x1735BF4,
++};
++
++// The estimate ignores the low 9 mantissa bits, so the next 14 mantissa bits and the
++// exponent's low bit select one of 32768 results.
++inline uint32_t VRsqrteTableValue(uint32_t input) {
++  const uint32_t mantissa = input & 0x7FFFFF;
++  const uint32_t coefficient =
++      kVRsqrteCoefficients[(((input >> 23) & 1) << 4) | (mantissa >> 19)];
++  uint32_t estimate =
++      ((coefficient << 10) & 0x3FFFC00) - (((mantissa >> 9) & 1023) * (coefficient >> 16));
++  int32_t exponent_adjust = 0;
++  if (!(estimate & 0x02000000)) {
++    const uint32_t normalized = estimate & 0x1FFFFFF;
++    uint32_t leading_zeros = 0;
++    for (uint32_t bit = 0x80000000; !(normalized & bit); bit >>= 1) {
++      ++leading_zeros;
++    }
++    exponent_adjust += 6 - int32_t(leading_zeros);
++    estimate <<= leading_zeros - 6;
++  }
++  if ((estimate & 5) && (estimate & 2)) {
++    estimate += 4;
++  }
++  return (0x3F800000 + uint32_t(exponent_adjust) * 0x00800000) | ((estimate >> 2) & 0x7FFFFF);
++}
++
++inline const uint32_t* VRsqrteTable() {
++  static const struct Table {
++    alignas(64) uint32_t v[1 << 15];
++    Table() {
++      for (uint32_t i = 0; i < (1u << 15); ++i) {
++        v[i] = VRsqrteTableValue(((126 + (i >> 14)) << 23) | ((i & 0x3FFF) << 9));
++      }
++    }
++  } table;
++  return table.v;
++}
++}  // namespace detail
++
++// One lane. Denormal inputs are treated as zero, as with VSCR[NJ] set.
++inline uint32_t vrsqrtefp_bits(uint32_t b, const uint32_t* table) {
++  if (b - 0x00800000u <= 0x7EFFFFFFu) {  // positive normal
++    return table[(b >> 9) & 0x7FFF] - (((b >> 24) - 63) << 23);
++  }
++  const uint32_t exponent = (b >> 23) & 0xFF;
++  if (exponent == 0) {
++    return (b >> 31) ? 0xFF800000 : 0x7F800000;  // +-0 or denormal -> +-inf
++  }
++  if (exponent == 0xFF && (b & 0x7FFFFF)) {
++    return b | 0x00400000;  // NaN, quieted
++  }
++  if (b == 0x7F800000) {
++    return 0;  // +inf -> +0
++  }
++  return 0x7FC00000;  // negative -> default NaN
++}
++
++inline simde__m128 simde_mm_vrsqrtefp(simde__m128 src) {
++  const uint32_t* table = detail::VRsqrteTable();
++  alignas(16) uint32_t lanes[4];
++  simde_mm_store_ps(reinterpret_cast<float*>(lanes), src);
++  for (uint32_t& lane : lanes) {
++    lane = vrsqrtefp_bits(lane, table);
++  }
++  return simde_mm_load_ps(reinterpret_cast<const float*>(lanes));
++}
++}  // namespace rex::ppc
++
++//=============================================================================
+ // Image Info
+ //=============================================================================
+ 

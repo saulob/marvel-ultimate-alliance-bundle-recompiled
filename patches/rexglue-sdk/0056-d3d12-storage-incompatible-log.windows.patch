@@ -1,0 +1,33 @@
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index f8bb865..774dbf2 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -517,6 +517,13 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+                     1000 / rex::chrono::Clock::QueryHostTickFrequency());
+     rex::filesystem::TruncateStdioFile(shader_storage_file_, shader_storage_valid_bytes);
+   } else {
++    rex::filesystem::Seek(shader_storage_file_, 0, SEEK_END);
++    if (rex::filesystem::Tell(shader_storage_file_) > int64_t(sizeof(shader_storage_file_header))) {
++      REXGPU_WARN(
++          "Guest shader storage {} is from another translator version or unreadable, "
++          "discarding it",
++          rex::path_to_utf8(shader_storage_file_path));
++    }
+     rex::filesystem::TruncateStdioFile(shader_storage_file_, 0);
+     shader_storage_file_header.magic = shader_storage_magic;
+     shader_storage_file_header.version_swapped = rex::byte_swap(ShaderStoredHeader::kVersion);
+@@ -701,6 +708,14 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+         uint64_t(sizeof(pipeline_storage_file_header) +
+                  sizeof(PipelineStoredDescription) * pipeline_stored_descriptions.size()));
+   } else {
++    rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_END);
++    if (rex::filesystem::Tell(pipeline_storage_file_) >
++        int64_t(sizeof(pipeline_storage_file_header))) {
++      REXGPU_WARN(
++          "Pipeline storage {} is from another translator or render target path, or has no "
++          "usable record, discarding it",
++          rex::path_to_utf8(pipeline_storage_file_path));
++    }
+     rex::filesystem::TruncateStdioFile(pipeline_storage_file_, 0);
+     pipeline_storage_file_header.magic = pipeline_storage_magic;
+     pipeline_storage_file_header.magic_api = pipeline_storage_magic_api;

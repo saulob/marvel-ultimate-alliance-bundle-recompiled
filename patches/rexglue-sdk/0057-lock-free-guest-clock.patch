@@ -1,0 +1,106 @@
+diff --git a/src/core/clock.cpp b/src/core/clock.cpp
+index ae72b7a..46b3371 100644
+--- a/src/core/clock.cpp
++++ b/src/core/clock.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
++#include <deque>
+ #include <limits>
+ #include <mutex>
+ 
+@@ -35,11 +37,42 @@ uint64_t guest_system_time_base_ = Clock::QueryHostSystemTime();
+ // Computed by RecomputeGuestTickScalar.
+ std::pair<uint64_t, uint64_t> guest_tick_ratio_ = std::make_pair(1, 1);
+ 
+-// Native guest ticks.
+-uint64_t last_guest_tick_count_ = 0;
+-// Last sampled host tick count.
+-uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
+-// Mutex to ensure last_host_tick_count_ and last_guest_tick_count_ are in sync
++namespace {
++
++// The guest clock advances from guest_base at host_base at one ratio; a ratio change starts a new
++// segment at the current guest time, so readers take no lock. Segments are never freed.
++struct ClockSegment {
++  uint64_t host_base;
++  uint64_t guest_base;
++  uint64_t numerator;
++  uint64_t denominator;
++};
++
++std::deque<ClockSegment> clock_segments_ = {ClockSegment{Clock::QueryHostTickCount(), 0, 1, 1}};
++std::atomic<const ClockSegment*> clock_segment_{&clock_segments_.front()};
++// The largest guest time any reader has returned. No reader returns less, so a slower segment holds the clock
++// until it catches up rather than moving it back.
++std::atomic<uint64_t> guest_tick_floor_{0};
++
++uint64_t SegmentGuestTicks(const ClockSegment& segment, uint64_t host_tick_count) {
++  const uint64_t delta = host_tick_count > segment.host_base ? host_tick_count - segment.host_base : 0;
++  const uint64_t whole = delta / segment.denominator;
++  const uint64_t rest = delta % segment.denominator;
++  return segment.guest_base + whole * segment.numerator + rest * segment.numerator / segment.denominator;
++}
++
++uint64_t RaiseGuestTickFloor(uint64_t guest_tick_count) {
++  uint64_t floor = guest_tick_floor_.load(std::memory_order_acquire);
++  while (floor < guest_tick_count &&
++         !guest_tick_floor_.compare_exchange_weak(floor, guest_tick_count, std::memory_order_acq_rel,
++                                                  std::memory_order_acquire)) {
++  }
++  return std::max(floor, guest_tick_count);
++}
++
++}  // namespace
++
++// Guards guest_tick_ratio_ and appending a new clock segment.
+ std::mutex tick_mutex_;
+ 
+ void RecomputeGuestTickScalar() {
+@@ -59,33 +92,27 @@ void RecomputeGuestTickScalar() {
+ 
+   std::lock_guard<std::mutex> lock(tick_mutex_);
+   guest_tick_ratio_ = frac;
++  const uint64_t host_tick_count = Clock::QueryHostTickCount();
++  const ClockSegment* previous = clock_segment_.load(std::memory_order_acquire);
++  const uint64_t guest_tick_count =
++      previous ? std::max(SegmentGuestTicks(*previous, host_tick_count),
++                          guest_tick_floor_.load(std::memory_order_acquire))
++               : 0;
++  clock_segments_.push_back({host_tick_count, guest_tick_count, frac.first, frac.second});
++  clock_segment_.store(&clock_segments_.back(), std::memory_order_release);
+ }
+ 
+ // Update the guest timer for all threads.
+-// Return a copy of the value so locking is reduced.
+ uint64_t UpdateGuestClock() {
+   uint64_t host_tick_count = Clock::QueryHostTickCount();
+ 
+   if (REXCVAR_GET(clock_no_scaling)) {
+     // Nothing to update, calculate on the fly
+-    return host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second;
++    return RaiseGuestTickFloor(host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second);
+   }
+ 
+-  std::unique_lock<std::mutex> lock(tick_mutex_, std::defer_lock);
+-  if (lock.try_lock()) {
+-    // Translate host tick count to guest tick count.
+-    uint64_t host_tick_delta =
+-        host_tick_count > last_host_tick_count_ ? host_tick_count - last_host_tick_count_ : 0;
+-    last_host_tick_count_ = host_tick_count;
+-    uint64_t guest_tick_delta =
+-        host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
+-    last_guest_tick_count_ += guest_tick_delta;
+-    return last_guest_tick_count_;
+-  } else {
+-    // Wait until another thread has finished updating the clock.
+-    lock.lock();
+-    return last_guest_tick_count_;
+-  }
++  const ClockSegment* segment = clock_segment_.load(std::memory_order_acquire);
++  return RaiseGuestTickFloor(segment ? SegmentGuestTicks(*segment, host_tick_count) : 0);
+ }
+ 
+ // Offset of the current guest system file time relative to the guest base time.
