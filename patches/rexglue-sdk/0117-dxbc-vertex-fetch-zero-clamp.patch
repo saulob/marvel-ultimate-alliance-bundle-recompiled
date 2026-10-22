@@ -1,0 +1,26 @@
+Ported from TheSimpsonsGameRecomp 4c5ec3c0 (the DXBC vertex-fetch zero-clamp hunk only; its priming-draw scissor mute and memexport cap are Simpsons-specific and WIP, not ported): a size-0 fetch constant is architecturally disabled and must read zero on real hardware, but the D3D12 shader translator still loads the fetch's words from guest memory at its base address. With gpu_allow_invalid_fetch_constants on, that address is 0 for an absent OPTIONAL stream, so the shader reads live memory instead of zero, producing garbage attributes. Inert for any fetch constant with a nonzero size.
+
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+index 31de175..e9608be 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+@@ -263,6 +263,19 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
+     PopSystemTemp((endian_temp != swap_temp) ? 2 : 1);
+   }
+ 
++  // A size-0 fetch constant is architecturally disabled on real Xenos hardware and reads zero;
++  // without this, the loaded words above come from live guest memory at the fetch's base address
++  // (0 for an absent stream admitted by gpu_allow_invalid_fetch_constants) instead of zero.
++  {
++    uint32_t size_temp = PushSystemTemp();
++    dxbc::Dest size_dest(dxbc::Dest::R(size_temp, 0b0001));
++    dxbc::Src size_src(dxbc::Src::R(size_temp, dxbc::Src::kXXXX));
++    a_.OpUShR(size_dest, fetch_constant_src.SelectFromSwizzled(1), dxbc::Src::LU(2));
++    a_.OpAnd(size_dest, size_src, dxbc::Src::LU((uint32_t(1) << 24) - 1));
++    a_.OpMovC(dxbc::Dest::R(system_temp_result_, needed_words), size_src, result_src, dxbc::Src::LU(0));
++    PopSystemTemp();
++  }
++
+   // - Unpack the format.
+ 
+   uint32_t used_format_components =

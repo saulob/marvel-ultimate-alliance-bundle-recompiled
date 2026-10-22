@@ -1,0 +1,43 @@
+ReXGlue development commit 7f7c92e (rexglue-sdk, after v0.10.0): stwcx./stdcx. use std::atomic compare_exchange_strong (acq_rel), CR0.so is no longer copied from XER, and mfmsr/mtmsrd no longer emit a seq_cst fence (the global lock already orders them).
+
+diff --git a/src/codegen/builders/helpers.h b/src/codegen/builders/helpers.h
+index dbc8d51..22d1cb4 100644
+--- a/src/codegen/builders/helpers.h
++++ b/src/codegen/builders/helpers.h
+@@ -305,11 +305,11 @@ inline void emitAtomicStoreConditional(BuilderContext& ctx, const char* ptr_type
+   ctx.println("\t{}.lt = 0;", ctx.cr(0));
+   ctx.println("\t{}.gt = 0;", ctx.cr(0));
+   ctx.println(
+-      "\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<{}*>(REX_RAW_ADDR({})), "
+-      "{}.{}, {}({}.{}));",
++      "\t{}.eq = reinterpret_cast<std::atomic<{}>*>(REX_RAW_ADDR({}))"
++      "->compare_exchange_strong({}.{}, {}({}.{}), "
++      "std::memory_order_acq_rel, std::memory_order_acquire);",
+       ctx.cr(0), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]),
+       field);
+-  ctx.println("\t{}.so = {}.so;", ctx.cr(0), ctx.xer());
+ }
+ 
+ //=============================================================================
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index b2d70f5..0569e30 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -249,8 +249,6 @@ bool build_mflr(BuilderContext& ctx) {
+ 
+ bool build_mfmsr(BuilderContext& ctx) {
+   if (!ctx.config().skipMsr) {
+-    // Memory barrier for MSR read
+-    ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
+     // Check global lock and return appropriate value
+     // Returns 0x8000 if unlocked (interrupts enabled), 0 if locked
+     ctx.println("\t{}.u64 = REX_CHECK_GLOBAL_LOCK();", ctx.r(ctx.insn.operands[0]));
+@@ -317,8 +315,6 @@ bool build_mtlr(BuilderContext& ctx) {
+ 
+ bool build_mtmsrd(BuilderContext& ctx) {
+   if (!ctx.config().skipMsr) {
+-    // Memory barrier for MSR write
+-    ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
+     // Update MSR bits
+     ctx.println("\tctx.msr = ({}.u32 & 0x8020) | (ctx.msr & ~0x8020);",
+                 ctx.r(ctx.insn.operands[0]));

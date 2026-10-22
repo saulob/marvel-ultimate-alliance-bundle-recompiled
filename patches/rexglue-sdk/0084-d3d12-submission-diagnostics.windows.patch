@@ -1,0 +1,522 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index d97623a..19a638c 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -336,6 +336,9 @@ class D3D12CommandProcessor : public CommandProcessor {
+     return submission_completed_ + 1 >= submission_current_;
+   }
+   void LogDeviceRemovalDiagnostics(ID3D12Device* device, HRESULT reason);
++  void ExecuteSubmissionCommands(ID3D12CommandAllocator* command_allocator,
++                                 DeferredCommandList& commands, uint64_t submission);
++  std::atomic<bool> submission_rejection_logged_{false};
+ 
+   void UpdateDebugMarkersEnabled();
+   void PushDebugMarker(const char* format, ...);
+diff --git a/include/rex/graphics/d3d12/deferred_command_list.h b/include/rex/graphics/d3d12/deferred_command_list.h
+index 84cdea3..837feed 100644
+--- a/include/rex/graphics/d3d12/deferred_command_list.h
++++ b/include/rex/graphics/d3d12/deferred_command_list.h
+@@ -14,6 +14,7 @@
+ #include <algorithm>
+ #include <cstdint>
+ #include <cstring>
++#include <string>
+ #include <vector>
+ 
+ #include <rex/assert.h>
+@@ -37,6 +38,9 @@ class DeferredCommandList {
+   // stream to its thread and keeps an empty one with its capacity).
+   void SwapStream(DeferredCommandList& other) { command_stream_.swap(other.command_stream_); }
+   void Execute(ID3D12GraphicsCommandList* command_list, ID3D12GraphicsCommandList1* command_list_1);
++  // DEBUG_SAULO: how many of each command are recorded, and the arguments of the last few, for
++  // the log when the runtime rejects the submission.
++  std::string Describe(size_t tail_commands) const;
+ 
+   D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
+                                                   D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index dc941ef..7d6afae 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -92,6 +92,66 @@ uint64_t GetHostThreadAffinityMask() {
+   return uint64_t(process_mask) & ~uint64_t(0b11);
+ }
+ 
++const char* BreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
++  static const char* const kNames[] = {"SetMarker",
++                                       "BeginEvent",
++                                       "EndEvent",
++                                       "DrawInstanced",
++                                       "DrawIndexedInstanced",
++                                       "ExecuteIndirect",
++                                       "Dispatch",
++                                       "CopyBufferRegion",
++                                       "CopyTextureRegion",
++                                       "CopyResource",
++                                       "CopyTiles",
++                                       "ResolveSubresource",
++                                       "ClearRenderTargetView",
++                                       "ClearUnorderedAccessView",
++                                       "ClearDepthStencilView",
++                                       "ResourceBarrier",
++                                       "ExecuteBundle",
++                                       "Present",
++                                       "ResolveQueryData",
++                                       "BeginSubmission",
++                                       "EndSubmission"};
++  const size_t index = size_t(op);
++  return index < sizeof(kNames) / sizeof(kNames[0]) ? kNames[index] : "Other";
++}
++
++const char* AllocationTypeName(D3D12_DRED_ALLOCATION_TYPE type) {
++  switch (type) {
++    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE:
++      return "command queue";
++    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_ALLOCATOR:
++      return "command allocator";
++    case D3D12_DRED_ALLOCATION_TYPE_PIPELINE_STATE:
++      return "pipeline state";
++    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_LIST:
++      return "command list";
++    case D3D12_DRED_ALLOCATION_TYPE_FENCE:
++      return "fence";
++    case D3D12_DRED_ALLOCATION_TYPE_DESCRIPTOR_HEAP:
++      return "descriptor heap";
++    case D3D12_DRED_ALLOCATION_TYPE_HEAP:
++      return "heap";
++    case D3D12_DRED_ALLOCATION_TYPE_QUERY_HEAP:
++      return "query heap";
++    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_SIGNATURE:
++      return "command signature";
++    case D3D12_DRED_ALLOCATION_TYPE_PIPELINE_LIBRARY:
++      return "pipeline library";
++    case D3D12_DRED_ALLOCATION_TYPE_VIDEO_DECODER:
++      return "video decoder";
++    case D3D12_DRED_ALLOCATION_TYPE_VIDEO_PROCESSOR:
++      return "video processor";
++    case D3D12_DRED_ALLOCATION_TYPE_RESOURCE:
++      return "resource";
++    case D3D12_DRED_ALLOCATION_TYPE_PASS:
++      return "pass";
++    default:
++      return "object";
++  }
++}
+ }  // namespace
+ 
+ // Generated with `xb buildshaders`.
+@@ -954,6 +1014,7 @@ bool D3D12CommandProcessor::SetupContext() {
+     REXGPU_ERROR("Failed to create the graphics command list");
+     return false;
+   }
++  command_list_->SetName(L"Xenos submission");
+   // Initially in open state, wait until a deferred command list submission.
+   command_list_->Close();
+   // Optional - added in Creators Update (SDK 10.0.15063.0).
+@@ -3511,40 +3572,105 @@ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HR
+       reason_str = "DRIVER_INTERNAL_ERROR";
+       break;
+     case DXGI_ERROR_INVALID_CALL:
+-      reason_str = "INVALID_CALL";
++      reason_str = "INVALID_CALL (the runtime rejected a call or a command list, not a GPU fault)";
+       break;
+   }
+   REXGPU_ERROR("D3D12 device removed: HRESULT 0x{:08X} - {}", static_cast<unsigned>(reason),
+                reason_str);
+ 
++  // DEBUG_SAULO: DRED output, every query reported on its own.
+   Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+-  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {
++  HRESULT result = device->QueryInterface(IID_PPV_ARGS(&dred));
++  if (FAILED(result)) {
++    REXGPU_ERROR("DRED: not available on this device (0x{:08X})", static_cast<unsigned>(result));
+     return;
+   }
+ 
+   D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs = {};
+-  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))) {
++  result = dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
++  if (FAILED(result)) {
++    REXGPU_ERROR("DRED: no auto breadcrumbs (0x{:08X}), they were not enabled before device creation",
++                 static_cast<unsigned>(result));
++  } else {
++    uint32_t command_lists = 0;
++    uint32_t unfinished = 0;
+     for (const D3D12_AUTO_BREADCRUMB_NODE* node = breadcrumbs.pHeadAutoBreadcrumbNode; node;
+          node = node->pNext) {
+-      if (!node->pLastBreadcrumbValue || !node->pCommandHistory ||
+-          *node->pLastBreadcrumbValue == 0) {
++      ++command_lists;
++      const uint32_t completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
++      if (!node->pCommandHistory || completed >= node->BreadcrumbCount) {
+         continue;
+       }
+-      REXGPU_ERROR("DRED breadcrumb: completed {} of {} ops", *node->pLastBreadcrumbValue,
++      ++unfinished;
++      REXGPU_ERROR("DRED breadcrumb: command list \"{}\" completed {} of {} ops",
++                   node->pCommandListDebugNameA ? node->pCommandListDebugNameA : "", completed,
+                    node->BreadcrumbCount);
+-      uint32_t last = std::min(*node->pLastBreadcrumbValue, node->BreadcrumbCount);
+-      uint32_t start = last > 3 ? last - 3 : 0;
+-      uint32_t end = std::min(last + 1, node->BreadcrumbCount);
+-      for (uint32_t i = start; i < end; i++) {
+-        REXGPU_ERROR("  [{}] op type {}{}", i, static_cast<int>(node->pCommandHistory[i]),
+-                     i == last ? " <-- FAULT" : "");
++      const uint32_t first = completed > 3 ? completed - 3 : 0;
++      const uint32_t end = std::min(completed + 2, node->BreadcrumbCount);
++      for (uint32_t i = first; i < end; ++i) {
++        REXGPU_ERROR("  [{}] {}{}", i, BreadcrumbOpName(node->pCommandHistory[i]),
++                     i == completed ? " <-- next to run, the fault" : "");
+       }
+     }
++    REXGPU_ERROR("DRED: {} command lists tracked, {} not finished{}", command_lists, unfinished,
++                 unfinished ? ""
++                            : " - the GPU ran everything it was given, so the call was rejected "
++                              "before the GPU");
+   }
+ 
+   D3D12_DRED_PAGE_FAULT_OUTPUT page_fault = {};
+-  if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) && page_fault.PageFaultVA != 0) {
++  result = dred->GetPageFaultAllocationOutput(&page_fault);
++  if (FAILED(result)) {
++    REXGPU_ERROR("DRED: no page fault output (0x{:08X})", static_cast<unsigned>(result));
++  } else if (page_fault.PageFaultVA == 0) {
++    REXGPU_ERROR("DRED: no GPU page fault");
++  } else {
+     REXGPU_ERROR("DRED page fault at VA 0x{:016X}", page_fault.PageFaultVA);
++    for (const D3D12_DRED_ALLOCATION_NODE* node = page_fault.pHeadExistingAllocationNode; node;
++         node = node->pNext) {
++      REXGPU_ERROR("  existing {} \"{}\"", AllocationTypeName(node->AllocationType),
++                   node->ObjectNameA ? node->ObjectNameA : "");
++    }
++    for (const D3D12_DRED_ALLOCATION_NODE* node = page_fault.pHeadRecentFreedAllocationNode; node;
++         node = node->pNext) {
++      REXGPU_ERROR("  freed {} \"{}\"", AllocationTypeName(node->AllocationType),
++                   node->ObjectNameA ? node->ObjectNameA : "");
++    }
++  }
++}
++
++// DEBUG_SAULO: closes and executes one submission. The recording errors the D3D12 runtime detects
++// make Close fail, and executing such a list removes the device with INVALID_CALL - so it is left
++// out, and logged with what it holds. A removal the queue reports right after the execute is logged
++// with the submission that raised it.
++void D3D12CommandProcessor::ExecuteSubmissionCommands(ID3D12CommandAllocator* command_allocator,
++                                                      DeferredCommandList& commands,
++                                                      uint64_t submission) {
++  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
++  command_allocator->Reset();
++  command_list_->Reset(command_allocator, nullptr);
++  commands.Execute(command_list_, command_list_1_);
++  const HRESULT close_result = command_list_->Close();
++  if (FAILED(close_result)) {
++    static std::atomic<uint32_t> close_failures{0};
++    const uint32_t failure = close_failures.fetch_add(1, std::memory_order_relaxed) + 1;
++    if (failure == 1) {
++      REXGPU_ERROR(
++          "D3D12 submission {}: the command list failed to close (HRESULT 0x{:08X}) and was not "
++          "executed, {}",
++          submission, static_cast<unsigned>(close_result), commands.Describe(32));
++    } else if ((failure & (failure - 1)) == 0) {
++      REXGPU_ERROR("D3D12 submission {}: {} command lists failed to close so far (HRESULT 0x{:08X})",
++                   submission, failure, static_cast<unsigned>(close_result));
++    }
++    return;
++  }
++  ID3D12CommandList* execute_command_lists[] = {command_list_};
++  provider.GetDirectQueue()->ExecuteCommandLists(1, execute_command_lists);
++  const HRESULT removed_reason = provider.GetDevice()->GetDeviceRemovedReason();
++  if (FAILED(removed_reason) && !submission_rejection_logged_.exchange(true)) {
++    REXGPU_ERROR("D3D12 submission {} removed the device (HRESULT 0x{:08X}), {}", submission,
++                 static_cast<unsigned>(removed_reason), commands.Describe(32));
+   }
+ }
+ 
+@@ -3729,12 +3855,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+     if (async_submission_enabled_) {
+       EnqueueAsyncSubmission(command_allocator, submission_current_);
+     } else {
+-      command_allocator->Reset();
+-      command_list_->Reset(command_allocator, nullptr);
+-      deferred_command_list_.Execute(command_list_, command_list_1_);
+-      command_list_->Close();
+-      ID3D12CommandList* execute_command_lists[] = {command_list_};
+-      direct_queue->ExecuteCommandLists(1, execute_command_lists);
++      ExecuteSubmissionCommands(command_allocator, deferred_command_list_, submission_current_);
+     }
+     command_allocator_writable_first_->last_usage_submission = submission_current_;
+     if (command_allocator_submitted_last_) {
+@@ -3891,12 +4012,7 @@ void D3D12CommandProcessor::AsyncSubmissionThread() {
+     lock.unlock();
+ 
+     // Jobs run in queue order, so the fence values stay increasing.
+-    job.command_allocator->Reset();
+-    command_list_->Reset(job.command_allocator, nullptr);
+-    job.commands->Execute(command_list_, command_list_1_);
+-    command_list_->Close();
+-    ID3D12CommandList* execute_command_lists[] = {command_list_};
+-    direct_queue->ExecuteCommandLists(1, execute_command_lists);
++    ExecuteSubmissionCommands(job.command_allocator, *job.commands, job.submission);
+     direct_queue->Signal(submission_fence_, job.submission);
+     job.commands->Reset();
+ 
+diff --git a/src/graphics/d3d12/deferred_command_list.cpp b/src/graphics/d3d12/deferred_command_list.cpp
+index e6d6277..ac27cfe 100644
+--- a/src/graphics/d3d12/deferred_command_list.cpp
++++ b/src/graphics/d3d12/deferred_command_list.cpp
+@@ -9,6 +9,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdio>
++
+ #include <rex/assert.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/d3d12/command_processor.h>
+@@ -277,6 +279,179 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+   }
+ }
+ 
++namespace {
++
++const char* CommandName(size_t command) {
++  static const char* const kNames[] = {
++      "ClearDSV",         "ClearRTV",         "ClearUAVUint",     "CopyBufferRegion",
++      "CopyResource",     "CopyTexture",      "CopyTextureRegion", "Dispatch",
++      "DrawIndexed",      "Draw",             "BeginQuery",       "EndQuery",
++      "ResolveQueryData", "SetIndexBuffer",   "SetTopology",      "SetVertexBuffers",
++      "SetBlendFactor",   "SetRenderTargets", "SetStencilRef",    "ResourceBarrier",
++      "SetScissor",       "SetViewport",      "SetComputeRoot32", "SetGraphicsRoot32",
++      "SetComputeCBV",    "SetGraphicsCBV",   "SetComputeTable",  "SetGraphicsTable",
++      "SetComputeSRV",    "SetGraphicsSRV",   "SetComputeRootSig", "SetGraphicsRootSig",
++      "SetComputeUAV",    "SetGraphicsUAV",   "SetDescriptorHeaps", "SetPipeline",
++      "SetPipelineHandle", "SetSamplePositions", "BeginMarker",   "EndMarker",
++      "Marker"};
++  return command < sizeof(kNames) / sizeof(kNames[0]) ? kNames[command] : "Unknown";
++}
++
++std::string ResourceText(ID3D12Resource* resource) {
++  if (!resource) {
++    return "null";
++  }
++  const D3D12_RESOURCE_DESC desc = resource->GetDesc();
++  char text[160];
++  std::snprintf(text, sizeof(text), "%s %llux%ux%u mips %u fmt %u flags 0x%X",
++                desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? "buffer" : "texture",
++                static_cast<unsigned long long>(desc.Width), desc.Height, desc.DepthOrArraySize,
++                desc.MipLevels, unsigned(desc.Format), unsigned(desc.Flags));
++  return text;
++}
++
++std::string CopyLocationText(const D3D12_TEXTURE_COPY_LOCATION& location) {
++  char text[96];
++  if (location.Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
++    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint = location.PlacedFootprint;
++    std::snprintf(text, sizeof(text), "[footprint +%llu %ux%ux%u pitch %u fmt %u]",
++                  static_cast<unsigned long long>(footprint.Offset), footprint.Footprint.Width,
++                  footprint.Footprint.Height, footprint.Footprint.Depth, footprint.Footprint.RowPitch,
++                  unsigned(footprint.Footprint.Format));
++  } else {
++    std::snprintf(text, sizeof(text), "[subresource %u]", location.SubresourceIndex);
++  }
++  return ResourceText(location.pResource) + " " + text;
++}
++
++}  // namespace
++
++std::string DeferredCommandList::Describe(size_t tail_commands) const {
++  constexpr size_t kCommandCount = size_t(Command::kInsertDebugMarker) + 1;
++  uint32_t counts[kCommandCount] = {};
++  std::vector<const uintmax_t*> tail;
++  const uintmax_t* stream = command_stream_.data();
++  size_t stream_remaining = command_stream_.size();
++  size_t total = 0;
++  while (stream_remaining >= kCommandHeaderSizeElements) {
++    const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
++    const size_t command = size_t(header.command);
++    if (command < kCommandCount) {
++      ++counts[command];
++    }
++    ++total;
++    if (tail_commands) {
++      if (tail.size() == tail_commands) {
++        tail.erase(tail.begin());
++      }
++      tail.push_back(stream);
++    }
++    const size_t size = kCommandHeaderSizeElements + header.arguments_size_elements;
++    if (size > stream_remaining) {
++      break;
++    }
++    stream += size;
++    stream_remaining -= size;
++  }
++  std::string text = std::to_string(total) + " commands:";
++  for (size_t i = 0; i < kCommandCount; ++i) {
++    if (counts[i]) {
++      text += std::string(" ") + CommandName(i) + "=" + std::to_string(counts[i]);
++    }
++  }
++  char buffer[256];
++  for (const uintmax_t* entry : tail) {
++    const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(entry);
++    const void* arguments = entry + kCommandHeaderSizeElements;
++    text += std::string("\n  ") + CommandName(size_t(header.command));
++    switch (header.command) {
++      case Command::kD3DDispatch: {
++        auto& args = *static_cast<const D3DDispatchArguments*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " groups %u,%u,%u", args.thread_group_count_x,
++                      args.thread_group_count_y, args.thread_group_count_z);
++        text += buffer;
++      } break;
++      case Command::kD3DDrawInstanced: {
++        auto& args = *static_cast<const D3DDrawInstancedArguments*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " vertices %u instances %u", args.vertex_count_per_instance,
++                      args.instance_count);
++        text += buffer;
++      } break;
++      case Command::kD3DDrawIndexedInstanced: {
++        auto& args = *static_cast<const D3DDrawIndexedInstancedArguments*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " indices %u instances %u", args.index_count_per_instance,
++                      args.instance_count);
++        text += buffer;
++      } break;
++      case Command::kRSSetScissorRect: {
++        auto& rect = *static_cast<const D3D12_RECT*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " %ld,%ld to %ld,%ld", rect.left, rect.top, rect.right,
++                      rect.bottom);
++        text += buffer;
++      } break;
++      case Command::kRSSetViewport: {
++        auto& viewport = *static_cast<const D3D12_VIEWPORT*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " %g,%g size %gx%g depth %g..%g", viewport.TopLeftX,
++                      viewport.TopLeftY, viewport.Width, viewport.Height, viewport.MinDepth,
++                      viewport.MaxDepth);
++        text += buffer;
++      } break;
++      case Command::kD3DCopyBufferRegion: {
++        auto& args = *static_cast<const D3DCopyBufferRegionArguments*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " dst +%llu src +%llu bytes %llu dst ",
++                      static_cast<unsigned long long>(args.dst_offset),
++                      static_cast<unsigned long long>(args.src_offset),
++                      static_cast<unsigned long long>(args.num_bytes));
++        text += buffer + ResourceText(args.dst_buffer) + " src " + ResourceText(args.src_buffer);
++      } break;
++      case Command::kD3DCopyResource: {
++        auto& args = *static_cast<const D3DCopyResourceArguments*>(arguments);
++        text += " dst " + ResourceText(args.dst_resource) + " src " + ResourceText(args.src_resource);
++      } break;
++      case Command::kCopyTexture: {
++        auto& args = *static_cast<const CopyTextureArguments*>(arguments);
++        text += " dst " + CopyLocationText(args.dst) + " src " + CopyLocationText(args.src);
++      } break;
++      case Command::kD3DCopyTextureRegion: {
++        auto& args = *static_cast<const D3DCopyTextureRegionArguments*>(arguments);
++        std::snprintf(buffer, sizeof(buffer), " at %u,%u,%u box ", args.dst_x, args.dst_y, args.dst_z);
++        text += buffer;
++        if (args.has_src_box) {
++          std::snprintf(buffer, sizeof(buffer), "%u,%u,%u to %u,%u,%u", args.src_box.left, args.src_box.top,
++                        args.src_box.front, args.src_box.right, args.src_box.bottom, args.src_box.back);
++          text += buffer;
++        } else {
++          text += "none";
++        }
++        text += " dst " + CopyLocationText(args.dst) + " src " + CopyLocationText(args.src);
++      } break;
++      case Command::kD3DResourceBarrier: {
++        const UINT count = *static_cast<const UINT*>(arguments);
++        const auto* barriers = reinterpret_cast<const D3D12_RESOURCE_BARRIER*>(
++            reinterpret_cast<const uint8_t*>(arguments) +
++            rex::align(sizeof(UINT), alignof(D3D12_RESOURCE_BARRIER)));
++        text += " count " + std::to_string(count);
++        for (UINT i = 0; i < count && i < 4; ++i) {
++          const D3D12_RESOURCE_BARRIER& barrier = barriers[i];
++          if (barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
++            std::snprintf(buffer, sizeof(buffer), " [transition sub %u 0x%X->0x%X ", barrier.Transition.Subresource,
++                          unsigned(barrier.Transition.StateBefore), unsigned(barrier.Transition.StateAfter));
++            text += buffer + ResourceText(barrier.Transition.pResource) + "]";
++          } else if (barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
++            text += " [aliasing " + ResourceText(barrier.Aliasing.pResourceBefore) + " -> " +
++                    ResourceText(barrier.Aliasing.pResourceAfter) + "]";
++          } else {
++            text += " [uav " + ResourceText(barrier.UAV.pResource) + "]";
++          }
++        }
++      } break;
++      default:
++        break;
++    }
++  }
++  return text;
++}
++
+ void* DeferredCommandList::WriteCommand(Command command, size_t arguments_size_bytes) {
+   size_t arguments_size_elements =
+       (arguments_size_bytes + sizeof(uintmax_t) - 1) / sizeof(uintmax_t);
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..e9026ed 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -1140,13 +1140,24 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   command_list->ResourceBarrier(1, &barrier_rtv_to_present);
+ 
+   // Execute and present.
+-  command_list->Close();
+-  ID3D12CommandList* execute_command_list = command_list;
+-  provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
++  // DEBUG_SAULO: executing a list that failed to close removes the device, so it is left out.
++  const HRESULT close_result = command_list->Close();
++  const bool paint_list_closed = SUCCEEDED(close_result);
++  if (paint_list_closed) {
++    ID3D12CommandList* execute_command_list = command_list;
++    provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
++  } else {
++    REXLOG_ERROR("D3D12Presenter: the paint command list failed to close (HRESULT 0x{:08X}), frame dropped",
++                 static_cast<unsigned>(close_result));
++  }
+   if (execute_ui_drawers) {
+     ui_submission_tracker_.NextSubmission();
+   }
+   paint_context_.paint_submission_tracker.NextSubmission();
++  if (!paint_list_closed) {
++    paint_context_.present_submission_tracker.NextSubmission();
++    return PaintResult::kNotPresented;
++  }
+   // Present as soon as possible, without waiting for vsync (the host refresh
+   // rate may be something like 144 Hz, which is not a multiple of the common
+   // 30 Hz or 60 Hz guest refresh rate), and allowing dropping outdated queued
+diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
+index 7f30a54..ded627c 100644
+--- a/src/ui/d3d12/d3d12_provider.cpp
++++ b/src/ui/d3d12/d3d12_provider.cpp
+@@ -252,19 +252,18 @@ bool D3D12Provider::Initialize() {
+       REXLOG_WARN("Failed to enable the Direct3D 12 debug layer");
+       debug = false;
+     }
++  }
+ 
+-    // Enable DRED (Device Removed Extended Data) for diagnosing GPU crashes.
+-    {
+-      Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;
+-      if (SUCCEEDED(pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
+-        dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+-        dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+-        REXLOG_INFO("DRED (Device Removed Extended Data) enabled");
+-      } else {
+-        REXLOG_WARN(
+-            "Failed to enable DRED - device removal diagnostics will be "
+-            "limited");
+-      }
++  // DEBUG_SAULO: DRED names the command list operation a device removal happened at; scaled rendering turns
++  // it on without the debug layer.
++  if (debug || std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()) > 1) {
++    Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;
++    if (SUCCEEDED(pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
++      dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
++      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
++      REXLOG_INFO("DRED (Device Removed Extended Data) enabled");
++    } else {
++      REXLOG_WARN("Failed to enable DRED - device removal diagnostics will be limited");
+     }
+   }
+   // Create the DXGI factory.

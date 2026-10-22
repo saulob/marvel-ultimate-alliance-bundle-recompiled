@@ -1,0 +1,23 @@
+The 3D-as-2D wrapper of a volume texture is created at the guest size, but keeps scaled_resolve from the texture's key, so it is loaded with resolution-scaled footprints: the copy into its subresource exceeds the destination and the Direct3D 12 runtime rejects the command list (the device is then removed with DXGI_ERROR_INVALID_CALL). The wrapper is now sized like the scaled slice.
+
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -1995,6 +1995,18 @@
+   desc.Alignment = 0;
+   desc.Width = key().GetWidth();
+   desc.Height = key().GetHeight();
++  if (key().scaled_resolve) {
++    // The wrapper below is loaded from the same guest memory with the same key (including
++    // scaled_resolve), so it is loaded with resolution-scaled footprints - it must be as large as
++    // the scaled 3D texture's slice, otherwise the copy into it exceeds the destination
++    // subresource (and the Direct3D 12 runtime rejects the command list).
++    desc.Width *= d3d12_cache.draw_resolution_scale_x();
++    desc.Height *= d3d12_cache.draw_resolution_scale_y();
++    if (desc.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
++        desc.Height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
++      return nullptr;
++    }
++  }
+   desc.DepthOrArraySize = 1;
+   desc.MipLevels = 1;
+   desc.Format = d3d12_cache.GetDXGIResourceFormat(key());

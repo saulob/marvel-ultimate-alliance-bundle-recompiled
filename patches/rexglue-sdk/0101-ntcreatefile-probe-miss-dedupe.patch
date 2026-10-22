@@ -1,0 +1,44 @@
+Taken unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0039: a missing file the guest probes again is logged as a failure once per path, then at trace level.
+
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+index 1840030..a944160 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+@@ -29,6 +29,9 @@
+ #include <rex/system/xtypes.h>
+ #include <rex/thread/mutex.h>
+ 
++#include <mutex>
++#include <unordered_set>
++
+ namespace rex::kernel::xboxkrnl {
+ using namespace rex::system;
+ 
+@@ -100,6 +103,14 @@ static bool IsValidPath(const std::string_view s, bool is_pattern) {
+   return true;
+ }
+ 
++// The guest probes the same missing loose files again and again; report each path's first miss only.
++static bool IsFirstMissReport(const std::string& path) {
++  static std::mutex mutex;
++  static std::unordered_set<std::string> reported;
++  std::lock_guard<std::mutex> lock(mutex);
++  return reported.insert(path).second;
++}
++
+ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
+                        ppc_ptr_t<X_OBJECT_ATTRIBUTES> object_attrs,
+                        ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block, mapped_u64 allocation_size_ptr,
+@@ -169,7 +180,11 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
+ 
+   *handle_out = handle;
+   if (XFAILED(result)) {
+-    REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
++    if (result == X_STATUS_NO_SUCH_FILE && !IsFirstMissReport(target_path)) {
++      REXKRNL_IMPORT_TRACE("NtCreateFile", "repeated miss path='{}'", target_path);
++    } else {
++      REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
++    }
+   } else {
+     REXKRNL_IMPORT_RESULT("NtCreateFile", "{:#x} handle={:#x}", result, handle);
+   }

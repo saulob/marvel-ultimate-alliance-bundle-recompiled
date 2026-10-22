@@ -1,0 +1,334 @@
+Ported from hard-corps-uprising-recompiled patches/rexglue-sdk/0005-render-target-transfer-performance.patch (third-party component under the project's own GPL-2.0 terms, as the SDK retains its own BSD license per that project's README). Host Render Targets fallback only (Marvel defaults to the ROV path; this never runs there): detects when a rectangle-list draw fully overwrites a render target so the stale-data transfer that would otherwise precede it can be skipped, and adds a DrawExtentEstimator accessor the D3D12 backend patch (0121) needs to call it.
+
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 3bbd52e..ff1fbc6 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -192,6 +192,7 @@ class RenderTargetCache {
+   }
+ 
+   const RegisterFile& register_file() const { return register_file_; }
++  DrawExtentEstimator& draw_extent_estimator() { return draw_extent_estimator_; }
+ 
+   virtual bool IsGammaFormatHostStorageSeparate() const = 0;
+ 
+@@ -540,6 +541,17 @@ class RenderTargetCache {
+                                             RenderTarget*& color_render_target_out,
+                                             std::vector<Transfer>& color_transfers_out);
+ 
++  // For a rectangle list draw that replaces what it writes, returns the render targets (bit 0
++  // depth, 1... color) fully overwritten inside rectangle_out, where transferring their previous
++  // contents is pointless. The rectangle is in pixels, inside what the draw covers at any
++  // resolution scale and sample count. Bit 0 requires the stencil to be replaced too; if only the
++  // depth is, depth_only_out is set instead.
++  uint32_t GetDrawOverwrittenRenderTargets(reg::RB_DEPTHCONTROL normalized_depth_control,
++                                           uint32_t normalized_color_mask,
++                                           const Shader& vertex_shader, const Shader* pixel_shader,
++                                           Transfer::Rectangle& rectangle_out,
++                                           bool& depth_only_out);
++
+   // For pixel shader interlock.
+ 
+   virtual void RequestPixelShaderInterlockBarrier() {}
+diff --git a/include/rex/graphics/util/draw_extent_estimator.h b/include/rex/graphics/util/draw_extent_estimator.h
+index e5e4908..1e99f36 100644
+--- a/include/rex/graphics/util/draw_extent_estimator.h
++++ b/include/rex/graphics/util/draw_extent_estimator.h
+@@ -31,7 +31,28 @@ class DrawExtentEstimator {
+   uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
+   uint32_t EstimateMaxY(bool try_to_estimate_vertex_max_y, const Shader& vertex_shader);
+ 
++  // The positions (x, y, z, w) exported for vertices 0... of an auto-indexed draw, by running the
++  // vertex shader on the CPU. False if they can't be known exactly: the shader can't be
++  // interpreted, or a vertex is killed or doesn't export a whole position.
++  bool GetAutoIndexedVertexPositions(const Shader& vertex_shader, uint32_t vertex_count,
++                                     float (*positions_out)[4]);
++
+  private:
++  class PositionExportSink : public ShaderInterpreter::ExportSink {
++   public:
++    void Export(ucode::ExportRegister export_register, const float* value,
++                uint32_t value_mask) override;
++
++    void Reset() {
++      position_mask = 0;
++      vertex_kill = 0;
++    }
++
++    float position[4] = {};
++    uint32_t position_mask = 0;
++    uint32_t vertex_kill = 0;
++  };
++
+   class PositionYExportSink : public ShaderInterpreter::ExportSink {
+    public:
+     void Export(ucode::ExportRegister export_register, const float* value,
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 48c98d8..11d2360 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -1132,6 +1132,189 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
+   return true;
+ }
+ 
++uint32_t RenderTargetCache::GetDrawOverwrittenRenderTargets(
++    reg::RB_DEPTHCONTROL normalized_depth_control, uint32_t normalized_color_mask,
++    const Shader& vertex_shader, const Shader* pixel_shader, Transfer::Rectangle& rectangle_out,
++    bool& depth_only_out) {
++  depth_only_out = false;
++  const RegisterFile& regs = register_file();
++
++  // Fragments rejected by the depth or stencil test keep their previous contents.
++  if ((normalized_depth_control.z_enable &&
++       normalized_depth_control.zfunc != xenos::CompareFunction::kAlways) ||
++      (normalized_depth_control.stencil_enable &&
++       (normalized_depth_control.stencilfunc != xenos::CompareFunction::kAlways ||
++        (normalized_depth_control.backface_enable &&
++         normalized_depth_control.stencilfunc_bf != xenos::CompareFunction::kAlways)))) {
++    return 0;
++  }
++  auto draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (draw_initiator.prim_type != xenos::PrimitiveType::kRectangleList ||
++      draw_initiator.num_indices != 3 ||
++      draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
++    return 0;
++  }
++
++  uint32_t overwritten = 0;
++  bool depth_only = false;
++  if (normalized_depth_control.z_enable && normalized_depth_control.z_write_enable &&
++      normalized_depth_control.zfunc == xenos::CompareFunction::kAlways) {
++    bool stencil_replaced =
++        normalized_depth_control.stencil_enable &&
++        normalized_depth_control.stencilzpass == xenos::StencilOp::kReplace &&
++        regs.Get<reg::RB_STENCILREFMASK>().stencilwritemask == UINT8_MAX;
++    if (stencil_replaced && normalized_depth_control.backface_enable) {
++      stencil_replaced = normalized_depth_control.stencilzpass_bf == xenos::StencilOp::kReplace &&
++                         regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF)
++                                 .stencilwritemask == UINT8_MAX;
++    }
++    if (stencil_replaced) {
++      overwritten |= 1;
++    } else {
++      depth_only = true;
++    }
++  }
++  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++    if (((normalized_color_mask >> (4 * i)) & 0b1111) != 0b1111) {
++      continue;
++    }
++    auto blend_control =
++        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++    if (blend_control.color_srcblend != xenos::BlendFactor::kOne ||
++        blend_control.color_destblend != xenos::BlendFactor::kZero ||
++        blend_control.color_comb_fcn != xenos::BlendOp::kAdd ||
++        blend_control.alpha_srcblend != xenos::BlendFactor::kOne ||
++        blend_control.alpha_destblend != xenos::BlendFactor::kZero ||
++        blend_control.alpha_comb_fcn != xenos::BlendOp::kAdd) {
++      continue;
++    }
++    overwritten |= uint32_t(1) << (1 + i);
++  }
++  if (!overwritten && !depth_only) {
++    return 0;
++  }
++
++  auto sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (sc_mode_cntl.cull_front || sc_mode_cntl.cull_back ||
++      sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled) {
++    return 0;
++  }
++  auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  if (surface_info.msaa_samples != xenos::MsaaSamples::k1X) {
++    uint32_t sample_mask =
++        (uint32_t(1) << (uint32_t(1) << uint32_t(surface_info.msaa_samples))) - 1;
++    if ((regs[XE_GPU_REG_PA_SC_AA_MASK] & sample_mask) != sample_mask) {
++      return 0;
++    }
++  }
++  if (pixel_shader && (!pixel_shader->is_ucode_analyzed() || pixel_shader->kills_pixels() ||
++                       pixel_shader->writes_depth())) {
++    return 0;
++  }
++  auto color_control = regs.Get<reg::RB_COLORCONTROL>();
++  if (color_control.alpha_to_mask_enable ||
++      (color_control.alpha_test_enable &&
++       color_control.alpha_func != xenos::CompareFunction::kAlways)) {
++    return 0;
++  }
++  auto clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
++  bool clip_disable = clip_cntl.clip_disable;
++  if (!clip_disable && clip_cntl.ucp_ena) {
++    return 0;
++  }
++
++  float positions[3][4];
++  if (!draw_extent_estimator().GetAutoIndexedVertexPositions(vertex_shader, 3, positions)) {
++    return 0;
++  }
++  auto vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
++  float x[3], y[3];
++  for (uint32_t i = 0; i < 3; ++i) {
++    const float* position = positions[i];
++    float w = vte_cntl.vtx_w0_fmt ? position[3] : 1.0f / position[3];
++    float z = vte_cntl.vtx_z_fmt ? position[2] * w : position[2];
++    // Anything clipped makes the covered area unknown.
++    if (!(w > 0.0f) || (!clip_disable && !(z >= 0.0f && z <= w))) {
++      return 0;
++    }
++    float vertex_x = position[0];
++    float vertex_y = position[1];
++    if (!vte_cntl.vtx_xy_fmt) {
++      vertex_x /= w;
++      vertex_y /= w;
++    }
++    if (!clip_disable && !(std::abs(vertex_x) <= 1.0f && std::abs(vertex_y) <= 1.0f)) {
++      return 0;
++    }
++    if (vte_cntl.vport_x_scale_ena) {
++      vertex_x *= regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE);
++    }
++    if (vte_cntl.vport_x_offset_ena) {
++      vertex_x += regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET);
++    }
++    if (vte_cntl.vport_y_scale_ena) {
++      vertex_y *= regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE);
++    }
++    if (vte_cntl.vport_y_offset_ena) {
++      vertex_y += regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET);
++    }
++    if (!std::isfinite(vertex_x) || !std::isfinite(vertex_y)) {
++      return 0;
++    }
++    x[i] = vertex_x;
++    y[i] = vertex_y;
++  }
++
++  // Three distinct corners of an axis-aligned rectangle - the fourth is generated by mirroring
++  // across the diagonal, so the rectangle is covered whole.
++  float x0 = std::min({x[0], x[1], x[2]});
++  float x1 = std::max({x[0], x[1], x[2]});
++  float y0 = std::min({y[0], y[1], y[2]});
++  float y1 = std::max({y[0], y[1], y[2]});
++  for (uint32_t i = 0; i < 3; ++i) {
++    if ((x[i] != x0 && x[i] != x1) || (y[i] != y0 && y[i] != y1)) {
++      return 0;
++    }
++    for (uint32_t j = 0; j < i; ++j) {
++      if (x[i] == x[j] && y[i] == y[j]) {
++        return 0;
++      }
++    }
++  }
++
++  // Window and half-pixel offsets, then shrunk by half a pixel more on every side: the host may
++  // shift the edges by up to that at higher resolution scales, and whole pixels (all their
++  // samples) have to be covered.
++  float offset_x = 0.0f, offset_y = 0.0f;
++  if (sc_mode_cntl.vtx_window_offset_enable) {
++    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    offset_x += float(window_offset.window_x_offset);
++    offset_y += float(window_offset.window_y_offset);
++  }
++  if (regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero) {
++    offset_x += 0.5f;
++    offset_y += 0.5f;
++  }
++  draw_util::Scissor scissor;
++  draw_util::GetScissor(regs, scissor, false);
++  auto to_pixel = [](float value) { return int32_t(std::clamp(value, -65536.0f, 65536.0f)); };
++  int32_t rect_x0 = std::max(to_pixel(std::ceil(x0 + offset_x + 0.5f)), int32_t(scissor.offset[0]));
++  int32_t rect_y0 = std::max(to_pixel(std::ceil(y0 + offset_y + 0.5f)), int32_t(scissor.offset[1]));
++  int32_t rect_x1 = std::min(to_pixel(std::floor(x1 + offset_x - 0.5f)),
++                             int32_t(scissor.offset[0] + scissor.extent[0]));
++  int32_t rect_y1 = std::min(to_pixel(std::floor(y1 + offset_y - 0.5f)),
++                             int32_t(scissor.offset[1] + scissor.extent[1]));
++  if (rect_x0 >= rect_x1 || rect_y0 >= rect_y1) {
++    return 0;
++  }
++  rectangle_out.x_pixels = uint32_t(rect_x0);
++  rectangle_out.y_pixels = uint32_t(rect_y0);
++  rectangle_out.width_pixels = uint32_t(rect_x1 - rect_x0);
++  rectangle_out.height_pixels = uint32_t(rect_y1 - rect_y0);
++  depth_only_out = depth_only;
++  return overwritten;
++}
++
+ void RenderTargetCache::PixelShaderInterlockFullEdramBarrierPlaced() {
+   assert_true(GetPath() == Path::kPixelShaderInterlock);
+   // Clear ownership - any overlap of data written before the barrier is safe.
+diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+index ebc540d..fc6b8b3 100644
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -80,6 +80,70 @@ void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister expo
+   }
+ }
+ 
++void DrawExtentEstimator::PositionExportSink::Export(ucode::ExportRegister export_register,
++                                                     const float* value, uint32_t value_mask) {
++  if (export_register == ucode::ExportRegister::kVSPosition) {
++    for (uint32_t i = 0; i < 4; ++i) {
++      if (value_mask & (uint32_t(1) << i)) {
++        position[i] = value[i];
++      }
++    }
++    position_mask |= value_mask & 0b1111;
++  } else if (export_register == ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex) {
++    if (value_mask & 0b0100) {
++      vertex_kill = rex::memory::Reinterpret<uint32_t>(value[2]);
++    }
++  }
++}
++
++bool DrawExtentEstimator::GetAutoIndexedVertexPositions(const Shader& vertex_shader,
++                                                        uint32_t vertex_count,
++                                                        float (*positions_out)[4]) {
++  SCOPE_profile_cpu_f("gpu");
++
++  const RegisterFile& regs = register_file_;
++
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  if (vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex ||
++      vgt_draw_initiator.num_indices < vertex_count) {
++    return false;
++  }
++  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type) &&
++      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
++          xenos::VGTOutputPath::kTessellationEnable) {
++    return false;
++  }
++  if (vertex_shader.type() != xenos::ShaderType::kVertex || !vertex_shader.is_ucode_analyzed() ||
++      !ShaderInterpreter::CanInterpretShader(vertex_shader)) {
++    return false;
++  }
++
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++
++  shader_interpreter_.SetShader(vertex_shader);
++  PositionExportSink position_export_sink;
++  shader_interpreter_.SetExportSink(&position_export_sink);
++  bool complete = true;
++  for (uint32_t i = 0; i < vertex_count; ++i) {
++    uint32_t vertex_index = std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF));
++    position_export_sink.Reset();
++    shader_interpreter_.temp_registers()[0] = float(vertex_index);
++    shader_interpreter_.Execute();
++    if ((position_export_sink.vertex_kill & ~(UINT32_C(1) << 31)) ||
++        position_export_sink.position_mask != 0b1111) {
++      complete = false;
++      break;
++    }
++    for (uint32_t j = 0; j < 4; ++j) {
++      positions_out[i][j] = position_export_sink.position[j];
++    }
++  }
++  shader_interpreter_.SetExportSink(nullptr);
++  return complete;
++}
++
+ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
+   SCOPE_profile_cpu_f("gpu");
+ 

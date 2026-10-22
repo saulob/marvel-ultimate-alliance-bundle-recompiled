@@ -1,0 +1,144 @@
+Adapted from patches/sdk/0022-gpu-shared-memory-lock-free-validity.patch in Unowa001/crackdown-recomp.
+Copyright (c) 2026, Jerrod (Unowa001). BSD 3-Clause License, see packaging/licenses/THIRD-PARTY-LICENSES.txt.
+
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -148,6 +148,12 @@ class SharedMemory {
+   // touched pages of the buffer of this size will be invalidated).
+   uint32_t page_size_log2_;
+ 
++  // Whether every page of the ranges is valid and has host memory, without taking
++  // global_critical_region_. Only the command processor thread sets valid bits and allocates; the
++  // invalidation callback clears valid bits with release stores before the guest can write the
++  // pages and then submit the commands that use them.
++  bool AreRangesValidLockFree(const std::pair<uint32_t, uint32_t>* ranges, size_t count) const;
++
+   bool EnsureHostGpuMemoryAllocated(uint32_t start, uint32_t length);
+   uint32_t host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;
+   std::vector<uint64_t> host_gpu_memory_sparse_allocated_;
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -10,16 +10,25 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
++#include <bit>
+ #include <cstring>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+ #include <rex/bit.h>
++#include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
++REXCVAR_DEFINE_UINT32(gpu_invalidation_expand_pages, 16, "GPU",
++                      "When the CPU writes a page the GPU holds a copy of, also drop the aligned "
++                      "group of this many pages around it (power of two, 1-64; 64 is the original "
++                      "whole block): fewer pages re-uploaded, more write faults")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+@@ -337,10 +346,58 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
+   watch_range_first_free_ = range;
+ }
+ 
++bool SharedMemory::AreRangesValidLockFree(const std::pair<uint32_t, uint32_t>* ranges,
++                                          size_t count) const {
++  for (size_t i = 0; i < count; ++i) {
++    uint32_t start = ranges[i].first;
++    uint32_t length = ranges[i].second;
++    if (!length) {
++      continue;
++    }
++    if (start > kBufferSize || (kBufferSize - start) < length) {
++      return false;
++    }
++    uint32_t last = start + length - 1;
++    // A full-buffer RangeWrittenByGpu can mark pages valid that were never allocated.
++    if (host_gpu_memory_sparse_granularity_log2_ != UINT32_MAX) {
++      uint32_t allocation_first = start >> host_gpu_memory_sparse_granularity_log2_;
++      uint32_t allocation_last = last >> host_gpu_memory_sparse_granularity_log2_;
++      if (rex::bit::GetNextRangeUnset(host_gpu_memory_sparse_allocated_.data(), allocation_first,
++                                      allocation_last - allocation_first + 1)
++              .second) {
++        return false;
++      }
++    }
++    uint32_t page_first = start >> page_size_log2_;
++    uint32_t page_last = last >> page_size_log2_;
++    uint32_t block_first = page_first >> 6;
++    uint32_t block_last = page_last >> 6;
++    for (uint32_t block = block_first; block <= block_last; ++block) {
++      uint64_t needed = UINT64_MAX;
++      if (block == block_first) {
++        needed &= ~((uint64_t(1) << (page_first & 63)) - 1);
++      }
++      if (block == block_last && (page_last & 63) != 63) {
++        needed &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
++      }
++      uint64_t valid =
++          std::atomic_ref<uint64_t>(const_cast<uint64_t&>(system_page_flags_valid_[block]))
++              .load(std::memory_order_acquire);
++      if ((valid & needed) != needed) {
++        return false;
++      }
++    }
++  }
++  return true;
++}
++
+ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count) {
+   if (ranges == nullptr || !count) {
+     return true;
+   }
++  if (AreRangesValidLockFree(ranges, count)) {
++    return true;
++  }
+ 
+   // Some texture or buffer is empty, for example - safe to draw in this case.
+   std::vector<std::pair<uint32_t, uint32_t>>& merged_ranges = request_ranges_merged_;
+@@ -495,6 +552,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+ 
+   auto global_lock = global_critical_region_.Acquire();
+ 
++  uint32_t page_first_written = page_first;
++  uint32_t page_last_written = page_last;
++
+   if (!exact_range) {
+     // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be
+     // invalidated - if no GPU-written data nearby that was not intended to be
+@@ -515,6 +575,14 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+       page_last =
+           (page_last & ~uint32_t(63)) + (std::max(rex::tzcnt(gpu_written_end), uint8_t(1)) - 1);
+     }
++    // Every dropped page is re-uploaded when next used; a smaller aligned group around the write
++    // trades that for more write faults on the guest thread.
++    uint32_t expand_pages =
++        std::bit_floor(std::clamp(REXCVAR_GET(gpu_invalidation_expand_pages), 1u, 64u));
++    if (expand_pages < 64) {
++      page_first = std::max(page_first, page_first_written & ~(expand_pages - 1));
++      page_last = std::min(page_last, page_last_written | (expand_pages - 1));
++    }
+   }
+ 
+   for (uint32_t i = block_first; i <= block_last; ++i) {
+@@ -525,7 +593,10 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+     if (i == block_last && (page_last & 63) != 63) {
+       invalidate_bits &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+     }
+-    system_page_flags_valid_[i] &= ~invalidate_bits;
++    // AreRangesValidLockFree reads this without the lock.
++    std::atomic_ref<uint64_t> valid(system_page_flags_valid_[i]);
++    valid.store(valid.load(std::memory_order_relaxed) & ~invalidate_bits,
++                std::memory_order_release);
+     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+   }
+ 

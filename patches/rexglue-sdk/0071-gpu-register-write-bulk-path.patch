@@ -1,0 +1,86 @@
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..50e43e2 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <bitset>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
+@@ -99,6 +100,42 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
+   return ReadbackResolveMode::kDisabled;
+ }
+ 
++// A table instead of RegisterFile::GetRegisterInfo's switch: WriteRegister
++// checks this on every register write.
++std::bitset<RegisterFile::kRegisterCount> BuildKnownRegisterSet() {
++  std::bitset<RegisterFile::kRegisterCount> known;
++#define XE_GPU_REGISTER(index, type, name) known.set(index);
++#include <rex/graphics/register_table.inc>
++#undef XE_GPU_REGISTER
++  return known;
++}
++
++const std::bitset<RegisterFile::kRegisterCount> kKnownRegisters = BuildKnownRegisterSet();
++
++// Render-state registers: no write side effects in any backend.
++bool IsContextRegisterRange(uint32_t first_index, uint32_t last_index) {
++  constexpr uint32_t kFirstContextRegister = 0x2000;
++  return first_index >= kFirstContextRegister && last_index < XE_GPU_REG_SHADER_CONSTANT_000_X;
++}
++
++// Runs of these only store values (the backends invalidate constant buffers
++// for the constant spans), so they can be copied as a block. Shorter runs are
++// cheaper one register at a time.
++bool IsBulkWritableRegisterRange(uint32_t first_index, uint32_t count) {
++  constexpr uint32_t kMinBulkRegisterCount = 3;
++  if (count < kMinBulkRegisterCount) {
++    return false;
++  }
++  uint32_t last_index = first_index + count - 1;
++  return IsContextRegisterRange(first_index, last_index) ||
++         (first_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
++          last_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) ||
++         (first_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
++          last_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) ||
++         (first_index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
++          last_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31);
++}
++
+ }  // namespace
+ 
+ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
+@@ -355,7 +392,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+ 
+   // Volatile for the WAIT_REG_MEM loop.
+   const_cast<volatile uint32_t&>(regs.values[index]) = value;
+-  if (!regs.GetRegisterInfo(index)) {
++  if (!kKnownRegisters[index]) {
+     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
+   }
+ 
+@@ -493,6 +530,10 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+ 
+ void CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
+                                              uint32_t num_registers) {
++  if (num_registers && IsContextRegisterRange(start_index, start_index + num_registers - 1)) {
++    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
++    return;
++  }
+   for (uint32_t i = 0; i < num_registers; ++i) {
+     uint32_t data = memory::load_and_swap<uint32_t>(base + i);
+     WriteRegister(start_index + i, data);
+@@ -702,6 +743,10 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+ 
+   uint32_t base_index = (packet & 0x7FFF);
+   uint32_t write_one_reg = (packet >> 15) & 0x1;
++  if (!write_one_reg && IsBulkWritableRegisterRange(base_index, count)) {
++    WriteRegisterRangeFromRing(reader, base_index, count);
++    return true;
++  }
+   for (uint32_t m = 0; m < count; m++) {
+     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
+     uint32_t target_index = write_one_reg ? base_index : base_index + m;

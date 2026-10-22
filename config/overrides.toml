@@ -27,3 +27,11 @@ address = 0x824AF158
 name = "mua_audio_pcm_firewall"
 registers = ["r4"]
 after_instruction = false
+
+# The rendezvous spin in sub_824A6BA8 (XAudio mix workers) has no kernel wait, so title termination cannot stop it.
+[[midasm_hook]]
+address = 0x824A6C84
+name = "mua_audio_barrier_escape"
+registers = []
+after_instruction = false
+return_on_true = true

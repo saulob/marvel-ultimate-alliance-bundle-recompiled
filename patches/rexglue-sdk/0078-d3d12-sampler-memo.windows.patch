@@ -1,0 +1,119 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index af79b56..8989832 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -756,6 +756,15 @@ class D3D12CommandProcessor : public CommandProcessor {
+   std::vector<D3D12TextureCache::TextureSRVKey> current_texture_srv_keys_pixel_;
+   std::vector<D3D12TextureCache::SamplerParameters> current_samplers_vertex_;
+   std::vector<D3D12TextureCache::SamplerParameters> current_samplers_pixel_;
++  // Sampler parameters depend only on the shader's sampler bindings, the fetch constants and
++  // anisotropic_override; the generation changes on every fetch constant write.
++  uint64_t fetch_constants_generation_ = 1;
++  const D3D12Shader* sampler_memo_shader_vertex_ = nullptr;
++  const D3D12Shader* sampler_memo_shader_pixel_ = nullptr;
++  uint64_t sampler_memo_fetch_generation_vertex_ = 0;
++  uint64_t sampler_memo_fetch_generation_pixel_ = 0;
++  int32_t sampler_memo_anisotropic_override_vertex_ = 0;
++  int32_t sampler_memo_anisotropic_override_pixel_ = 0;
+   std::vector<uint32_t> current_sampler_bindless_indices_vertex_;
+   std::vector<uint32_t> current_sampler_bindless_indices_pixel_;
+ 
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 1e4e6e2..999df7c 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -103,5 +103,6 @@ REXCVAR_DECLARE(bool, d3d12_tessellation_wireframe);
+ REXCVAR_DECLARE(bool, d3d12_tiled_shared_memory);
+ REXCVAR_DECLARE(std::string, render_target_path_d3d12);
++REXCVAR_DECLARE(bool, mua_d3d12_sampler_memo);
+ // Legacy backend compatibility aliases for shared readback controls.
+ REXCVAR_DECLARE(bool, d3d12_readback_memexport);
+ REXCVAR_DECLARE(bool, d3d12_readback_resolve);
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 3da81c6..97f389c 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -47,6 +47,11 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+                     "Submit command list when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(mua_d3d12_sampler_memo, true, "GPU/D3D12",
++                    "Recompute sampler parameters only when the shader, the fetch constants or "
++                    "anisotropic_override changed")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1800,6 +1805,7 @@ void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+   } else if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+              index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+     cbuffer_binding_fetch_.up_to_date = false;
++    ++fetch_constants_generation_;
+     if (texture_cache_ != nullptr) {
+       texture_cache_->TextureFetchConstantWritten((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) /
+                                                   6);
+@@ -1878,6 +1884,7 @@ void D3D12CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+     cbuffer_binding_fetch_.up_to_date = false;
++    ++fetch_constants_generation_;
+     uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+     uint32_t last_fetch_dword = end_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+     if (texture_cache_) {
+@@ -3380,6 +3387,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+     cbuffer_binding_float_pixel_.up_to_date = false;
+     cbuffer_binding_bool_loop_.up_to_date = false;
+     cbuffer_binding_fetch_.up_to_date = false;
++    ++fetch_constants_generation_;
+     current_shared_memory_binding_is_uav_.reset();
+     if (bindless_resources_used_) {
+       cbuffer_binding_descriptor_indices_vertex_.up_to_date = false;
+@@ -4245,7 +4253,13 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+       vertex_shader->GetSamplerBindingsAfterTranslation();
+   size_t texture_count_vertex = textures_vertex.size();
+   size_t sampler_count_vertex = samplers_vertex.size();
+-  if (sampler_count_vertex) {
++  bool sampler_memo_enabled = REXCVAR_GET(mua_d3d12_sampler_memo);
++  int32_t anisotropic_override_value = REXCVAR_GET(anisotropic_override);
++  bool samplers_vertex_unchanged =
++      sampler_memo_enabled && sampler_memo_shader_vertex_ == vertex_shader &&
++      sampler_memo_fetch_generation_vertex_ == fetch_constants_generation_ &&
++      sampler_memo_anisotropic_override_vertex_ == anisotropic_override_value;
++  if (sampler_count_vertex && !samplers_vertex_unchanged) {
+     if (current_sampler_layout_uid_vertex_ != sampler_layout_uid_vertex) {
+       current_sampler_layout_uid_vertex_ = sampler_layout_uid_vertex;
+       cbuffer_binding_descriptor_indices_vertex_.up_to_date = false;
+@@ -4262,6 +4276,9 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+         current_samplers_vertex_[i] = parameters;
+       }
+     }
++    sampler_memo_shader_vertex_ = vertex_shader;
++    sampler_memo_fetch_generation_vertex_ = fetch_constants_generation_;
++    sampler_memo_anisotropic_override_vertex_ = anisotropic_override_value;
+   }
+ 
+   // Get textures and samplers used by the pixel shader, check if the last used
+@@ -4277,7 +4294,11 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+     texture_count_pixel = textures_pixel->size();
+     samplers_pixel = &pixel_shader->GetSamplerBindingsAfterTranslation();
+     sampler_count_pixel = samplers_pixel->size();
+-    if (sampler_count_pixel) {
++    bool samplers_pixel_unchanged =
++        sampler_memo_enabled && sampler_memo_shader_pixel_ == pixel_shader &&
++        sampler_memo_fetch_generation_pixel_ == fetch_constants_generation_ &&
++        sampler_memo_anisotropic_override_pixel_ == anisotropic_override_value;
++    if (sampler_count_pixel && !samplers_pixel_unchanged) {
+       if (current_sampler_layout_uid_pixel_ != sampler_layout_uid_pixel) {
+         current_sampler_layout_uid_pixel_ = sampler_layout_uid_pixel;
+         cbuffer_binding_descriptor_indices_pixel_.up_to_date = false;
+@@ -4294,6 +4315,9 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+           bindful_samplers_written_pixel_ = false;
+         }
+       }
++      sampler_memo_shader_pixel_ = pixel_shader;
++      sampler_memo_fetch_generation_pixel_ = fetch_constants_generation_;
++      sampler_memo_anisotropic_override_pixel_ = anisotropic_override_value;
+     }
+   } else {
+     texture_layout_uid_pixel = PipelineCache::kLayoutUIDEmpty;

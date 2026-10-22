@@ -1,0 +1,51 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index f0f2340..e36d946 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -86,6 +86,9 @@ class CommandProcessor {
+ 
+   uint32_t counter() const { return counter_; }
+   void increment_counter() { counter_++; }
++  // Guest CPU code may have changed memory a WAIT_REG_MEM polls (the vblank interrupt completes
++  // flips that the GPU waits for).
++  void NotifyGuestProgress() { guest_progress_event_->Set(); }
+ 
+   Shader* active_vertex_shader() const { return active_vertex_shader_; }
+   Shader* active_pixel_shader() const { return active_pixel_shader_; }
+@@ -239,6 +242,8 @@ class CommandProcessor {
+ 
+   std::atomic<bool> worker_running_;
+   system::object_ref<system::XHostThread> worker_thread_;
++  std::unique_ptr<rex::thread::Event> guest_progress_event_ =
++      rex::thread::Event::CreateAutoResetEvent(false);
+ 
+   std::queue<std::function<void()>> pending_fns_;
+ 
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 3d94ed4..8485820 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -1097,7 +1097,8 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+           rex::thread::MaybeYield();
+           ++unmatched_poll_count;
+         } else {
+-          rex::thread::Sleep(std::chrono::milliseconds(1));
++          // A notification set after the value above was read is still pending, so it isn't lost.
++          rex::thread::Wait(guest_progress_event_.get(), false, std::chrono::milliseconds(1));
+         }
+         rex::thread::SyncMemory();
+         ReturnFromWait();
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 460eb9e..fdb7562 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -345,6 +345,9 @@ void GraphicsSystem::MarkVblank() {
+   //     something wrong and the CP will block waiting for code that
+   //     needs to be run in the interrupt.
+   DispatchInterruptCallback(0, 2);
++  if (command_processor_) {
++    command_processor_->NotifyGuestProgress();
++  }
+ }
+ 
+ void GraphicsSystem::ClearCaches() {

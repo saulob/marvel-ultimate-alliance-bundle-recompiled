@@ -79,9 +79,10 @@ void TestSetting() {
   CHECK(!Has(launcher, "\"native_2x_msaa\""));
 
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
-  const std::size_t no_launcher = app.find("if (!show_launcher_) {\n      mua::ApplyMultisampling();");
-  const std::size_t no_launcher_crlf =
-      app.find("if (!show_launcher_) {\r\n      mua::ApplyMultisampling();");
+  const std::size_t no_launcher = app.find(
+      "if (!show_launcher_) {\n      mua::ApplyShaderWait();\n      mua::ApplyMultisampling();");
+  const std::size_t no_launcher_crlf = app.find(
+      "if (!show_launcher_) {\r\n      mua::ApplyShaderWait();\r\n      mua::ApplyMultisampling();");
   CHECK(no_launcher != std::string::npos || no_launcher_crlf != std::string::npos);
 }
 

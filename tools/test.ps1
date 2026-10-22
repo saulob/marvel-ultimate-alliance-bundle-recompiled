@@ -114,12 +114,13 @@ try {
         if ($LASTEXITCODE) { throw "Building $group failed ($LASTEXITCODE)" }
     }
 
-    $headless = @('aspect_ratio', 'audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'graphics_adapter', 'keyboard', 'launcher_quit',
+    $headless = @('aspect_ratio', 'audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'gpu_perf_patches', 'graphics_adapter', 'render_scale', 'keyboard', 'launcher_quit',
                   'lifecycle', 'log_path', 'multisampling', 'relaunch', 'resolve_order', 'runtime_config',
                   'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'sound_stream_ring', 'user_data', 'window_host',
-                  'window_placement') | ForEach-Object { "mua_$($_)_tests" }
-    $runtime = @('active_log_tests', 'filesystem_mapping_tests', 'log_filter_tests', 'physical_heap_stress',
-                 'settings_tests', 'shutdown_order_tests', 'title_thread_shutdown_tests',
+                  'window_placement', 'xaudio_barrier', 'd3d12_async_submission', 'd3d12_sampler_memo',
+                  'd3d12_copy_validation') | ForEach-Object { "mua_$($_)_tests" }
+    $runtime = @('active_log_tests', 'filesystem_mapping_tests', 'frame_stats_tests', 'log_filter_tests',
+                 'physical_heap_stress', 'settings_tests', 'shutdown_order_tests', 'title_thread_shutdown_tests',
                  'vmsum_tests') | ForEach-Object { "mua_$_" }
     Write-Host 'Headless tests:'
     foreach ($name in $headless) { Invoke-TestExecutable (Join-Path $BuildDir "$name.exe") @() }

@@ -9,13 +9,16 @@ code adapted from Unowa001/crackdown-recomp, which has to travel with every dist
 Unowa001/crackdown-recomp, vector multiply-add and dot products, XMA context guards, audio event reset
 ========================================================================
 
-Source: https://github.com/Unowa001/crackdown-recomp (patches/sdk/0003 and 0006, commit 7a152d0;
+Source: https://github.com/Unowa001/crackdown-recomp (patches/sdk/0003, 0006, 0021, 0022, 0023 and 0026, commit 7a152d0;
 crackdown/src/hooks_events.cpp, commit c23c6ff)
 License: BSD 3-Clause
 
 patches/rexglue-sdk/0062 and 0065 are adapted from 0006 and 0066 from 0003, through the Crackdown PC port's
 patches/rexglue-sdk/0095 and 0096, and the ResetEvent hook in src/sound_stream_ring.cpp from the one in hooks_events.cpp.
-Each patch starts with the same attribution.
+patches/rexglue-sdk/0079 to 0082 (shared memory validity, asynchronous D3D12 submission, register block copies and host
+thread placement) are adapted from 0022, 0021, 0023 and 0026, through the Hard Corps: Uprising port. Each patch starts
+with the same attribution. The XAudio mix-worker rendezvous in src/xaudio_worker_barrier.cpp and src/xaudio_barrier.h is
+adapted from the Crackdown PC port's src/audio_guest_sync.cpp and src/xaudio_barrier.h, which come from crackdown-recomp.
 
 BSD 3-Clause License
 

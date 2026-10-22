@@ -1,0 +1,51 @@
+diff --git a/src/filesystem/devices/host_path_device.cpp b/src/filesystem/devices/host_path_device.cpp
+--- a/src/filesystem/devices/host_path_device.cpp
++++ b/src/filesystem/devices/host_path_device.cpp
+@@ -17,6 +17,7 @@
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
++#include <rex/platform.h>
+ #include <rex/string/utf8.h>
+ 
+ namespace rex::filesystem {
+@@ -90,6 +91,10 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
+         continue;
+       }
+ 
++#if REX_PLATFORM_WIN32
++      // Windows file names are case-insensitive, so the exact name was the only possible match.
++      return nullptr;
++#else
+       auto child_infos = rex::filesystem::ListFiles(current_entry->host_path());
+       auto match = std::find_if(child_infos.begin(), child_infos.end(), [&](const auto& info) {
+         return rex::string::utf8_equal_case(rex::path_to_utf8(info.name), part);
+@@ -105,6 +110,7 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
+       }
+       child = new_child;
+       current_entry->children_.push_back(std::unique_ptr<Entry>(new_child));
++#endif
+     }
+ 
+     current_entry = static_cast<HostPathEntry*>(child);
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+--- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+@@ -533,15 +533,13 @@ u32 NtQueryFullAttributesFile_entry(ppc_ptr_t<X_OBJECT_ATTRIBUTES> obj_attribs,
+     assert_always();
+   }
+ 
+-  auto target_path = util::TranslateAnsiPath(REX_KERNEL_MEMORY(), object_name);
+-
+   // Enforce that the path is ASCII.
+-  if (!IsValidPath(target_path, false)) {
++  if (!IsValidPath(path_str, false)) {
+     return X_STATUS_OBJECT_NAME_INVALID;
+   }
+ 
+   // Resolve the file using the virtual file system.
+-  auto entry = REX_KERNEL_FS()->ResolvePath(target_path);
++  auto entry = REX_KERNEL_FS()->ResolvePath(path_str);
+   if (entry) {
+     // Found.
+     file_info->creation_time = entry->create_timestamp();

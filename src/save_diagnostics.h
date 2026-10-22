@@ -19,6 +19,11 @@ inline uint32_t LoadBE32(const uint8_t* base, uint32_t address) {
   return std::byteswap(value);
 }
 
+inline void StoreBE32(uint8_t* base, uint32_t address, uint32_t value) {
+  value = std::byteswap(value);
+  std::memcpy(base + address, &value, sizeof(value));
+}
+
 inline bool IsTitleSetting(uint32_t setting_id) {
   return (setting_id & kTitleSettingMask) == kTitleSettingMask;
 }

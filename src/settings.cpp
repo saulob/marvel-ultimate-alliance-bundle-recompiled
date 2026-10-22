@@ -20,6 +20,7 @@
 #include "aspect_ratio.h"
 #include "crash_report.h"
 #include "diagnostics.h"
+#include "frame_limiter.h"
 #include "game_files.h"
 #include "graphics_adapters.h"
 #include "input_summary.h"
@@ -32,6 +33,8 @@ REXCVAR_DEFINE_BOOL(mua_launcher, true, "Marvel Ultimate Alliance",
                     "Show the launcher before the game starts (hold Shift at start to force it)");
 REXCVAR_DEFINE_BOOL(mua_skip_launcher, false, "Marvel Ultimate Alliance",
                     "Skip the launcher once (set when the launcher restarts the game)");
+REXCVAR_DEFINE_INT32(mua_frame_rate, mua::kFrameRateDefault, "Marvel Ultimate Alliance",
+                     "Frame rate: 30, 60 (original), 90, 120, 144, 165, 240 or 0 for unlimited");
 REXCVAR_DEFINE_BOOL(mua_show_fps, true, "Marvel Ultimate Alliance", "Show the frame rate in the window title");
 REXCVAR_DEFINE_BOOL(mua_show_render_resolution, false, "Marvel Ultimate Alliance",
                     "Show the render resolution in the window title");
@@ -76,6 +79,7 @@ std::vector<std::string> GameSettingKeys() {
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
+      "mua_frame_rate",
       "mua_show_fps",
       "mua_show_render_resolution",
       "mua_show_frame_counter",
@@ -265,6 +269,8 @@ void GameSettings::Capture(const std::filesystem::path& player_file, const std::
     }
   }
   pending_ = saved_;
+  std::string& frame_rate = pending_["mua_frame_rate"];
+  frame_rate = std::to_string(FrameRateFromText(frame_rate));
 }
 
 void GameSettings::CaptureLateRegistered() {
@@ -352,7 +358,13 @@ void GameSettings::Apply() const {
     }
     rex::cvar::SetFlagByName(key, value);
   }
+  ApplyShaderWait();
   ApplyMultisampling();
+}
+
+void ApplyShaderWait() {
+  rex::cvar::SetFlagByName("async_shader_wait_ms",
+                           std::to_string(ShaderWaitMsFor(FrameRateOrDefault(REXCVAR_GET(mua_frame_rate)))));
 }
 
 // Also replaces a native_2x_msaa = false written by launchers that labelled it Off.
@@ -456,6 +468,8 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.game.status = GameStateName(game.state);
   diagnostics.game.sha256 = game.xex_sha256;
 
+  const int diagnostic_fps = FrameRateFromText(settings.Get("mua_frame_rate", "60"));
+  diagnostics.gameplay.frame_rate = FrameRateText(diagnostic_fps);
   diagnostics.gameplay.present = PresentationText(runtime_tearing);
 
   diagnostics.graphics.render_width = GuestWidth(aspect) * scale;

@@ -1,0 +1,20 @@
+Adapted from GoldenEye-007-XBLA-PC-Recomp patches (presenter.cpp WaitForUITickFromUIThread): the wait for the DXGI UI tick is bounded to 32 ms, so the window keeps painting when IDXGIOutput::WaitForVBlank stops returning (display sleep, monitor topology change, output lost).
+
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index c13228e..2c3ea7f 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1628,7 +1628,12 @@ void Presenter::WaitForUITickFromUIThread() {
+           std::min(last_vblank_before_wait + uint64_t(1), dxgi_ui_tick_last_vblank_);
+       return;
+     }
+-    dxgi_ui_tick_signal_condition_.wait(dxgi_ui_tick_lock);
++    // WaitForVBlank on the tick thread may block for good when the output stops producing vblanks
++    // (display sleep, topology change), so painting goes on without the tick after a while.
++    if (dxgi_ui_tick_signal_condition_.wait_for(dxgi_ui_tick_lock, std::chrono::milliseconds(32)) ==
++        std::cv_status::timeout) {
++      return;
++    }
+   }
+ #endif  // XE_PLATFORM
+ }

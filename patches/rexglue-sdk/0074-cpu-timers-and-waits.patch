@@ -1,0 +1,212 @@
+diff --git a/src/core/perf/counter.cpp b/src/core/perf/counter.cpp
+index 536009e..2b873af 100644
+--- a/src/core/perf/counter.cpp
++++ b/src/core/perf/counter.cpp
+@@ -27,6 +27,7 @@ namespace rex::perf {
+ namespace {
+ 
+ constexpr size_t kNumCounters = static_cast<size_t>(CounterId::kCount);
++constexpr int64_t kFunctionsDispatchedBatch = 1024;
+ 
+ std::array<std::atomic<int64_t>, kNumCounters> g_counters{};
+ std::array<std::atomic<int64_t>, kNumCounters> g_snapshot{};
+@@ -94,6 +95,17 @@ void SetCounter(CounterId id, int64_t value) {
+ }
+ 
+ void IncrementCounter(CounterId id, int64_t delta) {
++  if (id == CounterId::kFunctionsDispatched) [[likely]] {
++    // Every guest indirect call lands here. Threads running guest code at once must not all lock the same
++    // cache line, so each one counts privately and publishes in batches.
++    thread_local int64_t pending = 0;
++    pending += delta;
++    if (pending >= kFunctionsDispatchedBatch) {
++      g_counters[static_cast<size_t>(id)].fetch_add(pending, std::memory_order_relaxed);
++      pending = 0;
++    }
++    return;
++  }
+   g_counters[static_cast<size_t>(id)].fetch_add(delta, std::memory_order_relaxed);
+ }
+ 
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 5cfea05..4997510 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -10,12 +10,14 @@
+  */
+ 
+ #include <algorithm>
++#include <condition_variable>
+ #include <forward_list>
++#include <mutex>
+ 
+ #include <disruptorplus/multi_threaded_claim_strategy.hpp>
+ #include <disruptorplus/ring_buffer.hpp>
+ #include <disruptorplus/sequence_barrier.hpp>
+-#include <disruptorplus/spin_wait_strategy.hpp>
++#include <disruptorplus/sequence.hpp>
+ 
+ #include <rex/assert.h>
+ #include <rex/thread.h>
+@@ -27,6 +29,56 @@ namespace rex::thread {
+ 
+ using WaitItem = TimerQueueWaitItem;
+ 
++namespace {
++
++// Waits on a condition variable instead of spinning. disruptorplus' own blocking strategy hands its predicate and
++// timeout to std::condition_variable in the wrong order, so it cannot wait with a timeout.
++class BlockingWaitStrategy {
++ public:
++  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
++                                      const std::atomic<dp::sequence_t>* const sequences[]) {
++    dp::sequence_t result;
++    std::unique_lock<std::mutex> lock(mutex_);
++    condition_.wait(lock, [&]() { return Published(sequence, count, sequences, &result); });
++    return result;
++  }
++
++  template <typename Rep, typename Period>
++  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
++                                      const std::atomic<dp::sequence_t>* const sequences[],
++                                      const std::chrono::duration<Rep, Period>& timeout) {
++    return wait_until_published(sequence, count, sequences, std::chrono::steady_clock::now() + timeout);
++  }
++
++  template <typename Clock, typename Duration>
++  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
++                                      const std::atomic<dp::sequence_t>* const sequences[],
++                                      const std::chrono::time_point<Clock, Duration>& timeout_time) {
++    dp::sequence_t result;
++    std::unique_lock<std::mutex> lock(mutex_);
++    condition_.wait_until(lock, timeout_time,
++                          [&]() { return Published(sequence, count, sequences, &result); });
++    return result;
++  }
++
++  void signal_all_when_blocking() {
++    std::lock_guard<std::mutex> lock(mutex_);
++    condition_.notify_all();
++  }
++
++ private:
++  static bool Published(dp::sequence_t sequence, size_t count,
++                        const std::atomic<dp::sequence_t>* const sequences[], dp::sequence_t* result) {
++    *result = dp::minimum_sequence_after(sequence, count, sequences);
++    return dp::difference(*result, sequence) >= 0;
++  }
++
++  std::mutex mutex_;
++  std::condition_variable condition_;
++};
++
++}  // namespace
++
+ class TimerQueue {
+  public:
+   using clock = WaitItem::clock;
+@@ -69,7 +121,7 @@ class TimerQueue {
+         // Consume new wait items and add them to sorted wait queue
+         dp::sequence_t available = claim_strategy_.wait_until_published(
+             next_sequence, next_sequence - 1,
+-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
++            wait_queue_.empty() ? clock::now() + kIdleWait : wait_queue_.front()->due_);
+ 
+         // Check for timeout
+         if (available != next_sequence - 1) {
+@@ -139,12 +191,16 @@ class TimerQueue {
+   std::jthread::id dispatch_thread_id() const { return dispatch_thread_.get_id(); }
+ 
+  private:
++  // Blocks instead of spinning until the next timer is due; capped because time_point::max() is not
++  // handled by every standard library.
++  static constexpr std::chrono::seconds kIdleWait{1};
++
+   // This ring buffer will be used to introduce timers queued by the public API
+   static constexpr size_t kWaitCount = 512;
+   dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
+-  dp::spin_wait_strategy wait_strategy_;
+-  dp::multi_threaded_claim_strategy<dp::spin_wait_strategy> claim_strategy_;
+-  dp::sequence_barrier<dp::spin_wait_strategy> consumed_;
++  BlockingWaitStrategy wait_strategy_;
++  dp::multi_threaded_claim_strategy<BlockingWaitStrategy> claim_strategy_;
++  dp::sequence_barrier<BlockingWaitStrategy> consumed_;
+ 
+   // This is a _sorted_ (ascending due_) list of active timers managed by a
+   // dedicated thread
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 8f2fcb0..460eb9e 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -166,7 +166,17 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             MarkVblank();
+             last_frame_time += interval_ticks;
+           }
+-          rex::thread::Sleep(std::chrono::milliseconds(1));
++          // Wait for the next vblank instead of polling for it.
++          current_time = chrono::Clock::QueryGuestTickCount();
++          uint64_t elapsed_ticks = current_time - last_frame_time;
++          if (elapsed_ticks >= interval_ticks) {
++            continue;
++          }
++          double remaining_us = double(interval_ticks - elapsed_ticks) * 1e6 /
++                                double(guest_tick_frequency) /
++                                std::max(chrono::Clock::guest_time_scalar(), 1e-3);
++          rex::thread::Sleep(std::chrono::microseconds(
++              std::clamp(int64_t(remaining_us), int64_t(1000), int64_t(100000))));
+         }
+         return 0;
+       }));
+@@ -174,6 +184,12 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+   // vsync_worker_thread_->set_can_debugger_suspend(true);
+   vsync_worker_thread_->set_name("GPU VSync");
+   vsync_worker_thread_->Create();
++#if REX_PLATFORM_WIN32
++  // It sleeps between vblanks; a busy machine must not make them late.
++  if (auto* vsync_thread = vsync_worker_thread_->thread()) {
++    vsync_thread->set_priority(rex::thread::ThreadPriority::kAboveNormal);
++  }
++#endif
+ 
+   return X_STATUS_SUCCESS;
+ }
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+index 8b862fc..ddae230 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
+@@ -376,6 +376,16 @@ u32 RtlInitializeCriticalSectionAndSpinCount_entry(ppc_ptr_t<X_RTL_CRITICAL_SECT
+   return xeRtlInitializeCriticalSectionAndSpinCount(cs, cs.guest_address(), spin_count);
+ }
+ 
++constexpr int kCriticalSectionIdleSpins = 256;
++
++inline void SpinPause() {
++#if defined(__x86_64__) || defined(_M_X64)
++  _mm_pause();
++#elif defined(__aarch64__)
++  __builtin_arm_yield();
++#endif
++}
++
+ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+   uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
+   uint32_t spin_count = cs->header.absolute * 256;
+@@ -397,6 +407,18 @@ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+     }
+   }
+ 
++  // Holds are short and a kernel wait costs far more than the hold, so poll briefly first. Only a free
++  // lock without waiters reads -1, so this cannot take the lock from a thread that is already waiting.
++  for (int i = 0; i < kCriticalSectionIdleSpins; ++i) {
++    if (*reinterpret_cast<volatile int32_t*>(&cs->lock_count) == -1 &&
++        rex::thread::atomic_cas(-1, 0, &cs->lock_count)) {
++      cs->owning_thread = cur_thread;
++      cs->recursion_count = 1;
++      return;
++    }
++    SpinPause();
++  }
++
+   if (rex::thread::atomic_inc(&cs->lock_count) != 0) {
+     // Create a full waiter.
+     xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0, nullptr);

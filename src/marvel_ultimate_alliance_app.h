@@ -25,9 +25,11 @@
 #include "aspect_ratio.h"
 #include "diagnostics.h"
 #include "frame_counter.h"
+#include "frame_limiter.h"
 #include "game_files.h"
 #include "graphics_adapters.h"
 #include "guest_functions.h"
+#include "hang_watchdog.h"
 #include "input_summary.h"
 #include "launcher.h"
 #include "log_filter.h"
@@ -81,6 +83,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     mua::LoadPlayerSettings(mua::PlayerSettingsPath(user_data_root()));
     mua::ApplyDetailedLogging();
     mua::InstallSessionLogCleanup();
+    mua::RemoveDiscardedSessionLogs();
     const mua::ApplicationIdentity identity{
         .product = "Marvel Ultimate Alliance",
         .version = MUA_PORT_VERSION,
@@ -128,6 +131,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     }
     game_settings_.CaptureLateRegistered();
     if (!show_launcher_) {
+      mua::ApplyShaderWait();
       mua::ApplyMultisampling();
       mua::PinGuestVideoMode();
       return defaults;
@@ -211,6 +215,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     REXLOG_INFO("Scheduling: {}", trg::TuneProcessScheduling());
     if (window()) {
       mua::CheckWindowDisplay(window()->GetNativeWindowHandle(), REXCVAR_GET(monitor));
+      mua::StartHangWatchdog(window()->GetNativeWindowHandle(),
+                             mua::LogsFolder(mua::PortFolder(), user_data_root(), mua::ActiveLogFile(), false));
       AttachWindowHost(window(), app_context(), [this] {
         rex::ui::ImGuiDrawer* drawer = imgui_drawer();
         return drawer && drawer->GetIO().WantCaptureMouse;
@@ -235,7 +241,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   // threads that are still running guest code. The OS reclaims the process.
   void OnClosing(rex::ui::UIEvent&) override {
     REXLOG_INFO("Window closing, hard-exiting process.");
-    mua::FinalizeSessionLog();
+    mua::DiscardSessionLogBeforeHardExit();
     rex::FlushLogging();
     std::_Exit(0);
   }

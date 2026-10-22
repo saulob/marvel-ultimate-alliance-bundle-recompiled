@@ -1,0 +1,65 @@
+Taken unchanged from TheSimpsonsGameRecomp 6f32882d: XObject::GetNativeObject holds the global critical region for its whole body, so its object table lookup no longer re-acquires the same recursive mutex. This runs on every guest KeSetEvent, wait, semaphore and mutant call that addresses an object by pointer.
+
+diff --git a/include/rex/system/util/object_table.h b/include/rex/system/util/object_table.h
+index df9bad4..588ac0d 100644
+--- a/include/rex/system/util/object_table.h
++++ b/include/rex/system/util/object_table.h
+@@ -45,9 +45,14 @@ class ObjectTable {
+   // not use.
+   X_STATUS RestoreHandle(X_HANDLE handle, XObject* object);
+ 
++  // `already_locked` skips re-acquiring the global critical region for
++  // callers that provably hold it for the whole call (the raw two-arg
++  // LookupObject always had this escape hatch; nothing threaded it through
++  // to the template, so lock-holding callers paid a redundant recursive
++  // lock/unlock of the process-wide mutex on every lookup).
+   template <typename T>
+-  object_ref<T> LookupObject(X_HANDLE handle) {
+-    auto object = LookupObject(handle, false);
++  object_ref<T> LookupObject(X_HANDLE handle, bool already_locked = false) {
++    auto object = LookupObject(handle, already_locked);
+     if (object) {
+       if (object->type() != T::kObjectType) {
+         object->Release();
+@@ -105,6 +110,6 @@ class ObjectTable {
+ 
+ // Generic lookup
+ template <>
+-object_ref<XObject> ObjectTable::LookupObject<XObject>(X_HANDLE handle);
++object_ref<XObject> ObjectTable::LookupObject<XObject>(X_HANDLE handle, bool already_locked);
+ 
+ }  // namespace rex::system::util
+diff --git a/src/system/util/object_table.cpp b/src/system/util/object_table.cpp
+index 6fbabd2..8e4d51b 100644
+--- a/src/system/util/object_table.cpp
++++ b/src/system/util/object_table.cpp
+@@ -261,8 +261,8 @@ ObjectTable::ObjectTableEntry* ObjectTable::LookupTable(X_HANDLE handle) {
+ 
+ // Generic lookup
+ template <>
+-object_ref<XObject> ObjectTable::LookupObject<XObject>(X_HANDLE handle) {
+-  auto object = ObjectTable::LookupObject(handle, false);
++object_ref<XObject> ObjectTable::LookupObject<XObject>(X_HANDLE handle, bool already_locked) {
++  auto object = ObjectTable::LookupObject(handle, already_locked);
+   auto result = object_ref<XObject>(reinterpret_cast<XObject*>(object));
+   return result;
+ }
+diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
+index b100120..1176335 100644
+--- a/src/system/xobject.cpp
++++ b/src/system/xobject.cpp
+@@ -406,7 +406,13 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state, void* na
+     // Already initialized.
+     // TODO: assert if the type of the object != as_type
+     uint32_t handle = header->wait_list_blink;
+-    auto object = kernel_state->object_table()->LookupObject<XObject>(handle);
++    // This function holds the global critical region for its whole body (the
++    // AcquireDirect() above), and this lookup runs on every guest
++    // KeSetEvent/wait/semaphore/mutant call that addresses the object by
++    // pointer -- the common case. Skip LookupObject's own redundant
++    // re-acquire of the same recursive mutex.
++    auto object =
++        kernel_state->object_table()->LookupObject<XObject>(handle, /*already_locked=*/true);
+ 
+     // TODO(benvanik): assert nothing has been changed in the struct.
+     return object;

@@ -1,0 +1,113 @@
+With resolution scaling, a mip level that is clamped to 1 texel along an axis at the guest size is loaded as a whole
+scale factor of texels, while that level of the scaled host texture is max((size * scale) >> level, 1), so the copy
+goes past the destination subresource and the Direct3D 12 runtime rejects the command list (Close() E_INVALIDARG).
+The copy is limited to the destination level, aligned to the host block size as CopyTextureRegion requires for
+block-compressed formats. Unscaled textures are not affected.
+
+That clamp only protected the destination; the footprint itself (both the packed mip tail's one shared footprint
+and each non-packed level's own) was still sized from the guest mip extent scaled afterward (mip-first), one step
+earlier than the box, which is scale-first: (base >> level) * scale can be exactly one row or column short of
+(base * scale) >> level, since shifting the already-scaled dimension loses less precision (1280x720 at 4x, mip 6:
+(720>>6)*4 = 44 against (720*4)>>6 = 45). Mip 6 is where the packed tail starts for this texture
+(GetPackedMipLevel(1280, 720) = 6), so its shared footprint was exactly one row short of the box the copy needed,
+and the runtime rejected it outright (Close() E_INVALIDARG, no clamp to fall back on there). For non-packed levels
+the box-vs-footprint clamp above hid the same shortfall by silently copying one row or column less than the correct
+mip. Mip-first is not simply wrong, though: once a guest mip has collapsed to 1 texel, the load shader still writes
+a whole scale factor of host texels there regardless of level, which can itself exceed scale-first (1280x720 at 4x,
+mip 10: (720>>10)*4 = 4 against (720*4)>>10 = 2). The footprint now takes the larger of the two at every level, so
+it is always at least as large as whichever the shader actually writes, and the packed tail's shared footprint
+takes the tightest bound that covers every level it serves.
+
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index e4a32ea..5074a35 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -1716,25 +1716,47 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+         is_base ? host_slice_layout_base : host_slice_layouts_mips[level];
+     level_host_slice_layout.Offset = copy_buffer_size;
+     level_host_slice_layout.Footprint.Format = host_copy_format;
++    // The load shader expands a guest mip collapsed to 1 texel into a whole scale factor of host
++    // texels (mip-first: max(base >> level, 1) * scale), but at a guest mip still wider than 1 texel,
++    // (base >> level) * scale can be one row or column short of (base * scale) >> level (scale-first;
++    // e.g. 1280x720 at 4x, mip 6: (720>>6)*4 = 44 against (720*4)>>6 = 45). The footprint must be
++    // large enough for whichever is larger, since both are genuine lower bounds on what gets written.
++    auto ScaledExtent = [](uint32_t base, uint32_t scale, uint32_t at_level) {
++      const uint32_t mip_first = std::max(base >> at_level, uint32_t(1)) * scale;
++      const uint32_t scale_first = std::max((base * scale) >> at_level, uint32_t(1));
++      return std::max(mip_first, scale_first);
++    };
+     if (level == level_packed) {
+-      // Loading the packed tail for the base or the mips - load the whole tail
+-      // to copy regions out of it.
+-      const texture_util::TextureGuestLayout::Level& guest_layout_packed =
+-          is_base ? guest_layout.base : guest_layout.mips[level];
+-      level_host_slice_layout.Footprint.Width = guest_layout_packed.x_extent_blocks * block_width;
+-      level_host_slice_layout.Footprint.Height = guest_layout_packed.y_extent_blocks * block_height;
+-      level_host_slice_layout.Footprint.Depth = guest_layout_packed.z_extent;
++      // Loading the packed tail for the base or the mips - load the whole tail to copy regions out
++      // of it. Sized from every packed level's own extent above, not the guest extent scaled
++      // afterward, which is what GetPackedMipOffset's per-level box already assumes below.
++      uint32_t packed_right = 0, packed_bottom = 0, packed_back = 0;
++      for (uint32_t packed_level = level; packed_level <= level_last; ++packed_level) {
++        uint32_t offset_x, offset_y, offset_z;
++        texture_util::GetPackedMipOffset(width, height, depth, guest_format, packed_level, offset_x,
++                                         offset_y, offset_z);
++        packed_right = std::max(packed_right,
++                                offset_x * block_width * texture_resolution_scale_x +
++                                    rex::align(ScaledExtent(width, texture_resolution_scale_x, packed_level),
++                                              host_block_width));
++        packed_bottom =
++            std::max(packed_bottom,
++                     offset_y * block_height * texture_resolution_scale_y +
++                         rex::align(ScaledExtent(height, texture_resolution_scale_y, packed_level),
++                                    host_block_height));
++        packed_back =
++            std::max(packed_back, offset_z + std::max(depth >> packed_level, uint32_t(1)));
++      }
++      level_host_slice_layout.Footprint.Width = packed_right;
++      level_host_slice_layout.Footprint.Height = packed_bottom;
++      level_host_slice_layout.Footprint.Depth = packed_back;
+     } else {
+-      level_host_slice_layout.Footprint.Width = std::max(width >> level, uint32_t(1));
+-      level_host_slice_layout.Footprint.Height = std::max(height >> level, uint32_t(1));
++      level_host_slice_layout.Footprint.Width =
++          rex::align(ScaledExtent(width, texture_resolution_scale_x, level), host_block_width);
++      level_host_slice_layout.Footprint.Height =
++          rex::align(ScaledExtent(height, texture_resolution_scale_y, level), host_block_height);
+       level_host_slice_layout.Footprint.Depth = std::max(depth >> level, uint32_t(1));
+     }
+-    level_host_slice_layout.Footprint.Width =
+-        rex::round_up(level_host_slice_layout.Footprint.Width * texture_resolution_scale_x,
+-                      UINT(host_block_width));
+-    level_host_slice_layout.Footprint.Height =
+-        rex::round_up(level_host_slice_layout.Footprint.Height * texture_resolution_scale_y,
+-                      UINT(host_block_height));
+     level_host_slice_layout.Footprint.RowPitch =
+         rex::align(rex::round_up(level_host_slice_layout.Footprint.Width / host_block_width,
+                                  host_x_blocks_per_thread) *
+@@ -1944,6 +1966,25 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+       source_box_ptr = &source_box;
+     } else {
+       source_box_ptr = nullptr;
++      if (texture_resolution_scaled) {
++        // A level that is 1 texel wide or high at the guest size is a whole scale factor in the
++        // scaled footprint, which is more than that level of the scaled host texture.
++        const D3D12_SUBRESOURCE_FOOTPRINT& footprint = location_source.PlacedFootprint.Footprint;
++        uint32_t dest_width = rex::align(
++            std::max((width * texture_resolution_scale_x) >> level, uint32_t(1)), host_block_width);
++        uint32_t dest_height =
++            rex::align(std::max((height * texture_resolution_scale_y) >> level, uint32_t(1)),
++                       host_block_height);
++        if (footprint.Width > dest_width || footprint.Height > dest_height) {
++          source_box.left = 0;
++          source_box.top = 0;
++          source_box.front = 0;
++          source_box.right = std::min(footprint.Width, dest_width);
++          source_box.bottom = std::min(footprint.Height, dest_height);
++          source_box.back = footprint.Depth;
++          source_box_ptr = &source_box;
++        }
++      }
+     }
+     for (uint32_t slice = 0; slice < array_size; ++slice) {
+       command_list.D3DCopyTextureRegion(&location_dest, 0, 0, 0, &location_source, source_box_ptr);

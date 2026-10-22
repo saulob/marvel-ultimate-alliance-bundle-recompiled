@@ -1,0 +1,279 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index a5753f5..59d0f25 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -211,6 +211,7 @@ class D3D12CommandProcessor : public CommandProcessor {
+                  uint32_t frontbuffer_height) override;
+ 
+   void OnPrimaryBufferEnd() override;
++  bool PollBackgroundWork() override;
+ 
+   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+                      const uint32_t* host_address, uint32_t dword_count) override;
+@@ -325,6 +326,9 @@ class D3D12CommandProcessor : public CommandProcessor {
+   // as when there are unfinished graphics pipeline creation requests that would
+   // need to be fulfilled before actually submitting the command list.
+   bool CanEndSubmissionImmediately() const;
++  // Ending the submission while the GPU still has several submissions queued only adds overhead,
++  // so it is done early just when the GPU would otherwise run out of work.
++  bool ShouldEndSubmissionEarly();
+   bool AwaitAllQueueOperationsCompletion() {
+     CheckSubmissionFence(submission_current_);
+     return submission_completed_ + 1 >= submission_current_;
+@@ -405,8 +409,10 @@ class D3D12CommandProcessor : public CommandProcessor {
+   bool InitializeOcclusionQueryResources();
+   void ShutdownOcclusionQueryResources();
+   bool BeginGuestOcclusionQuery(uint32_t sample_count_address);
+-  bool EndGuestOcclusionQuery(uint32_t sample_count_address,
+-                              xenos::xe_gpu_depth_sample_counts* sample_counts);
++  bool EndGuestOcclusionQuery(uint32_t sample_count_address);
++  // Writes the results of the ended queries whose submissions have completed to the guest, and,
++  // if wait is true, awaits the rest.
++  void CompleteOcclusionQueries(bool wait);
+   bool AcquireOcclusionQueryIndex(uint32_t& host_index_out);
+   void DisableHostOcclusionQueries();
+   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
+@@ -663,6 +669,12 @@ class D3D12CommandProcessor : public CommandProcessor {
+     uint32_t host_index = UINT32_MAX;
+     bool valid = false;
+   } active_occlusion_query_;
++  struct PendingOcclusionQuery {
++    uint64_t submission;
++    uint32_t host_index;
++    uint32_t sample_count_address;
++  };
++  std::deque<PendingOcclusionQuery> pending_occlusion_queries_;
+   struct VertexBufferState {
+     uint32_t address = UINT32_MAX;
+     uint32_t size = UINT32_MAX;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index a253d6e..7a81288 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -197,6 +197,10 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
+   bool is_end = is_end_via_z_pass || is_end_via_z_fail;
+ 
+   if (!is_end) {
++    // Direct3D 9 snapshots the counters into separate begin and end blocks and subtracts them, so
++    // the begin block reads as zero (as in the fallback result) and only the end block carries the
++    // host result, written once its submission completes.
++    std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
+     if (active_occlusion_query_.valid &&
+         active_occlusion_query_.sample_count_address != sample_count_addr) {
+       DisableHostOcclusionQueries();
+@@ -214,7 +218,7 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
+     return write_fallback_result();
+   }
+ 
+-  if (!EndGuestOcclusionQuery(sample_count_addr, sample_counts)) {
++  if (!EndGuestOcclusionQuery(sample_count_addr)) {
+     return write_fallback_result();
+   }
+ 
+@@ -2353,10 +2357,42 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+ }
+ 
+ void D3D12CommandProcessor::OnPrimaryBufferEnd() {
+-  if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
+-      CanEndSubmissionImmediately()) {
++  if (ShouldEndSubmissionEarly()) {
+     EndSubmission(false);
+   }
++  if (!pending_occlusion_queries_.empty()) {
++    CheckSubmissionFence(0);
++  }
++}
++
++bool D3D12CommandProcessor::ShouldEndSubmissionEarly() {
++  constexpr uint64_t kMaxSubmissionsInFlight = 3;
++  // Ending the submission would end the active query early, losing its result.
++  if (!REXCVAR_GET(d3d12_submit_on_primary_buffer_end) || !submission_open_ ||
++      active_occlusion_query_.valid || !CanEndSubmissionImmediately()) {
++    return false;
++  }
++  CheckSubmissionFence(0);
++  return submission_current_ - 1 - submission_completed_ < kMaxSubmissionsInFlight;
++}
++
++bool D3D12CommandProcessor::PollBackgroundWork() {
++  bool submission_held = submission_open_ && REXCVAR_GET(d3d12_submit_on_primary_buffer_end);
++  if (pending_occlusion_queries_.empty() && !submission_held) {
++    return false;
++  }
++  // The guest may be polling the query results, so their submission must not stay open while
++  // there is nothing more to record.
++  bool queries_in_open_submission =
++      !pending_occlusion_queries_.empty() &&
++      pending_occlusion_queries_.back().submission >= submission_current_;
++  if (submission_open_ && !active_occlusion_query_.valid && CanEndSubmissionImmediately() &&
++      (queries_in_open_submission || ShouldEndSubmissionEarly())) {
++    EndSubmission(false);
++  }
++  CheckSubmissionFence(0);
++  return !pending_occlusion_queries_.empty() ||
++         (submission_open_ && REXCVAR_GET(d3d12_submit_on_primary_buffer_end));
+ }
+ 
+ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+@@ -3383,6 +3419,8 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+   primitive_processor_->CompletedSubmissionUpdated();
+ 
+   texture_cache_->CompletedSubmissionUpdated(submission_completed_);
++
++  CompleteOcclusionQueries(false);
+ }
+ 
+ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HRESULT reason) {
+@@ -5049,6 +5087,7 @@ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
+ 
+ void D3D12CommandProcessor::ShutdownOcclusionQueryResources() {
+   DisableHostOcclusionQueries();
++  pending_occlusion_queries_.clear();
+ 
+   if (occlusion_query_readback_ && occlusion_query_readback_mapping_) {
+     occlusion_query_readback_->Unmap(0, nullptr);
+@@ -5062,6 +5101,28 @@ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out)
+   if (occlusion_query_cursor_ >= kMaxOcclusionQueries) {
+     occlusion_query_cursor_ = 0;
+   }
++  // Pending queries hold their indices in issue order, so the cursor reaches the oldest one first;
++  // its result has to be read before the index is resolved into again. Only that one query is
++  // waited for, instead of draining every pending query (and ending the open submission) at each
++  // wrap of the index space.
++  if (!pending_occlusion_queries_.empty() &&
++      pending_occlusion_queries_.front().host_index == occlusion_query_cursor_) {
++    if (pending_occlusion_queries_.front().submission < submission_current_) {
++      CheckSubmissionFence(pending_occlusion_queries_.front().submission);
++    }
++    if (!pending_occlusion_queries_.empty() &&
++        pending_occlusion_queries_.front().host_index == occlusion_query_cursor_) {
++      // Recorded in the open submission, so it has no result yet and the submission is not ended
++      // for it: the guest gets the fake sample count, as when the host query is not available.
++      auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
++      if (fake_sample_count >= 0) {
++        WriteGuestOcclusionResult(memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(
++                                      pending_occlusion_queries_.front().sample_count_address),
++                                  uint64_t(fake_sample_count));
++      }
++      pending_occlusion_queries_.pop_front();
++    }
++  }
+   host_index_out = occlusion_query_cursor_++;
+   return true;
+ }
+@@ -5111,10 +5172,10 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
+   return true;
+ }
+ 
+-bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+-    uint32_t sample_count_address, xenos::xe_gpu_depth_sample_counts* sample_counts) {
++bool D3D12CommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_address) {
+   if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_ ||
+-      !active_occlusion_query_.valid || !occlusion_query_heap_ || !occlusion_query_readback_) {
++      !active_occlusion_query_.valid || !occlusion_query_heap_ || !occlusion_query_readback_ ||
++      !occlusion_query_readback_mapping_) {
+     return false;
+   }
+ 
+@@ -5131,23 +5192,42 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+       occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, host_index, 1,
+       occlusion_query_readback_.Get(), sizeof(uint64_t) * host_index);
+ 
+-  if (!EndSubmission(false)) {
+-    return false;
+-  }
++  // The guest sees the query as unfinished until the result is written after the submission
++  // completes, like with the GPU running behind the command processor on the console. A result
++  // not yet written for the same address would be overwritten by the new query anyway.
++  pending_occlusion_queries_.erase(
++      std::remove_if(pending_occlusion_queries_.begin(), pending_occlusion_queries_.end(),
++                     [sample_count_address](const PendingOcclusionQuery& query) {
++                       return query.sample_count_address == sample_count_address;
++                     }),
++      pending_occlusion_queries_.end());
++  pending_occlusion_queries_.push_back({submission_current_, host_index, sample_count_address});
++  return true;
++}
+ 
+-  uint64_t query_submission = submission_current_ ? submission_current_ - 1 : 0;
+-  CheckSubmissionFence(query_submission);
+-  if (submission_completed_ < query_submission) {
+-    return false;
+-  }
+-  if (!occlusion_query_readback_mapping_) {
+-    return false;
++void D3D12CommandProcessor::CompleteOcclusionQueries(bool wait) {
++  while (!pending_occlusion_queries_.empty()) {
++    uint64_t submission = pending_occlusion_queries_.front().submission;
++    if (submission_completed_ < submission) {
++      if (!wait) {
++        return;
++      }
++      CheckSubmissionFence(submission);
++      if (submission_completed_ < submission) {
++        return;
++      }
++      // Updating the completed submission may have already written the result.
++      continue;
++    }
++    PendingOcclusionQuery query = pending_occlusion_queries_.front();
++    pending_occlusion_queries_.pop_front();
++    if (device_removed_ || !occlusion_query_readback_mapping_) {
++      continue;
++    }
++    WriteGuestOcclusionResult(
++        memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(query.sample_count_address),
++        NormalizeOcclusionSamples(occlusion_query_readback_mapping_[query.host_index]));
+   }
+-
+-  uint64_t samples = occlusion_query_readback_mapping_[host_index];
+-  samples = NormalizeOcclusionSamples(samples);
+-  WriteGuestOcclusionResult(sample_counts, samples);
+-  return true;
+ }
+ 
+ uint64_t D3D12CommandProcessor::NormalizeOcclusionSamples(uint64_t samples) const {
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 5227177..c8e271e 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1197,29 +1197,17 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+     if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
+       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
+           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
+-      bool direct_resolved = false;
+       if (GetPath() == Path::kHostRenderTargets) {
+-        if (REXCVAR_GET(direct_host_resolve)) {
+-          direct_resolved =
+-              TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
+-          if (direct_resolved) {
+-            ++direct_resolve_success_count_;
+-          } else {
+-            ++direct_resolve_fallback_count_;
+-          }
+-        }
+-        if (!direct_resolved) {
+-          // Dump the current contents of the render targets owning the affected
+-          // range to edram_buffer_.
+-          uint32_t dump_base;
+-          uint32_t dump_row_length_used;
+-          uint32_t dump_rows;
+-          uint32_t dump_pitch;
+-          resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+-          if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
+-            REXGPU_ERROR("D3D12RenderTargetCache: Failed to dump host render targets for resolve");
+-            return false;
+-          }
++        // Dump the current contents of the render targets owning the affected
++        // range to edram_buffer_.
++        uint32_t dump_base;
++        uint32_t dump_row_length_used;
++        uint32_t dump_rows;
++        uint32_t dump_pitch;
++        resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
++        if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
++          REXGPU_ERROR("D3D12RenderTargetCache: Failed to dump host render targets for resolve");
++          return false;
+         }
+       }
+ 

@@ -1,0 +1,22 @@
+Taken unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0049 (the same body as crackdown-xbox360-recompiled 0069): host threads blocked on a guest word (0089) are also woken when the command processor writes the ring read pointer back and when a SCRATCH register is stored to memory.
+
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 54de2df..9ed7e92 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -307,6 +307,7 @@ void CommandProcessor::WorkerThreadMain() {
+     if (read_ptr_writeback_ptr_) {
+       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
+                                        read_ptr_index_);
++      WakeGuestWordWaiters(memory_->TranslatePhysical(read_ptr_writeback_ptr_));
+     }
+ 
+     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
+@@ -428,6 +429,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
+       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
+       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
++      WakeGuestWordWaiters(memory_->TranslatePhysical(mem_addr));
+     }
+   } else {
+     switch (index) {

@@ -1,0 +1,40 @@
+Adapted from GoldenEye-007-XBLA-PC-Recomp patches (xsocket.cpp RecvFrom/SendTo, the byte order part only; its relay packet queue is a GoldenEye feature): N_XSOCKADDR_IN's be<> fields read back in host order, so SendTo converts the address and port to network order for the native sockaddr and RecvFrom converts the received port back, as Bind already does by passing the guest layout through.
+
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 0b96626..6c58040 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -197,8 +197,9 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+                      (sockaddr*)&nfrom, &nfromlen);
+   if (from) {
+     from->sin_family = nfrom.sin_family;
+-    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
+-    from->sin_port = nfrom.sin_port;
++    // The be<> fields take host order.
++    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);
++    from->sin_port = ntohs(nfrom.sin_port);
+     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+   }
+ 
+@@ -226,15 +227,16 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
+   }
+   */
+ 
+-  sockaddr_in nto;
++  // N_XSOCKADDR_IN's be<> fields read back in host order; the native sockaddr wants network order.
++  sockaddr_in nto{};
+   if (to) {
+-    nto.sin_addr.s_addr = to->sin_addr;
+-    nto.sin_family = to->sin_family;
+-    nto.sin_port = to->sin_port;
++    nto.sin_addr.s_addr = htonl(to->sin_addr);
++    nto.sin_family = AF_INET;
++    nto.sin_port = htons(to->sin_port);
+   }
+ 
+   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+-                to ? (sockaddr*)&nto : nullptr, to_len);
++                to ? (sockaddr*)&nto : nullptr, to ? int(sizeof(nto)) : 0);
+ }
+ 
+ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len) {

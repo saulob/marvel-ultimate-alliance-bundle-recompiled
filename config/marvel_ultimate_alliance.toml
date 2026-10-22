@@ -14,6 +14,7 @@ gpu_allow_invalid_fetch_constants = true
 # render target. ReXGlue falls back to host render targets on GPUs without rasterizer-ordered views.
 render_target_path_d3d12 = "rov"
 # A frame may wait this long in total for pipelines prepared in the background before drawing without them (patch 0048).
+# The game sets it from the Frame rate choice: half a frame at the cap, 16 ms at 30 FPS down to 4 ms.
 async_shader_wait_ms = 16
 
 # Default game window: 853x480 logical, centered on the primary display. Logical pixels are scaled by the display scale.

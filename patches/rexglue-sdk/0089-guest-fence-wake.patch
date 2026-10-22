@@ -1,0 +1,123 @@
+Taken unchanged from Hard Corps Uprising ReXGlue patch 0009 (guest-fence-wake); it applies as is on top of 0001-0084.
+Wakes host threads blocked on a guest memory word after the command processor writes it (EVENT_WRITE_SHD, MEM_WRITE,
+COND_WRITE to memory, REG_TO_MEM): WakeByAddressAll on Windows. The GPU plugin gets `synchronization.lib`. Without the
+game-side hook (drafts/mua-gpu_fence_wait.cpp) nothing waits on the word, so the patch alone only costs one cheap
+WakeByAddressAll per memory write (a few per frame).
+
+diff --git a/include/rex/graphics/guest_wake.h b/include/rex/graphics/guest_wake.h
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/include/rex/graphics/guest_wake.h
+@@ -0,0 +1,8 @@
++#pragma once
++
++namespace rex::graphics {
++
++// Wakes host threads blocked on this guest memory word (Windows WaitOnAddress, Linux futex); a no-op elsewhere.
++void WakeGuestWordWaiters(const void* host_address);
++
++}  // namespace rex::graphics
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 0d8f8af..1879857 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -18,6 +18,7 @@ set(REXGPU_XENOS_SOURCES
+     # GPU system
+     graphics_system.cpp
+     command_processor.cpp
++    guest_wake.cpp
+     util/draw_extent_estimator.cpp
+     util/draw.cpp
+     packet_disassembler.cpp
+@@ -138,6 +139,10 @@ target_link_libraries(rexgpu-xenos PRIVATE
+     xxHash::xxhash
+ )
+ 
++if(WIN32)
++    target_link_libraries(rexgpu-xenos PRIVATE synchronization)
++endif()
++
+ if(REXGLUE_USE_VULKAN)
+     target_link_libraries(rexgpu-xenos PRIVATE
+         Vulkan::Headers
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 2a1ed87..058e186 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -25,6 +25,7 @@
+ #include <rex/graphics/command_processor.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/graphics_system.h>
++#include <rex/graphics/guest_wake.h>
+ #include <rex/graphics/pipeline/texture/info.h>
+ #include <rex/graphics/sampler_info.h>
+ #include <rex/graphics/xenos.h>
+@@ -1153,6 +1154,7 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
+   mem_addr &= ~0x3;
+   reg_val = GpuSwap(reg_val, endianness);
+   memory::store(memory_->TranslatePhysical(mem_addr), reg_val);
++  WakeGuestWordWaiters(memory_->TranslatePhysical(mem_addr));
+ 
+   return true;
+ }
+@@ -1167,6 +1169,7 @@ bool CommandProcessor::ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader,
+     auto addr = write_addr & ~0x3;
+     write_data = GpuSwap(write_data, endianness);
+     memory::store(memory_->TranslatePhysical(addr), write_data);
++    WakeGuestWordWaiters(memory_->TranslatePhysical(addr));
+     write_addr += 4;
+   }
+ 
+@@ -1228,6 +1231,7 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
+       write_reg_addr &= ~0x3;
+       write_data = GpuSwap(write_data, endianness);
+       memory::store(memory_->TranslatePhysical(write_reg_addr), write_data);
++      WakeGuestWordWaiters(memory_->TranslatePhysical(write_reg_addr));
+     } else {
+       // Register.
+       WriteRegister(write_reg_addr, write_data);
+@@ -1273,6 +1277,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
+   address &= ~0x3;
+   data_value = GpuSwap(data_value, endianness);
+   memory::store(memory_->TranslatePhysical(address), data_value);
++  WakeGuestWordWaiters(memory_->TranslatePhysical(address));
+   return true;
+ }
+ 
+diff --git a/src/graphics/guest_wake.cpp b/src/graphics/guest_wake.cpp
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/src/graphics/guest_wake.cpp
+@@ -0,0 +1,30 @@
++#include <atomic>
++
++#include <rex/graphics/guest_wake.h>
++#include <rex/platform.h>
++
++#if REX_PLATFORM_WIN32
++#include <windows.h>
++#elif REX_PLATFORM_LINUX
++#include <climits>
++#include <linux/futex.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#endif
++
++namespace rex::graphics {
++
++void WakeGuestWordWaiters(const void* host_address) {
++#if REX_PLATFORM_WIN32
++  // The store being announced must be ordered before the wake looks for waiters.
++  std::atomic_thread_fence(std::memory_order_seq_cst);
++  WakeByAddressAll(const_cast<void*>(host_address));
++#elif REX_PLATFORM_LINUX
++  std::atomic_thread_fence(std::memory_order_seq_cst);
++  syscall(SYS_futex, host_address, FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
++#else
++  (void)host_address;
++#endif
++}
++
++}  // namespace rex::graphics

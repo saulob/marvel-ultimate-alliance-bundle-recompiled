@@ -1,5 +1,7 @@
 #include "diagnostics.h"
 
+#include "frame_limiter.h"
+
 #include <cstdio>
 
 namespace mua {
@@ -116,7 +118,8 @@ std::vector<std::string> FormatStartupDiagnostics(const StartupDiagnostics& diag
     lines.push_back("Runtime game sha256: " + diagnostics.game.sha256);
   }
 
-  lines.push_back("Runtime timing: present=" + diagnostics.gameplay.present);
+  lines.push_back("Runtime timing: frame_rate=" + diagnostics.gameplay.frame_rate +
+                  " | present=" + diagnostics.gameplay.present);
 
   lines.push_back("Runtime renderer: " + GraphicsText(diagnostics.graphics));
 
@@ -140,8 +143,12 @@ std::string FileNameOnly(std::string_view path) {
   return std::string(path.substr(separator + 1, end - separator - 1));
 }
 
+std::string FrameRateText(int fps) {
+  return fps == kFrameRateUnlimited ? "Unlimited" : std::to_string(fps);
+}
+
 std::string PresentationText(bool vsync_off) {
-  return vsync_off ? "guest 60Hz | host Immediate (tearing allowed)" : "guest 60Hz | host VBlank (VSync On)";
+  return std::string("guest 60Hz") + (vsync_off ? " | host Immediate (tearing allowed)" : " | host VBlank (VSync On)");
 }
 
 std::string FormatCleanExit(std::string_view uptime) {

@@ -72,6 +72,7 @@ struct LauncherGraphicsIdentity {
 };
 
 struct GameplayIdentity {
+  std::string frame_rate;
   std::string present;
 };
 
@@ -111,6 +112,7 @@ std::vector<std::string> FormatStartupDiagnostics(const StartupDiagnostics& diag
 // File name without any folder part, so a diagnostic never carries an absolute path.
 std::string FileNameOnly(std::string_view path);
 
+std::string FrameRateText(int fps);
 std::string PresentationText(bool vsync_off);
 std::string FormatCleanExit(std::string_view uptime);
 

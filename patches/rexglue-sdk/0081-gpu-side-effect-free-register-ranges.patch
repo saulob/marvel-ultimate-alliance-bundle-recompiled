@@ -1,0 +1,48 @@
+Adapted from patches/sdk/0023-gpu-fast-register-ranges.patch in Unowa001/crackdown-recomp.
+Copyright (c) 2026, Jerrod (Unowa001). BSD 3-Clause License, see packaging/licenses/THIRD-PARTY-LICENSES.txt.
+
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -120,10 +120,18 @@ std::bitset<RegisterFile::kRegisterCount> BuildKnownRegisterSet() {
+ 
+ const std::bitset<RegisterFile::kRegisterCount> kKnownRegisters = BuildKnownRegisterSet();
+ 
+-// Render-state registers: no write side effects in any backend.
+-bool IsContextRegisterRange(uint32_t first_index, uint32_t last_index) {
+-  constexpr uint32_t kFirstContextRegister = 0x2000;
+-  return first_index >= kFirstContextRegister && last_index < XE_GPU_REG_SHADER_CONSTANT_000_X;
++// Writes to these only store the value. WriteRegister has side effects for the scratch registers,
++// COHER_STATUS_HOST and the gamma ramp ports, and the backends for the shader constants.
++bool IsSideEffectFreeRegisterRange(uint32_t first_index, uint32_t last_index) {
++  static_assert(XE_GPU_REG_DC_LUT_30_COLOR == XE_GPU_REG_DC_LUT_RW_INDEX + 3);
++  auto overlaps = [&](uint32_t first, uint32_t last) {
++    return first_index <= last && last_index >= first;
++  };
++  return first_index <= last_index && last_index < RegisterFile::kRegisterCount &&
++         !overlaps(XE_GPU_REG_SHADER_CONSTANT_000_X, XE_GPU_REG_SHADER_CONSTANT_LOOP_31) &&
++         !overlaps(XE_GPU_REG_SCRATCH_REG0, XE_GPU_REG_SCRATCH_REG7) &&
++         !overlaps(XE_GPU_REG_COHER_STATUS_HOST, XE_GPU_REG_COHER_STATUS_HOST) &&
++         !overlaps(XE_GPU_REG_DC_LUT_RW_INDEX, XE_GPU_REG_DC_LUT_30_COLOR);
+ }
+ 
+ // Runs of these only store values (the backends invalidate constant buffers
+@@ -135,7 +143,7 @@ bool IsBulkWritableRegisterRange(uint32_t first_index, uint32_t count) {
+     return false;
+   }
+   uint32_t last_index = first_index + count - 1;
+-  return IsContextRegisterRange(first_index, last_index) ||
++  return IsSideEffectFreeRegisterRange(first_index, last_index) ||
+          (first_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
+           last_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) ||
+          (first_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+@@ -553,7 +561,8 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+ 
+ void CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
+                                              uint32_t num_registers) {
+-  if (num_registers && IsContextRegisterRange(start_index, start_index + num_registers - 1)) {
++  if (num_registers &&
++      IsSideEffectFreeRegisterRange(start_index, start_index + num_registers - 1)) {
+     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+     return;
+   }

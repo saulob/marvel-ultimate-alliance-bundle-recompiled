@@ -1,0 +1,359 @@
+Ported from hard-corps-uprising-recompiled patches/rexglue-sdk/0012-d3d12-render-target-transfers.windows.patch (same license basis as 0120). The D3D12 Host-RT backend half of 0120: calls the new overwrite check in D3D12RenderTargetCache::Update/GetOrCreateTransferPipelines/PerformTransfersAndResolveClears and skips the transfer where it says the render target is fully overwritten. Self-gated to Path::kHostRenderTargets; the ROV path's code is untouched.
+
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index cd7693a..c9a9cf6 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -242,6 +242,11 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+     uint32_t temporary_sort_index() const { return temporary_sort_index_; }
+     void SetTemporarySortIndex(uint32_t index) { temporary_sort_index_ = index; }
+ 
++    // Depth: the stencil bits that may be set anywhere in the render target (it's created
++    // zeroed). Copying a stencil bit that is clear everywhere in the source is pointless.
++    uint32_t stencil_bits() const { return stencil_bits_; }
++    void AddStencilBits(uint32_t bits) { stencil_bits_ |= uint8_t(bits); }
++
+    private:
+     Microsoft::WRL::ComPtr<ID3D12Resource> resource_;
+     ui::d3d12::D3D12CpuDescriptorPool::Descriptor descriptor_draw_;
+@@ -257,6 +262,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+     uint32_t temporary_srv_descriptor_index_ = UINT32_MAX;
+     uint32_t temporary_srv_descriptor_index_stencil_ = UINT32_MAX;
+     uint32_t temporary_sort_index_ = 0;
++    uint8_t stencil_bits_ = 0;
+   };
+ 
+   enum TransferCBVRegister : uint32_t {
+@@ -423,8 +429,11 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   struct TransferInvocation {
+     Transfer transfer;
+     TransferShaderKey shader_key;
+-    TransferInvocation(const Transfer& transfer, const TransferShaderKey& shader_key)
+-        : transfer(transfer), shader_key(shader_key) {}
++    // Stencil bit modes: the bits to copy.
++    uint32_t stencil_bits;
++    TransferInvocation(const Transfer& transfer, const TransferShaderKey& shader_key,
++                       uint32_t stencil_bits = 0)
++        : transfer(transfer), shader_key(shader_key), stencil_bits(stencil_bits) {}
+     bool operator<(const TransferInvocation& other_invocation) const {
+       // TODO(Triang3l): See if it may be better to sort by the source in the
+       // first place, especially when reading the same data multiple times (like
+@@ -451,6 +460,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+     }
+     bool CanBeMergedIntoOneDraw(const TransferInvocation& other_invocation) const {
+       return shader_key == other_invocation.shader_key &&
++             stencil_bits == other_invocation.stencil_bits &&
+              transfer.AreSourcesSame(other_invocation.transfer);
+     }
+   };
+@@ -632,12 +642,23 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   // be null / empty in case there's nothing to do for them.
+   // resolve_clear_rectangle is expected to be provided by
+   // PrepareHostRenderTargetsResolveClear which should do all the needed size
+-  // bound checks.
++  // bound checks. Without clear values, the rectangle is an area a draw replaces entirely, only
++  // transferred around. It's applied to the render targets of cutout_render_targets (bit 0 is
++  // depth); with depth_only_cutout, to the depth of the depth render target but not the stencil.
+   void PerformTransfersAndResolveClears(
+       uint32_t render_target_count, RenderTarget* const* render_targets,
+       const std::vector<Transfer>* render_target_transfers,
+       const uint64_t* render_target_resolve_clear_values = nullptr,
+-      const Transfer::Rectangle* resolve_clear_rectangle = nullptr);
++      const Transfer::Rectangle* resolve_clear_rectangle = nullptr,
++      uint32_t cutout_render_targets = UINT32_MAX, bool depth_only_cutout = false);
++
++  // The stencil bits the draw may set.
++  uint32_t GetDrawStencilBits(reg::RB_DEPTHCONTROL normalized_depth_control) const;
++  // The stencil bits that may be set in the transfer source (anything from color).
++  static uint32_t GetTransferSourceStencilBits(const Transfer& transfer) {
++    const auto* source = static_cast<const D3D12RenderTarget*>(transfer.source);
++    return source->key().is_depth ? source->stencil_bits() : UINT8_MAX;
++  }
+ 
+   // Accepts an array of (1 + xenos::kMaxColorRenderTargets) render targets,
+   // first depth, then color.
+@@ -712,6 +733,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+ 
+   // Temporary storage for PerformTransfersAndResolveClears.
+   std::vector<TransferInvocation> current_transfer_invocations_;
++  // Temporary storage for the transfers remaining after a draw replaces part of the destinations.
++  std::vector<Transfer> draw_overwrite_transfers_[1 + xenos::kMaxColorRenderTargets];
+ 
+   // Temporary storage for DumpRenderTargets.
+   std::vector<ResolveCopyDumpRectangle> dump_rectangles_;
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index c8e271e..9ca26dd 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1068,10 +1068,67 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
+   }
+   switch (GetPath()) {
+     case Path::kHostRenderTargets: {
++      constexpr uint32_t kRenderTargetCount = 1 + xenos::kMaxColorRenderTargets;
+       RenderTarget* const* depth_and_color_render_targets =
+           last_update_accumulated_render_targets();
+-      PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+-                                       depth_and_color_render_targets, last_update_transfers());
++      const std::vector<Transfer>* transfers = last_update_transfers();
++      bool any_transfers = false;
++      for (uint32_t i = 0; i < kRenderTargetCount; ++i) {
++        any_transfers |= !transfers[i].empty();
++      }
++      Transfer::Rectangle overwrite_rectangle = {};
++      uint32_t overwritten = 0;
++      bool overwritten_depth_only = false;
++      if (any_transfers) {
++        // The pixel shader isn't used outside the color and depth mode.
++        const Shader* pixel_shader =
++            register_file().Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kColorDepth
++                ? command_processor_.active_pixel_shader()
++                : nullptr;
++        overwritten = GetDrawOverwrittenRenderTargets(
++            normalized_depth_control, normalized_color_mask, vertex_shader, pixel_shader,
++            overwrite_rectangle, overwritten_depth_only);
++        // With the stencil written by the transfer shader, the depth can't be skipped alone.
++        overwritten_depth_only &= !use_stencil_reference_output_;
++      }
++      if (overwritten || overwritten_depth_only) {
++        uint32_t cutout_render_targets = overwritten | uint32_t(overwritten_depth_only);
++        for (uint32_t i = 0; i < kRenderTargetCount; ++i) {
++          std::vector<Transfer>& kept_transfers = draw_overwrite_transfers_[i];
++          kept_transfers.clear();
++          const RenderTarget* render_target = depth_and_color_render_targets[i];
++          if (!render_target) {
++            continue;
++          }
++          if (!(cutout_render_targets & (uint32_t(1) << i))) {
++            kept_transfers = transfers[i];
++            continue;
++          }
++          RenderTargetKey key = render_target->key();
++          for (const Transfer& transfer : transfers[i]) {
++            Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
++            // The stencil of a depth-only overwrite is transferred whole if it has anything to
++            // copy.
++            if (transfer.GetRectangles(key.base_tiles, key.GetPitchTiles(), key.msaa_samples,
++                                       key.Is64bpp(), rectangles, &overwrite_rectangle) ||
++                (overwritten_depth_only && i == 0 &&
++                 (static_cast<const D3D12RenderTarget*>(render_target)->stencil_bits() ||
++                  GetTransferSourceStencilBits(transfer)))) {
++              kept_transfers.push_back(transfer);
++            }
++          }
++        }
++        PerformTransfersAndResolveClears(kRenderTargetCount, depth_and_color_render_targets,
++                                         draw_overwrite_transfers_, nullptr, &overwrite_rectangle,
++                                         cutout_render_targets, overwritten_depth_only);
++      } else {
++        PerformTransfersAndResolveClears(kRenderTargetCount, depth_and_color_render_targets,
++                                         transfers);
++      }
++      if (depth_and_color_render_targets[0]) {
++        static_cast<D3D12RenderTarget*>(depth_and_color_render_targets[0])
++            ->AddStencilBits(GetDrawStencilBits(normalized_depth_control));
++      }
+       SetCommandListRenderTargets(depth_and_color_render_targets);
+     } break;
+     case Path::kPixelShaderInterlock: {
+@@ -3784,12 +3841,51 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
+   return pipelines;
+ }
+ 
++uint32_t D3D12RenderTargetCache::GetDrawStencilBits(
++    reg::RB_DEPTHCONTROL normalized_depth_control) const {
++  if (!normalized_depth_control.stencil_enable) {
++    return 0;
++  }
++  const RegisterFile& regs = register_file();
++  // Which of the two is used depends on the face and the culling, consider both.
++  reg::RB_STENCILREFMASK ref_masks[2] = {
++      regs.Get<reg::RB_STENCILREFMASK>(),
++      regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF)};
++  xenos::StencilOp ops[2][3] = {
++      {normalized_depth_control.stencilfail, normalized_depth_control.stencilzfail,
++       normalized_depth_control.stencilzpass},
++      {normalized_depth_control.stencilfail_bf, normalized_depth_control.stencilzfail_bf,
++       normalized_depth_control.stencilzpass_bf}};
++  uint32_t bits = 0;
++  for (uint32_t face = 0; face <= uint32_t(normalized_depth_control.backface_enable); ++face) {
++    for (xenos::StencilOp op : ops[face]) {
++      if (op == xenos::StencilOp::kKeep || op == xenos::StencilOp::kZero) {
++        continue;
++      }
++      for (const reg::RB_STENCILREFMASK& ref_mask : ref_masks) {
++        bits |= (op == xenos::StencilOp::kReplace ? ref_mask.stencilref : UINT8_MAX) &
++                ref_mask.stencilwritemask;
++      }
++    }
++  }
++  return bits;
++}
++
+ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+     uint32_t render_target_count, RenderTarget* const* render_targets,
+     const std::vector<Transfer>* render_target_transfers,
+     const uint64_t* render_target_resolve_clear_values,
+-    const Transfer::Rectangle* resolve_clear_rectangle) {
++    const Transfer::Rectangle* resolve_clear_rectangle, uint32_t cutout_render_targets,
++    bool depth_only_cutout) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
++  auto get_cutout = [&](uint32_t render_target_index,
++                        bool stencil) -> const Transfer::Rectangle* {
++    if (!(cutout_render_targets & (uint32_t(1) << render_target_index)) ||
++        (stencil && depth_only_cutout)) {
++      return nullptr;
++    }
++    return resolve_clear_rectangle;
++  };
+ 
+   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
+   ID3D12Device* device = provider.GetDevice();
+@@ -3886,8 +3982,7 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+       Transfer::Rectangle transfer_rectangles[Transfer::kMaxRectanglesWithCutout];
+       uint32_t transfer_rectangle_count = transfer.GetRectangles(
+           dest_rt_key.base_tiles, dest_rt_key.pitch_tiles_at_32bpp, dest_rt_key.msaa_samples, false,
+-          transfer_rectangles, resolve_clear_rectangle);
+-      assert_not_zero(transfer_rectangle_count);
++          transfer_rectangles, get_cutout(i, false));
+       HostDepthStoreRectangleConstant host_depth_store_rectangle_constant;
+       for (uint32_t j = 0; j < transfer_rectangle_count; ++j) {
+         uint32_t group_count_x, group_count_y;
+@@ -4128,7 +4223,23 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+       TransferShaderKey new_transfer_shader_key;
+       new_transfer_shader_key.dest_msaa_samples = dest_rt_key.msaa_samples;
+       new_transfer_shader_key.dest_resource_format = dest_rt_key.resource_format;
++      // The stencil only needs clearing if it may have something to be cleared (it is zero until
++      // written to), and only the bits set in the source need to be copied.
+       uint32_t stencil_clear_rectangle_count = 0;
++      if (need_stencil_bit_draws && dest_d3d12_rt.stencil_bits()) {
++        for (const Transfer& transfer : current_transfers) {
++          stencil_clear_rectangle_count += transfer.GetRectangles(
++              dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
++              nullptr, get_cutout(i, true));
++        }
++      }
++      if (dest_rt_key.is_depth) {
++        uint32_t transferred_stencil_bits = 0;
++        for (const Transfer& transfer : current_transfers) {
++          transferred_stencil_bits |= GetTransferSourceStencilBits(transfer);
++        }
++        dest_d3d12_rt.AddStencilBits(transferred_stencil_bits);
++      }
+       for (uint32_t j = 0; j <= uint32_t(need_stencil_bit_draws); ++j) {
+         // j == 0 - color or depth.
+         // j == 1 - stencil bits.
+@@ -4167,13 +4278,15 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+               (host_depth_source_d3d12_rt && !host_depth_source_is_copy)
+                   ? host_depth_source_d3d12_rt->key().msaa_samples
+                   : xenos::MsaaSamples::k1X;
++          uint32_t stencil_bits = 0;
+           if (j) {
++            stencil_bits = GetTransferSourceStencilBits(transfer);
++            if (!stencil_bits) {
++              continue;
++            }
+             new_transfer_shader_key.mode = source_rt_key.is_depth
+                                                ? TransferMode::kDepthToStencilBit
+                                                : TransferMode::kColorToStencilBit;
+-            stencil_clear_rectangle_count += transfer.GetRectangles(
+-                dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-                nullptr, resolve_clear_rectangle);
+           } else {
+             if (dest_rt_key.is_depth) {
+               if (host_depth_source_d3d12_rt) {
+@@ -4189,7 +4302,8 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+                                                                     : TransferMode::kColorToColor;
+             }
+           }
+-          current_transfer_invocations_.emplace_back(transfer, new_transfer_shader_key);
++          current_transfer_invocations_.emplace_back(transfer, new_transfer_shader_key,
++                                                     stencil_bits);
+           if (j) {
+             current_transfer_invocations_.back().transfer.host_depth_source = nullptr;
+           }
+@@ -4211,7 +4325,7 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+           Transfer::Rectangle transfer_stencil_clear_rectangles[Transfer::kMaxRectanglesWithCutout];
+           uint32_t transfer_stencil_clear_rectangle_count = transfer.GetRectangles(
+               dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-              transfer_stencil_clear_rectangles, resolve_clear_rectangle);
++              transfer_stencil_clear_rectangles, get_cutout(i, true));
+           for (uint32_t j = 0; j < transfer_stencil_clear_rectangle_count; ++j) {
+             const Transfer::Rectangle& stencil_clear_rectangle =
+                 transfer_stencil_clear_rectangles[j];
+@@ -4258,11 +4372,14 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+       for (auto it = current_transfer_invocations_.cbegin();
+            it != current_transfer_invocations_.cend(); ++it) {
+         const TransferInvocation& transfer_invocation_first = *it;
++        const Transfer::Rectangle* invocation_cutout = get_cutout(
++            i, kTransferModes[size_t(transfer_invocation_first.shader_key.mode)].output ==
++                   TransferOutput::kStencilBit);
+         // Will be merging transfers from the same source into one mesh.
+         auto it_merged_first = it, it_merged_last = it;
+         uint32_t transfer_rectangle_count = transfer_invocation_first.transfer.GetRectangles(
+             dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-            nullptr, resolve_clear_rectangle);
++            nullptr, invocation_cutout);
+         for (auto it_merge = std::next(it_merged_first);
+              it_merge != current_transfer_invocations_.cend(); ++it_merge) {
+           if (!transfer_invocation_first.CanBeMergedIntoOneDraw(*it_merge)) {
+@@ -4270,12 +4387,15 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+           }
+           transfer_rectangle_count += it_merge->transfer.GetRectangles(
+               dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-              nullptr, resolve_clear_rectangle);
++              nullptr, invocation_cutout);
+           it_merged_last = it_merge;
+         }
+-        assert_not_zero(transfer_rectangle_count);
+         // Skip the merged transfers in the subsequent iterations.
+         it = it_merged_last;
++        if (!transfer_rectangle_count) {
++          // Entirely inside what the draw replaces.
++          continue;
++        }
+ 
+         assert_not_null(it->transfer.source);
+         auto& source_d3d12_rt = *static_cast<D3D12RenderTarget*>(it->transfer.source);
+@@ -4328,8 +4448,7 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+           Transfer::Rectangle transfer_invocation_rectangles[Transfer::kMaxRectanglesWithCutout];
+           uint32_t transfer_invocation_rectangle_count = it_merged->transfer.GetRectangles(
+               dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-              transfer_invocation_rectangles, resolve_clear_rectangle);
+-          assert_not_zero(transfer_invocation_rectangle_count);
++              transfer_invocation_rectangles, invocation_cutout);
+           for (uint32_t j = 0; j < transfer_invocation_rectangle_count; ++j) {
+             const Transfer::Rectangle& transfer_rectangle = transfer_invocation_rectangles[j];
+             float transfer_rectangle_x0 = -1.0f + transfer_rectangle.x_pixels * pixels_to_ndc_x;
+@@ -4528,15 +4647,21 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+ 
+         // Draw the transfer rectangles.
+         command_processor_.SubmitBarriers();
+-        for (uint32_t j = 0; j <= uint32_t(is_stencil_bit) * 7; ++j) {
+-          if (is_stencil_bit) {
++        if (is_stencil_bit) {
++          uint32_t stencil_bits_remaining = transfer_invocation_first.stencil_bits;
++          uint32_t j;
++          while (rex::bit_scan_forward(stencil_bits_remaining, &j)) {
++            stencil_bits_remaining &= ~(uint32_t(1) << j);
+             uint32_t transfer_stencil_bit = uint32_t(1) << j;
+             command_list.D3DSetGraphicsRoot32BitConstants(
+                 rex::bit_count(transfer_root_parameters_used &
+                                (kTransferUsedRootParameterStencilMaskConstantBit - 1)),
+                 sizeof(transfer_stencil_bit) / sizeof(uint32_t), &transfer_stencil_bit, 0);
++            command_processor_.SetExternalPipeline(transfer_pipelines[j]);
++            command_list.D3DDrawInstanced(transfer_vertex_count, 1, 0, 0);
+           }
+-          command_processor_.SetExternalPipeline(transfer_pipelines[j]);
++        } else {
++          command_processor_.SetExternalPipeline(transfer_pipelines[0]);
+           command_list.D3DDrawInstanced(transfer_vertex_count, 1, 0, 0);
+         }
+       }
+@@ -4562,6 +4687,7 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+             dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_DEPTH_WRITE),
+             D3D12_RESOURCE_STATE_DEPTH_WRITE);
+         command_processor_.SubmitBarriers();
++        dest_d3d12_rt.AddStencilBits(UINT(clear_value));
+         command_list.D3DClearDepthStencilView(dest_d3d12_rt.descriptor_draw().GetHandle(),
+                                               D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                               depth_host_clear_value, UINT(clear_value) & 0xFF, 1,

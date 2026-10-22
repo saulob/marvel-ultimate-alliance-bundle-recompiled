@@ -1,0 +1,390 @@
+Ported from hard-corps-uprising-recompiled patches/rexglue-sdk/0022-resolve-copy-into-textures.patch (same license basis as 0120). Host-RT fallback resolve path: lets a resolve copy straight into the destination texture when the whole region fits one tile mapping and no format conversion is needed, instead of always going through the EDRAM round trip, and adds the resolve-to-texture entry points the D3D12 backend patch (0123) calls into.
+
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 1d8a371..d39df37 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -548,6 +548,23 @@ class RenderTargetCache {
+                                       std::vector<ResolveCopyDumpRectangle>& rectangles_out,
+                                       std::vector<ResolveCopyDispatch>& dispatches_out) const;
+ 
++  enum class ResolveTextureCopyResult {
++    kEligible,
++    kDisabled,
++    kDepth,
++    kMsaa,
++    kFormat,
++    kOffset,
++    // The host render target owning the resolved tiles doesn't start at the resolve origin, or
++    // the tiles have several owners.
++    kAliasing,
++  };
++  // For a resolve with host render targets, whether textures sampling its destination can be
++  // copied from the one render target owning the resolved area (resolve_copy_into_textures).
++  ResolveTextureCopyResult PlanResolveTextureCopy(const draw_util::ResolveInfo& resolve_info,
++                                                  draw_util::ResolveTextureCopy& copy_out,
++                                                  RenderTarget*& source_out);
++
+   // Sets up the needed render targets and transfers to perform a clear in a
+   // resolve operation via a host render target clear. resolve_info is expected
+   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
+@@ -585,6 +602,8 @@ class RenderTargetCache {
+   uint32_t draw_resolution_scale_x_;
+   uint32_t draw_resolution_scale_y_;
+ 
++  std::vector<ResolveCopyDumpRectangle> resolve_texture_copy_rectangles_;
++
+   DrawExtentEstimator draw_extent_estimator_;
+ 
+   // For host render targets.
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index d26cd4f..a98b883 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -22,6 +22,7 @@
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/shared_memory.h>
++#include <rex/graphics/util/draw.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/hash.h>
+ #include <rex/thread/mutex.h>
+@@ -90,6 +91,7 @@ class TextureCache {
+   }
+ 
+   static uint32_t GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_format_swizzle);
++  static uint32_t SwapRedBlueSwizzle(uint32_t host_swizzle);
+ 
+   void TextureFetchConstantWritten(uint32_t index) { TextureFetchConstantsWritten(index, index); }
+   void TextureFetchConstantsWritten(uint32_t first_index, uint32_t last_index) {
+@@ -230,6 +232,11 @@ class TextureCache {
+ 
+     void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip);
+ 
++    // The base level has red and blue in the other order, copied from a render target by a resolve
++    // that swaps them; sampling swaps them back.
++    bool content_red_blue_swapped() const { return content_red_blue_swapped_; }
++    void SetContentRedBlueSwapped(bool swapped) { content_red_blue_swapped_ = swapped; }
++
+     // For LRU caching - updates the last usage frame and moves the texture to
+     // the end of the usage queue. Must be called any time the texture is
+     // referenced by any GPU work in the implementation to make sure it's not
+@@ -262,6 +269,7 @@ class TextureCache {
+     Texture* used_next_;
+     bool in_usage_list_;
+     bool force_load_3d_tiling_ = false;
++    bool content_red_blue_swapped_ = false;
+ 
+     // These are to be accessed within the global critical region to synchronize
+     // with shared memory.
+@@ -547,6 +555,14 @@ class TextureCache {
+   // implementation to update the internal dependencies of the binding.
+   virtual void UpdateTextureBindingsImpl(uint32_t /*fetch_constant_mask*/) {}
+ 
++  // Up-to-date textures whose whole sampled content is written by the resolve, so they can be
++  // copied from the render target instead of being loaded from the resolved memory. Must be called
++  // before the resolve marks its range as resolved.
++  uint32_t FindResolveCopyTargets(const draw_util::ResolveTextureCopy& copy, Texture** targets_out,
++                                  uint32_t max_targets);
++  // After the render target has been copied into the texture: it matches the memory again.
++  void EndResolveCopyIntoTexture(Texture& texture, bool red_blue_swapped);
++
+  private:
+   struct PendingTextureLoad {
+     Texture* texture = nullptr;
+diff --git a/include/rex/graphics/util/draw.h b/include/rex/graphics/util/draw.h
+index 3da182d..3785158 100644
+--- a/include/rex/graphics/util/draw.h
++++ b/include/rex/graphics/util/draw.h
+@@ -586,4 +586,50 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+                     bool fixed_rg16_truncated_to_minus_1_to_1,
+                     bool fixed_rgba16_truncated_to_minus_1_to_1, ResolveInfo& info_out);
+ 
++// A resolve of a whole single-sampled render target from its origin into memory with the same bits,
++// so a texture sampling the destination equals the render target copied into it.
++struct ResolveTextureCopy {
++  uint32_t dest_base;
++  uint32_t dest_pitch_texels;
++  xenos::TextureFormat format;
++  xenos::Endian endian;
++  // In guest pixels.
++  uint32_t width;
++  uint32_t height;
++  // The resolve shader replaces the host pixels left of and above these with the first column and
++  // row at them (the half-pixel offset fill with resolution scaling).
++  uint32_t fill_x;
++  uint32_t fill_y;
++  bool red_blue_swapped;
++};
++
++struct ResolveTextureCopyRegion {
++  uint32_t source_x;
++  uint32_t source_y;
++  uint32_t dest_x;
++  uint32_t dest_y;
++  uint32_t width;
++  uint32_t height;
++};
++inline constexpr uint32_t kMaxResolveTextureCopyRegions = 16;
++
++// The render target to texture copies reproducing the resolve for a texture of width x height host
++// pixels, which must be larger than the fill.
++inline uint32_t GetResolveTextureCopyRegions(const ResolveTextureCopy& copy, uint32_t width,
++                                             uint32_t height, ResolveTextureCopyRegion* regions) {
++  uint32_t fill_x = copy.fill_x, fill_y = copy.fill_y;
++  uint32_t count = 0;
++  regions[count++] = {fill_x, fill_y, fill_x, fill_y, width - fill_x, height - fill_y};
++  for (uint32_t x = 0; x < fill_x; ++x) {
++    regions[count++] = {fill_x, fill_y, x, fill_y, 1, height - fill_y};
++  }
++  for (uint32_t y = 0; y < fill_y; ++y) {
++    regions[count++] = {fill_x, fill_y, fill_x, y, width - fill_x, 1};
++    for (uint32_t x = 0; x < fill_x; ++x) {
++      regions[count++] = {fill_x, fill_y, x, y, 1, 1};
++    }
++  }
++  return count;
++}
++
+ }  // namespace rex::graphics::draw_util
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 855b42a..152e8a1 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -42,6 +42,11 @@ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(resolve_copy_into_textures, true, "GPU",
++                    "Copy resolved single-sampled render targets straight into the textures that "
++                    "sample the result instead of loading them again from the resolved memory")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,
+@@ -1620,4 +1625,94 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+   }
+ }
+ 
++RenderTargetCache::ResolveTextureCopyResult RenderTargetCache::PlanResolveTextureCopy(
++    const draw_util::ResolveInfo& resolve_info, draw_util::ResolveTextureCopy& copy_out,
++    RenderTarget*& source_out) {
++  if (!REXCVAR_GET(resolve_copy_into_textures)) {
++    return ResolveTextureCopyResult::kDisabled;
++  }
++  if (resolve_info.IsCopyingDepth()) {
++    return ResolveTextureCopyResult::kDepth;
++  }
++  const draw_util::ResolveEdramInfo& edram_info = resolve_info.color_edram_info;
++  if (edram_info.msaa_samples != xenos::MsaaSamples::k1X) {
++    return ResolveTextureCopyResult::kMsaa;
++  }
++  const reg::RB_COPY_DEST_INFO& dest_info = resolve_info.copy_dest_info;
++  auto edram_format = xenos::ColorRenderTargetFormat(edram_info.format);
++  auto dest_format = xenos::TextureFormat(dest_info.copy_dest_format);
++  bool is_2_10_10_10 =
++      edram_format == xenos::ColorRenderTargetFormat::k_2_10_10_10 ||
++      edram_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10;
++  if (!(edram_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 &&
++        dest_format == xenos::TextureFormat::k_8_8_8_8) &&
++      !(is_2_10_10_10 && dest_format == xenos::TextureFormat::k_2_10_10_10)) {
++    return ResolveTextureCopyResult::kFormat;
++  }
++  if (dest_info.copy_dest_exp_bias || dest_info.copy_dest_array ||
++      uint32_t(dest_info.copy_dest_endian) > uint32_t(xenos::Endian128::k16in32) ||
++      !xenos::IsSingleCopySampleSelected(
++          resolve_info.copy_dest_coordinate_info.copy_sample_select)) {
++    return ResolveTextureCopyResult::kFormat;
++  }
++
++  // Only from the origin: the destination texel at x, y is then the render target pixel at x, y.
++  uint32_t dest_base = register_file()[XE_GPU_REG_RB_COPY_DEST_BASE];
++  if (resolve_info.copy_dest_base != dest_base || (dest_base & 0xFFF) ||
++      resolve_info.copy_dest_coordinate_info.offset_x_div_8 ||
++      resolve_info.copy_dest_coordinate_info.offset_y_div_8 ||
++      resolve_info.coordinate_info.edram_offset_x_div_8 ||
++      resolve_info.coordinate_info.edram_offset_y_div_8 ||
++      edram_info.base_tiles != (resolve_info.color_original_base & (xenos::kEdramTileCount - 1))) {
++    return ResolveTextureCopyResult::kOffset;
++  }
++
++  uint32_t span_base, span_row_length, span_rows, span_pitch;
++  resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
++  GetResolveCopyRectanglesToDump(span_base, span_row_length, span_rows, span_pitch,
++                                 resolve_texture_copy_rectangles_);
++  if (resolve_texture_copy_rectangles_.size() != 1) {
++    return ResolveTextureCopyResult::kAliasing;
++  }
++  const ResolveCopyDumpRectangle& rectangle = resolve_texture_copy_rectangles_.front();
++  if (rectangle.row_first || rectangle.rows != span_rows || rectangle.row_first_start ||
++      rectangle.row_last_end != span_row_length) {
++    return ResolveTextureCopyResult::kAliasing;
++  }
++  RenderTargetKey key = rectangle.render_target->key();
++  if (key.is_depth || key.msaa_samples != xenos::MsaaSamples::k1X ||
++      key.base_tiles != span_base || key.GetPitchTiles() != span_pitch) {
++    return ResolveTextureCopyResult::kAliasing;
++  }
++  xenos::ColorRenderTargetFormat key_format = key.GetColorFormat();
++  bool key_is_2_10_10_10 =
++      key_format == xenos::ColorRenderTargetFormat::k_2_10_10_10 ||
++      key_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10;
++  if (is_2_10_10_10 ? !key_is_2_10_10_10
++                    : key_format != xenos::ColorRenderTargetFormat::k_8_8_8_8) {
++    return ResolveTextureCopyResult::kAliasing;
++  }
++  uint32_t width = resolve_info.coordinate_info.width_div_8 << xenos::kResolveAlignmentPixelsLog2;
++  uint32_t height = resolve_info.height_div_8 << xenos::kResolveAlignmentPixelsLog2;
++  if (width > key.GetWidth() ||
++      height > GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples)) {
++    return ResolveTextureCopyResult::kAliasing;
++  }
++
++  copy_out.dest_base = dest_base;
++  copy_out.dest_pitch_texels = resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32
++                               << xenos::kTextureTileWidthHeightLog2;
++  copy_out.format = dest_format;
++  copy_out.endian = xenos::Endian(dest_info.copy_dest_endian);
++  copy_out.width = width;
++  copy_out.height = height;
++  // Matches the resolve shaders, which take the fill offset from the resolution scale.
++  bool fill = edram_info.fill_half_pixel_offset != 0;
++  copy_out.fill_x = fill ? draw_resolution_scale_x() >> 1 : 0;
++  copy_out.fill_y = fill ? draw_resolution_scale_y() >> 1 : 0;
++  copy_out.red_blue_swapped = dest_info.copy_dest_swap != 0;
++  source_out = rectangle.render_target;
++  return ResolveTextureCopyResult::kEligible;
++}
++
+ }  // namespace rex::graphics
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..4c0f5fa 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -366,6 +366,20 @@ uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_
+   return host_swizzle;
+ }
+ 
++uint32_t TextureCache::SwapRedBlueSwizzle(uint32_t host_swizzle) {
++  uint32_t swapped = 0;
++  for (uint32_t i = 0; i < 4; ++i) {
++    uint32_t component = (host_swizzle >> (3 * i)) & 0b111;
++    if (component == xenos::XE_GPU_TEXTURE_SWIZZLE_R) {
++      component = xenos::XE_GPU_TEXTURE_SWIZZLE_B;
++    } else if (component == xenos::XE_GPU_TEXTURE_SWIZZLE_B) {
++      component = xenos::XE_GPU_TEXTURE_SWIZZLE_R;
++    }
++    swapped |= component << (3 * i);
++  }
++  return swapped;
++}
++
+ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pending_load_out,
+                                       PendingSharedMemoryRange* pending_ranges_out,
+                                       size_t& pending_range_count_out) {
+@@ -439,6 +453,9 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+                                              pending_load.load_mips)) {
+     return false;
+   }
++  if (pending_load.load_base) {
++    texture.SetContentRedBlueSwapped(false);
++  }
+ 
+   // Mark the ranges as uploaded and watch them. This is needed for scaled
+   // resolves as well to detect when the CPU wants to reuse the memory for a
+@@ -485,6 +502,8 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+     }
+   };
+   uint32_t textures_remaining = used_texture_mask & ~texture_bindings_in_sync_;
++  const uint32_t textures_updated = textures_remaining;
++  uint32_t old_host_swizzles[32];
+   uint32_t index = 0;
+   while (rex::bit_scan_forward(textures_remaining, &index)) {
+     uint32_t index_bit = UINT32_C(1) << index;
+@@ -502,7 +521,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+       binding.Reset();
+       continue;
+     }
+-    uint32_t old_host_swizzle = binding.host_swizzle;
++    old_host_swizzles[index] = binding.host_swizzle;
+     binding.host_swizzle = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
+ 
+     // Check if need to load the unsigned and the signed versions of the texture
+@@ -513,8 +532,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+     bool any_sign_was_signed = texture_util::IsAnySignSigned(old_swizzled_signs);
+     bool any_sign_is_not_signed = texture_util::IsAnySignNotSigned(binding.swizzled_signs);
+     bool any_sign_is_signed = texture_util::IsAnySignSigned(binding.swizzled_signs);
+-    if (key_changed || binding.host_swizzle != old_host_swizzle ||
+-        any_sign_is_not_signed != any_sign_was_not_signed ||
++    if (key_changed || any_sign_is_not_signed != any_sign_was_not_signed ||
+         any_sign_is_signed != any_sign_was_signed) {
+       bindings_changed |= index_bit;
+     }
+@@ -588,11 +606,66 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+       }
+     }
+   }
++  // Known only after loading: a load gives a texture the memory's component order again.
++  uint32_t swizzles_remaining = textures_updated;
++  while (rex::bit_scan_forward(swizzles_remaining, &index)) {
++    swizzles_remaining &= ~(UINT32_C(1) << index);
++    TextureBinding& binding = texture_bindings_[index];
++    if (!binding.key.is_valid) {
++      continue;
++    }
++    if (binding.texture && binding.texture->content_red_blue_swapped()) {
++      binding.host_swizzle = SwapRedBlueSwizzle(binding.host_swizzle);
++    }
++    if (binding.host_swizzle != old_host_swizzles[index]) {
++      bindings_changed |= UINT32_C(1) << index;
++    }
++  }
+   if (bindings_changed) {
+     UpdateTextureBindingsImpl(bindings_changed);
+   }
+ }
+ 
++uint32_t TextureCache::FindResolveCopyTargets(const draw_util::ResolveTextureCopy& copy,
++                                              Texture** targets_out, uint32_t max_targets) {
++  uint32_t dest_page = (copy.dest_base & 0x1FFFFFFF) >> 12;
++  if (!dest_page) {
++    return 0;
++  }
++  bool scaled = IsDrawResolutionScaled();
++  uint32_t count = 0;
++  for (const auto& [key, texture_ptr] : textures_) {
++    if (count >= max_targets) {
++      break;
++    }
++    if (key.base_page != dest_page || key.format != copy.format ||
++        key.endianness != copy.endian || !key.tiled ||
++        key.dimension != xenos::DataDimension::k2DOrStacked || key.depth_or_array_size_minus_1 ||
++        key.mip_max_level || key.signed_separate || bool(key.scaled_resolve) != scaled ||
++        (uint32_t(key.pitch) << xenos::kTextureTileWidthHeightLog2) != copy.dest_pitch_texels ||
++        key.GetWidth() > copy.width || key.GetHeight() > copy.height ||
++        key.GetWidth() * draw_resolution_scale_x() <= copy.fill_x ||
++        key.GetHeight() * draw_resolution_scale_y() <= copy.fill_y ||
++        IsSignedVersionSeparateForFormat(key)) {
++      continue;
++    }
++    Texture& texture = *texture_ptr;
++    // Up to date, so watched, and the base level isn't in a packed mip tail.
++    if (texture.outdated_mask() || texture.GetGuestMipsSize() ||
++        !texture.guest_layout().packed_level) {
++      continue;
++    }
++    targets_out[count++] = &texture;
++  }
++  return count;
++}
++
++void TextureCache::EndResolveCopyIntoTexture(Texture& texture, bool red_blue_swapped) {
++  texture.SetContentRedBlueSwapped(red_blue_swapped);
++  texture.MarkAsUsed();
++  texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
++}
++
+ const char* TextureCache::TextureKey::GetLogDimensionName(xenos::DataDimension dimension) {
+   switch (dimension) {
+     case xenos::DataDimension::k1D:

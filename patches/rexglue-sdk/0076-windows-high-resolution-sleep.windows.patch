@@ -1,0 +1,78 @@
+diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
+index 896dfec..8559f6a 100644
+--- a/src/core/threading_win.cpp
++++ b/src/core/threading_win.cpp
+@@ -93,15 +93,71 @@ void SyncMemory() {
+   MemoryBarrier();
+ }
+ 
++namespace {
++
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++
++// Sleep(n) on the system timer lasts up to a tick longer than asked; a high-resolution timer does not.
++class SleepTimer {
++ public:
++  SleepTimer()
++      : handle_(CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                                       TIMER_ALL_ACCESS)) {}
++  ~SleepTimer() {
++    if (handle_) {
++      CloseHandle(handle_);
++    }
++  }
++  SleepTimer(const SleepTimer&) = delete;
++  SleepTimer& operator=(const SleepTimer&) = delete;
++
++  // Returns false if the timer is unavailable. *alerted is set when an APC ended an alertable sleep.
++  bool Sleep(std::chrono::microseconds duration, bool alertable, bool* alerted) {
++    if (!handle_) {
++      return false;
++    }
++    LARGE_INTEGER due;
++    due.QuadPart = -(duration.count() * 10);
++    if (!SetWaitableTimer(handle_, &due, 0, nullptr, nullptr, FALSE)) {
++      return false;
++    }
++    if (WaitForSingleObjectEx(handle_, INFINITE, alertable ? TRUE : FALSE) == WAIT_IO_COMPLETION) {
++      CancelWaitableTimer(handle_);
++      *alerted = true;
++    }
++    return true;
++  }
++
++ private:
++  HANDLE handle_;
++};
++
++SleepTimer& GetSleepTimer() {
++  thread_local SleepTimer timer;
++  return timer;
++}
++
++}  // namespace
++
+ void Sleep(std::chrono::microseconds duration) {
+   if (duration.count() < 100) {
+     MaybeYield();
+-  } else {
+-    ::Sleep(static_cast<DWORD>(duration.count() / 1000));
++    return;
+   }
++  bool alerted = false;
++  if (duration.count() >= 1000 && GetSleepTimer().Sleep(duration, false, &alerted)) {
++    return;
++  }
++  ::Sleep(static_cast<DWORD>(duration.count() / 1000));
+ }
+ 
+ SleepResult AlertableSleep(std::chrono::microseconds duration) {
++  bool alerted = false;
++  if (duration.count() >= 1000 && GetSleepTimer().Sleep(duration, true, &alerted)) {
++    return alerted ? SleepResult::kAlerted : SleepResult::kSuccess;
++  }
+   if (SleepEx(static_cast<DWORD>(duration.count() / 1000), TRUE) == WAIT_IO_COMPLETION) {
+     return SleepResult::kAlerted;
+   }

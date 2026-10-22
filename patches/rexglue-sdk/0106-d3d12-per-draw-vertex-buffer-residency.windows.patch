@@ -1,0 +1,168 @@
+Adapted from TheSimpsonsGameRecomp 7deb273b (the D3D12 half; the RequestRanges single-range fast path is not needed here, 0073 and 0079 already make that path allocation- and lock-free). The vertex buffer residency cache was keyed on guest address and size and kept across draws and frames, so a fetch constant rebound at the same address and size skipped RequestRange, which is the only thing that consults the valid-page table and re-uploads vertex data the CPU rewrote in place: a buffer rebuilt every frame at a fixed address was uploaded once and never again (stale vertices, flicker). Residency is deduplicated within one draw only, as in Xenia. This also removes the invalidation calls 0087 added, which only cleared the bits.
+
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 796a965..2a22dc2 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -426,9 +426,6 @@ class D3D12CommandProcessor : public CommandProcessor {
+   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
+   void WriteGuestOcclusionResult(xenos::xe_gpu_depth_sample_counts* sample_counts,
+                                  uint64_t samples);
+-  void InvalidateAllVertexBufferResidency();
+-  void InvalidateVertexBufferResidency(uint32_t vfetch_index);
+-  void InvalidateVertexBufferResidencyRange(uint32_t first_vfetch, uint32_t last_vfetch);
+ 
+   void WriteGammaRampSRV(bool is_pwl, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
+ 
+@@ -709,12 +706,6 @@ class D3D12CommandProcessor : public CommandProcessor {
+     uint32_t sample_count_address;
+   };
+   std::deque<PendingOcclusionQuery> pending_occlusion_queries_;
+-  struct VertexBufferState {
+-    uint32_t address = UINT32_MAX;
+-    uint32_t size = UINT32_MAX;
+-  };
+-  std::array<VertexBufferState, 96> vertex_buffer_states_{};
+-  uint64_t vertex_buffers_in_sync_[2] = {};
+ 
+   // The current fixed-function drawing state.
+   D3D12_VIEWPORT ff_viewport_;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index df62d81..809d3a5 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -230,7 +230,6 @@ void D3D12CommandProcessor::InsertDebugMarker(const char* format, ...) {
+ 
+ void D3D12CommandProcessor::ClearCaches() {
+   CommandProcessor::ClearCaches();
+-  InvalidateAllVertexBufferResidency();
+   cache_clear_requested_ = true;
+ }
+ 
+@@ -240,40 +239,6 @@ void D3D12CommandProcessor::InvalidateGpuMemory() {
+   }
+ }
+ 
+-void D3D12CommandProcessor::InvalidateAllVertexBufferResidency() {
+-  vertex_buffers_in_sync_[0] = 0;
+-  vertex_buffers_in_sync_[1] = 0;
+-  for (VertexBufferState& state : vertex_buffer_states_) {
+-    state.address = UINT32_MAX;
+-    state.size = UINT32_MAX;
+-  }
+-}
+-
+-void D3D12CommandProcessor::InvalidateVertexBufferResidency(uint32_t vfetch_index) {
+-  if (vfetch_index >= vertex_buffer_states_.size()) {
+-    return;
+-  }
+-  vertex_buffers_in_sync_[vfetch_index >> 6] &= ~(uint64_t(1) << (vfetch_index & 63));
+-}
+-
+-void D3D12CommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first_vfetch,
+-                                                                 uint32_t last_vfetch) {
+-  if (first_vfetch > last_vfetch) {
+-    std::swap(first_vfetch, last_vfetch);
+-  }
+-  if (first_vfetch >= vertex_buffer_states_.size()) {
+-    return;
+-  }
+-  last_vfetch = std::min(last_vfetch, uint32_t(vertex_buffer_states_.size() - 1));
+-  for (uint32_t word = first_vfetch >> 6; word <= (last_vfetch >> 6); ++word) {
+-    uint32_t first_bit = word == (first_vfetch >> 6) ? (first_vfetch & 63) : 0;
+-    uint32_t last_bit = word == (last_vfetch >> 6) ? (last_vfetch & 63) : 63;
+-    uint64_t mask = (last_bit == 63 ? ~uint64_t(0) : ((uint64_t(1) << (last_bit + 1)) - 1)) &
+-                    ~((uint64_t(1) << first_bit) - 1);
+-    vertex_buffers_in_sync_[word] &= ~mask;
+-  }
+-}
+-
+ // Copies the used float constants (4 x 64 bitmap, 4 registers each), a run of consecutive ones per
+ // memcpy.
+ static uint8_t* CopyUsedFloatConstants(uint8_t* dest, const uint32_t* first_register,
+@@ -1010,7 +975,6 @@ bool D3D12CommandProcessor::SetupContext() {
+     REXGPU_ERROR("Failed to initialize base command processor context");
+     return false;
+   }
+-  InvalidateAllVertexBufferResidency();
+   UpdateDebugMarkersEnabled();
+ 
+   const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+@@ -1795,7 +1759,6 @@ bool D3D12CommandProcessor::SetupContext() {
+ void D3D12CommandProcessor::ShutdownContext() {
+   AwaitAllQueueOperationsCompletion();
+   StopAsyncSubmission();
+-  InvalidateAllVertexBufferResidency();
+   ShutdownOcclusionQueryResources();
+ 
+   ui::d3d12::util::ReleaseAndNull(readback_buffer_);
+@@ -1972,8 +1935,6 @@ void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+             (index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6);
+       }
+     }
+-    // Always: the game may have rewritten the vertex data at the same address.
+-    InvalidateVertexBufferResidency((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 2);
+   }
+ }
+ 
+@@ -2063,8 +2024,6 @@ void D3D12CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t
+         texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
+       }
+     }
+-    // Always: the game may have rewritten the vertex data at the same address.
+-    InvalidateVertexBufferResidencyRange(first_fetch_dword / 2, last_fetch_dword / 2);
+     return;
+   }
+ 
+@@ -2146,8 +2105,6 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+       frame_logged ? GetDevFrameLog().resolved_ranges
+                    : std::vector<std::pair<uint32_t, uint32_t>>();
+   GetDevFrameLog().OnSwap();
+-  vertex_buffers_in_sync_[0] = 0;
+-  vertex_buffers_in_sync_[1] = 0;
+ 
+   if (!graphics_system_)
+     return;
+@@ -2858,7 +2815,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   // Must not call anything that can change the descriptor heap from now on!
+ 
+-  // Ensure vertex buffers are resident.
++  // Ensure vertex buffers are resident. Only within one draw: RequestRange is what re-uploads
++  // vertex data the CPU rewrote in place.
++  uint64_t vertex_buffers_resident[2] = {};
+   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
+   for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+     uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+@@ -2867,7 +2826,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+       vfetch_bits_remaining &= ~(uint32_t(1) << j);
+       uint32_t vfetch_index = i * 32 + j;
+       uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
+-      if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
++      if (vertex_buffers_resident[vfetch_index >> 6] & vfetch_bit) {
+         continue;
+       }
+       xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
+@@ -2889,11 +2848,6 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+                       vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+           return false;
+       }
+-      VertexBufferState& state = vertex_buffer_states_[vfetch_index];
+-      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
+-        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+-        continue;
+-      }
+       if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
+         REXGPU_ERROR(
+             "Failed to request vertex buffer at 0x{:08X} (size {}) in the "
+@@ -2901,9 +2855,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+             vfetch_constant.address << 2, vfetch_constant.size << 2);
+         return false;
+       }
+-      state.address = vfetch_constant.address;
+-      state.size = vfetch_constant.size;
+-      vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
++      vertex_buffers_resident[vfetch_index >> 6] |= vfetch_bit;
+     }
+   }
+ 

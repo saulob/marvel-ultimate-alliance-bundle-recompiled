@@ -1,0 +1,60 @@
+With resolution scaling the copy buffer, the scaled source view and the scaled resolve destination view are the guest size times the scale squared: a copy buffer is limited to 2 GB (32-bit size, resource limit) and a typed view to 2^27 elements (D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP); beyond that the operation fails with a log line instead of creating an invalid view.
+
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -1688,6 +1688,19 @@
+     (is_base ? host_slice_size_base : host_slice_sizes_mips[level]) = level_host_slice_size;
+     copy_buffer_size += level_host_slice_size * array_size;
+   }
++  // The scratch buffer is requested with a 32-bit size (a single resource can't be larger than 2 GB
++  // anyway), and a typed UAV can address at most 2^D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP
++  // elements. With resolution scaling the size is multiplied by the scale squared.
++  if (!copy_buffer_size || copy_buffer_size > (UINT64(1) << 31) ||
++      (copy_buffer_size >> load_shader_info.dest_bpe_log2) >
++          (UINT64(1) << D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP)) {
++    REXGPU_ERROR(
++        "D3D12TextureCache: The {}x{}x{} texture{} needs a {} byte copy buffer, which is more than "
++        "a Direct3D 12 buffer or typed view can hold",
++        width, height, depth_or_array_size, texture_resolution_scaled ? " (resolution-scaled)" : "",
++        copy_buffer_size);
++    return false;
++  }
+   D3D12_RESOURCE_STATES copy_buffer_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+   ID3D12Resource* copy_buffer =
+       command_processor_.RequestScratchGPUBuffer(uint32_t(copy_buffer_size), copy_buffer_state);
+@@ -1782,6 +1795,15 @@
+         command_processor_.ReleaseScratchGPUBuffer(copy_buffer, copy_buffer_state);
+         return false;
+       }
++      if ((GetCurrentScaledResolveRangeLengthScaled() >> load_shader_info.source_bpe_log2) >
++          (UINT64(1) << D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP)) {
++        REXGPU_ERROR(
++            "D3D12TextureCache: The resolution-scaled source of a {}x{} texture ({} bytes) is more "
++            "than a typed Direct3D 12 view can address",
++            width, height, GetCurrentScaledResolveRangeLengthScaled());
++        command_processor_.ReleaseScratchGPUBuffer(copy_buffer, copy_buffer_state);
++        return false;
++      }
+       TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+       assert_true(descriptor_write_index < descriptor_count);
+       ui::d3d12::util::DescriptorCpuGpuHandlePair descriptor_scaled_source =
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1228,6 +1228,17 @@
+         copy_dest_committed = shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
+                                                          resolve_info.copy_dest_extent_length);
+       }
++      if (copy_dest_committed && draw_resolution_scaled &&
++          (texture_cache.GetCurrentScaledResolveRangeLengthScaled() >>
++           copy_shader_info.dest_bpe_log2) >
++              (uint64_t(1) << D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP)) {
++        // A typed UAV addresses at most 2^D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP elements.
++        REXGPU_ERROR(
++            "D3D12RenderTargetCache: The resolution-scaled resolve destination of {} bytes is more "
++            "than a typed Direct3D 12 view can address, skipping the copy",
++            texture_cache.GetCurrentScaledResolveRangeLengthScaled());
++        copy_dest_committed = false;
++      }
+       if (copy_dest_committed) {
+         // Write the descriptors and transition the resources.
+         // Full shared memory without resolution scaling, range of the scaled

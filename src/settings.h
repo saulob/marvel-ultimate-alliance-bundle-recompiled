@@ -14,6 +14,7 @@
 
 REXCVAR_DECLARE(bool, mua_launcher);
 REXCVAR_DECLARE(bool, mua_skip_launcher);
+REXCVAR_DECLARE(int32_t, mua_frame_rate);
 REXCVAR_DECLARE(bool, mua_show_fps);
 REXCVAR_DECLARE(bool, mua_show_render_resolution);
 REXCVAR_DECLARE(bool, mua_show_frame_counter);
@@ -45,6 +46,9 @@ void LoadPlayerSettings(const std::filesystem::path& path);
 // Sets the Xenos native_2x_msaa cvar from the launcher's Multisampling choice. Call once the GPU plugin
 // has registered its cvars and before emulation starts.
 void ApplyMultisampling();
+
+// Sets async_shader_wait_ms for the Frame rate choice. Call with ApplyMultisampling.
+void ApplyShaderWait();
 
 // Keeps the guest video mode at the title's native size; ReXGlue otherwise reports the window size. Call once the
 // window exists and before the guest starts.

@@ -1,0 +1,118 @@
+Taken from crackdown-recomp (Unowa001) origin/main patches/sdk/0027-d3d12-present-latency-wait.patch (commit 66916ff): the swap chain is created with DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT (maximum latency 2, the default for non-waitable chains) and painting waits on that object before using the direct queue, so a driver-forced V-Sync can't make Present block the queue the asynchronous submission thread (0080) executes on (measured there: 44.5 -> 61.8 fps under forced V-Sync). Cvars d3d12_present_latency_wait (default true) and d3d12_present_test_sync_interval (testing).
+
+The sync interval for testing is read just before Present (in the reference it sits a few lines earlier, where it is out of scope in this version of PaintAndPresentImpl).
+
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index 83d09f7..79c9f3f 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -251,6 +251,9 @@ class D3D12Presenter final : public Presenter {
+     uint32_t swap_chain_width = 0;
+     uint32_t swap_chain_height = 0;
+     bool swap_chain_allows_tearing = false;
++    // DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT: painting waits on this
++    // before touching the queue, so Present never blocks (see PaintAndPresentImpl).
++    HANDLE frame_latency_waitable = nullptr;
+     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain;
+     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSwapChainBufferCount> swap_chain_buffers;
+   };
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index e9026ed..2e23fdf 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -32,6 +32,20 @@
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D12",
+                     "Allow variable refresh rate and tearing");
++REXCVAR_DEFINE_BOOL(d3d12_present_latency_wait, true, "UI/D3D12",
++                    "Wait on the swap chain's frame-latency object before painting, so a "
++                    "driver-forced V-Sync can't make Present block the shared direct queue "
++                    "(restart)");
++REXCVAR_DEFINE_INT32(d3d12_present_test_sync_interval, 0, "UI/D3D12",
++                     "Testing: present with this sync interval (1 = V-Sync), the way a driver "
++                     "that forces V-Sync does");
++
++namespace {
++UINT SwapChainFlags(bool allows_tearing, bool latency_waitable) {
++  return (allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) |
++         (latency_waitable ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
++}
++}  // namespace
+ 
+ namespace rex::ui::d3d12 {
+ 
+@@ -363,7 +377,8 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     }
+     bool swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->ResizeBuffers(
+         0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), DXGI_FORMAT_UNKNOWN,
+-        paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
++        SwapChainFlags(paint_context_.swap_chain_allows_tearing,
++                       paint_context_.frame_latency_waitable != nullptr)));
+     if (swap_chain_resized) {
+       for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+         if (FAILED(paint_context_.swap_chain->GetBuffer(
+@@ -413,6 +428,9 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+       // rate.
+       swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+     }
++    if (REXCVAR_GET(d3d12_present_latency_wait)) {
++      swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
++    }
+     IDXGIFactory2* dxgi_factory = provider_.GetDXGIFactory();
+     ID3D12CommandQueue* direct_queue = provider_.GetDirectQueue();
+     Microsoft::WRL::ComPtr<IDXGISwapChain1> swap_chain_1;
+@@ -450,6 +468,12 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     paint_context_.swap_chain_height = new_swap_chain_height;
+     paint_context_.swap_chain_allows_tearing =
+         (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
++    if (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
++      // Two frames queued at most, like the DXGI default for non-waitable chains.
++      paint_context_.swap_chain->SetMaximumFrameLatency(2);
++      paint_context_.frame_latency_waitable =
++          paint_context_.swap_chain->GetFrameLatencyWaitableObject();
++    }
+     for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+       if (FAILED(paint_context_.swap_chain->GetBuffer(
+               i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
+@@ -548,6 +572,10 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+   for (Microsoft::WRL::ComPtr<ID3D12Resource>& swap_chain_buffer_ref : swap_chain_buffers) {
+     swap_chain_buffer_ref.Reset();
+   }
++  if (frame_latency_waitable) {
++    CloseHandle(frame_latency_waitable);
++    frame_latency_waitable = nullptr;
++  }
+   swap_chain.Reset();
+   swap_chain_allows_tearing = false;
+   swap_chain_height = 0;
+@@ -555,6 +583,15 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+ }
+ 
+ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
++  // When a driver forces V-Sync, Present waits for a free back buffer while
++  // holding the direct queue that the GPU emulation's submission thread also
++  // uses, which stalled the game to a fraction of the refresh rate (GitHub
++  // issue #16, 33 fps at 100 Hz). Waiting here instead keeps that wait off the
++  // queue. The timeout only guards against a lost signal.
++  if (paint_context_.frame_latency_waitable) {
++    WaitForSingleObjectEx(paint_context_.frame_latency_waitable, 100, TRUE);
++  }
++
+   // Begin the command list with the command allocator not currently potentially
+   // used on the GPU.
+   UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
+@@ -1166,9 +1203,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   // fullscreen is ever used in, the allow tearing flag must not be passed in
+   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
+   // presentation model used in Direct3D 12).
++  const UINT sync_interval = UINT(std::clamp(REXCVAR_GET(d3d12_present_test_sync_interval), 0, 4));
+   HRESULT present_result = paint_context_.swap_chain->Present(
+-      0, DXGI_PRESENT_RESTART |
+-             (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
++      sync_interval,
++      DXGI_PRESENT_RESTART |
++          (paint_context_.swap_chain_allows_tearing && !sync_interval ? DXGI_PRESENT_ALLOW_TEARING
++                                                                     : 0));
+   // Even if presentation has failed, work might have been enqueued anyway
+   // internally before the failure according to Jesse Natalie from the DirectX
+   // Discord server.

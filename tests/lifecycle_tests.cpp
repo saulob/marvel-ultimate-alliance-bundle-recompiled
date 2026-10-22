@@ -103,13 +103,15 @@ void TestSessionLogFinalizationWiring() {
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
   const std::string post_init = Between(app, "void OnPostInitLogging(", "void OnConfigureFonts(");
   CHECK(Has(post_init, "mua::InstallSessionLogCleanup();"));
+  CHECK(Has(post_init, "mua::RemoveDiscardedSessionLogs();"));
 
   const std::string closing =
       Between(app, "void OnClosing(", "std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay");
-  CHECK(Has(closing, "mua::FinalizeSessionLog();"));
+  CHECK(Has(closing, "mua::DiscardSessionLogBeforeHardExit();"));
+  CHECK(!Has(closing, "FinalizeSessionLog"));
   CHECK(Has(closing, "rex::FlushLogging();"));
   CHECK(Has(closing, "std::_Exit(0);"));
-  const size_t finalize = closing.find("mua::FinalizeSessionLog();");
+  const size_t finalize = closing.find("mua::DiscardSessionLogBeforeHardExit();");
   const size_t hard_exit = closing.find("std::_Exit(0);");
   CHECK(finalize != std::string::npos && hard_exit != std::string::npos && finalize < hard_exit);
   CHECK(!Has(Between(app, "void OnShutdown() override", "void OnClosing("), "mua::FinalizeSessionLog();"));

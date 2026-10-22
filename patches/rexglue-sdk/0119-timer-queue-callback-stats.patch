@@ -1,0 +1,60 @@
+Adapted from TheSimpsonsGameRecomp 1a18f4a7 (the REX_TIMER_STATS half only; its idle-wait cap targeted the spin_wait_strategy that patch does not use since Marvel's TimerQueue already blocks with a capped wait, see kIdleWait): off unless that env var is set, logs the timer dispatch thread's callback rate and lateness every 5 s, split into the 1 ms timestamp timer and everything else.
+
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 4997510..33b18fb 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <algorithm>
+ #include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
+ #include <forward_list>
+ #include <mutex>
+ 
+@@ -150,6 +152,9 @@ class TimerQueue {
+                                                         std::memory_order_acq_rel)) {
+             // Possibility to dispatch to a thread pool here
+             assert_not_null(wait_item->callback_);
++            if (stats_enabled_) {
++              RecordCallback(*wait_item);
++            }
+             wait_item->callback_(wait_item->userdata_);
+ 
+             if (wait_item->interval_ != clock::duration::zero() &&
+@@ -191,6 +196,34 @@ class TimerQueue {
+   std::jthread::id dispatch_thread_id() const { return dispatch_thread_.get_id(); }
+ 
+  private:
++  // Debugging (REX_TIMER_STATS): callbacks per second, split into the 1 ms timestamp timer and
++  // everything else, and how late they run.
++  bool stats_enabled_ = std::getenv("REX_TIMER_STATS") != nullptr;
++  uint64_t stats_count_1ms_ = 0, stats_count_other_ = 0;
++  double stats_late_sum_us_ = 0.0, stats_late_max_us_ = 0.0;
++  clock::time_point stats_start_ = clock::now();
++  void RecordCallback(const WaitItem& item) {
++    const auto now = clock::now();
++    const double late_us = std::chrono::duration<double, std::micro>(now - item.due_).count();
++    stats_late_sum_us_ += late_us;
++    stats_late_max_us_ = std::max(stats_late_max_us_, late_us);
++    if (item.interval_ == std::chrono::milliseconds(1)) {
++      ++stats_count_1ms_;
++    } else {
++      ++stats_count_other_;
++    }
++    const double elapsed = std::chrono::duration<double>(now - stats_start_).count();
++    if (elapsed >= 5.0) {
++      const uint64_t total = stats_count_1ms_ + stats_count_other_;
++      std::fprintf(stderr, "[timer-stats] %.0f/s 1ms timer, %.1f/s other, late avg %.0f us max %.0f us\n",
++                   stats_count_1ms_ / elapsed, stats_count_other_ / elapsed,
++                   total ? stats_late_sum_us_ / total : 0.0, stats_late_max_us_);
++      stats_count_1ms_ = stats_count_other_ = 0;
++      stats_late_sum_us_ = stats_late_max_us_ = 0.0;
++      stats_start_ = now;
++    }
++  }
++
+   // Blocks instead of spinning until the next timer is due; capped because time_point::max() is not
+   // handled by every standard library.
+   static constexpr std::chrono::seconds kIdleWait{1};

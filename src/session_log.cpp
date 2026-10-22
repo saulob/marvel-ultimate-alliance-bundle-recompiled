@@ -36,6 +36,8 @@ constexpr char kSessionLogVariable[] = "MUA_SESSION_LOG";
 constexpr char kSessionParentVariable[] = "MUA_SESSION_PARENT";
 #endif
 
+constexpr char kDiscardSuffix[] = ".discard";
+
 std::atomic<bool> g_handed_off{false};
 
 bool LogContainsCrashReport(const std::filesystem::path& file) {
@@ -128,6 +130,36 @@ void ClearInheritedSession() {
 #endif
 }
 
+std::filesystem::path DiscardableSessionLog() {
+  if (g_handed_off.load(std::memory_order_acquire) || DetailedLoggingEnabled()) {
+    return {};
+  }
+  const std::filesystem::path file = ActiveLogFile();
+  if (file.empty()) {
+    return {};
+  }
+  rex::FlushLogging();
+  std::error_code ec;
+  if (!std::filesystem::exists(file, ec) || ec || LogContainsCrashReport(file)) {
+    return {};
+  }
+  return file;
+}
+
+std::filesystem::path DiscardMarker(const std::filesystem::path& file) {
+  std::filesystem::path marker = file;
+  marker += kDiscardSuffix;
+  return marker;
+}
+
+void DeleteSessionLog(const std::filesystem::path& file) {
+  std::error_code ec;
+  std::filesystem::remove(file, ec);
+  if (ec) {
+    std::ofstream(DiscardMarker(file), std::ios::binary | std::ios::trunc);
+  }
+}
+
 }  // namespace
 
 void InstallSessionLogCleanup() {
@@ -140,29 +172,43 @@ void InstallSessionLogCleanup() {
 }
 
 void FinalizeSessionLog() {
-  if (g_handed_off.load(std::memory_order_acquire)) {
-    return;
-  }
-  if (DetailedLoggingEnabled()) {
-    return;
-  }
-  const std::filesystem::path file = ActiveLogFile();
+  const std::filesystem::path file = DiscardableSessionLog();
   if (file.empty()) {
     return;
   }
-
-  rex::FlushLogging();
-  std::error_code ec;
-  if (!std::filesystem::exists(file, ec) || ec) {
-    return;
-  }
-  if (LogContainsCrashReport(file)) {
-    return;
-  }
-
   ReleaseMinimalLogFilter();
   rex::ShutdownLogging();
-  std::filesystem::remove(file, ec);
+  DeleteSessionLog(file);
+}
+
+void DiscardSessionLogBeforeHardExit() {
+  const std::filesystem::path file = DiscardableSessionLog();
+  if (file.empty()) {
+    return;
+  }
+  CloseLogFile();
+  DeleteSessionLog(file);
+}
+
+void RemoveDiscardedSessionLogs() {
+  const std::filesystem::path active = ActiveLogFile();
+  if (active.empty()) {
+    return;
+  }
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(active.parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
+    const std::filesystem::path marker = it->path();
+    if (marker.extension() != kDiscardSuffix) {
+      continue;
+    }
+    std::filesystem::path file = marker;
+    file.replace_extension();
+    std::error_code remove_ec;
+    if (file != active && IsSessionLogName(file.filename().string()) && !LogContainsCrashReport(file)) {
+      std::filesystem::remove(file, remove_ec);
+    }
+    std::filesystem::remove(marker, remove_ec);
+  }
 }
 
 void BeginSessionLogHandoff() {

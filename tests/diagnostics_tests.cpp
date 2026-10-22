@@ -73,6 +73,7 @@ mua::StartupDiagnostics Sample() {
   diagnostics.game.sha256 = "ABCDEF";
   diagnostics.game.fingerprint = "profile:mua-gold-x360";
   diagnostics.game.status = "verified";
+  diagnostics.gameplay.frame_rate = "60";
   diagnostics.gameplay.present = "guest 60Hz | host VBlank (VSync On)";
   diagnostics.graphics.render_width = 1280;
   diagnostics.graphics.render_height = 720;
@@ -122,7 +123,7 @@ void TestStartupBlock() {
   CHECK(Has(text, "Runtime game: title_id=415607DA | default.xex | size=3981312 | "
                   "fingerprint=profile:mua-gold-x360 | status=verified"));
   CHECK(Has(text, "Runtime game sha256: ABCDEF"));
-  CHECK(Has(text, "Runtime timing: present=guest 60Hz | host VBlank (VSync On)"));
+  CHECK(Has(text, "Runtime timing: frame_rate=60 | present=guest 60Hz | host VBlank (VSync On)"));
   CHECK(Has(text, "Runtime renderer: render=1280x720 | guest=1280x720 | msaa=2x native | anti-aliasing=Off | "
                   "texture filtering=4x | allow_invalid_fetch_constants=true | target=rov"));
   CHECK(Has(text, "Runtime input: keyboard_mode=On | controller=Xbox One S Controller"));
@@ -171,7 +172,7 @@ void TestSelectedAndResolvedDiffer() {
 }
 
 void TestPresentationWording() {
-  std::printf("guest presentation and host vsync are named separately\n");
+  std::printf("guest presentation and host vsync are named separately, and reflect the guest vblank override\n");
   CHECK(mua::PresentationText(false) == "guest 60Hz | host VBlank (VSync On)");
   CHECK(mua::PresentationText(true) == "guest 60Hz | host Immediate (tearing allowed)");
 }

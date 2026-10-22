@@ -30,6 +30,7 @@
 
 #include "aspect_ratio.h"
 #include "dpi.h"
+#include "frame_limiter.h"
 #include "game_files.h"
 #include "graphics_adapters.h"
 #include "multisampling.h"
@@ -39,6 +40,7 @@
 #include "launcher_quit.h"
 #include "log_filter.h"
 #include "platform.h"
+#include "render_scale.h"
 #include "settings.h"
 
 namespace mua {
@@ -55,6 +57,10 @@ constexpr ImGuiConfigFlags kNavFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGu
 
 // Marvel red over the Midnight background.
 const ImVec4 kAccent = ImVec4(0.93f, 0.15f, 0.17f, 1.0f);
+
+constexpr const char* kFrameRateHelp =
+    "30 FPS is the original game rate. Higher rates speed up gameplay and rendering together, not just "
+    "presentation; VSync still applies.";
 
 constexpr const char* kAuthorUrl = "https://github.com/saulob";
 
@@ -171,7 +177,7 @@ std::string Size(int width, int height) {
 
 std::vector<trg::Option> RenderResolutionOptions(AspectRatio aspect) {
   std::vector<trg::Option> options;
-  for (int scale = 1; scale <= 4; ++scale) {
+  for (int scale = kMinRenderScale; scale <= kMaxRenderScale; ++scale) {
     std::string label = scale == 1 ? "Original" : std::to_string(scale) + "x";
     label += " \xE2\x80\x94 " + std::to_string(GuestWidth(aspect) * scale) + "x" + std::to_string(kGuestHeight * scale);
     if (scale == 2) {
@@ -531,6 +537,11 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   }
 
   static void PageGameplay(trg::Ui& ui) {
+    std::vector<trg::Option> frame_rates;
+    for (auto& [value, label] : FrameRateChoices()) {
+      frame_rates.push_back({std::move(value), std::move(label)});
+    }
+    ui.Choice("Frame rate", kFrameRateHelp, "mua_frame_rate", "60", frame_rates, 4);
     ui.Toggle("Frame rate in title",
               "Shows the game's frame rate in the window title: Marvel Ultimate Alliance Recompiled | FPS: 60.00",
               "mua_show_fps", true, "Off", "On");

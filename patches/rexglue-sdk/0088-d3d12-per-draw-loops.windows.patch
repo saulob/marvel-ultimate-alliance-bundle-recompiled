@@ -1,0 +1,87 @@
+Adapted from patches/rexglue-sdk/0052-d3d12-per-draw-loops.windows.patch in geometry-wars-retro-evolved-2-recompiled
+(originally Crackdown Recompiled PR #13). Only the D3D12 command processor half, which runs for every render target path:
+vertex buffer residency is invalidated by 64-bit masks instead of one bit per call, and the used float constants are copied
+to the constant buffer in runs of consecutive registers instead of 16 bytes at a time. The upstream hunk for
+D3D12RenderTarget::GetStencilBits/AddStencilBits is left out: it needs the host-render-target-only stencil tracking.
+
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 54d80f6..e314497 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -200,11 +200,32 @@ void D3D12CommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first_
+     return;
+   }
+   last_vfetch = std::min(last_vfetch, uint32_t(vertex_buffer_states_.size() - 1));
+-  for (uint32_t vfetch_index = first_vfetch; vfetch_index <= last_vfetch; ++vfetch_index) {
+-    InvalidateVertexBufferResidency(vfetch_index);
++  for (uint32_t word = first_vfetch >> 6; word <= (last_vfetch >> 6); ++word) {
++    uint32_t first_bit = word == (first_vfetch >> 6) ? (first_vfetch & 63) : 0;
++    uint32_t last_bit = word == (last_vfetch >> 6) ? (last_vfetch & 63) : 63;
++    uint64_t mask = (last_bit == 63 ? ~uint64_t(0) : ((uint64_t(1) << (last_bit + 1)) - 1)) &
++                    ~((uint64_t(1) << first_bit) - 1);
++    vertex_buffers_in_sync_[word] &= ~mask;
+   }
+ }
+ 
++// Copies the used float constants (4 x 64 bitmap, 4 registers each), a run of consecutive ones per
++// memcpy.
++static uint8_t* CopyUsedFloatConstants(uint8_t* dest, const uint32_t* first_register,
++                                       const uint64_t* bitmap) {
++  for (uint32_t i = 0; i < 4; ++i) {
++    uint64_t bits = bitmap[i];
++    while (bits) {
++      uint32_t first = uint32_t(std::countr_zero(bits));
++      uint32_t run = uint32_t(std::countr_one(bits >> first));
++      std::memcpy(dest, first_register + (i << 8) + (first << 2), run * 4 * sizeof(float));
++      dest += run * 4 * sizeof(float);
++      bits = first + run >= 64 ? 0 : bits & (~uint64_t(0) << (first + run));
++    }
++  }
++  return dest;
++}
++
+ void D3D12CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
+                                                     uint32_t title_id, bool blocking) {
+   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);
+@@ -4534,18 +4555,8 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+     if (float_constants == nullptr) {
+       return false;
+     }
+-    for (uint32_t i = 0; i < 4; ++i) {
+-      uint64_t float_constant_map_entry = float_constant_map_vertex.float_bitmap[i];
+-      uint32_t float_constant_index;
+-      while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
+-        float_constant_map_entry &= ~(1ull << float_constant_index);
+-        std::memcpy(
+-            float_constants,
+-            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (float_constant_index << 2)],
+-            4 * sizeof(float));
+-        float_constants += 4 * sizeof(float);
+-      }
+-    }
++    CopyUsedFloatConstants(float_constants, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X],
++                           float_constant_map_vertex.float_bitmap);
+     cbuffer_binding_float_vertex_.up_to_date = true;
+     current_graphics_root_up_to_date_ &= ~(1u << root_parameter_float_constants_vertex);
+   }
+@@ -4560,18 +4571,8 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+     if (pixel_shader != nullptr) {
+       const Shader::ConstantRegisterMap& float_constant_map_pixel =
+           pixel_shader->constant_register_map();
+-      for (uint32_t i = 0; i < 4; ++i) {
+-        uint64_t float_constant_map_entry = float_constant_map_pixel.float_bitmap[i];
+-        uint32_t float_constant_index;
+-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
+-          float_constant_map_entry &= ~(1ull << float_constant_index);
+-          std::memcpy(
+-              float_constants,
+-              &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (float_constant_index << 2)],
+-              4 * sizeof(float));
+-          float_constants += 4 * sizeof(float);
+-        }
+-      }
++      CopyUsedFloatConstants(float_constants, &regs[XE_GPU_REG_SHADER_CONSTANT_256_X],
++                             float_constant_map_pixel.float_bitmap);
+     }
+     cbuffer_binding_float_pixel_.up_to_date = true;
+     current_graphics_root_up_to_date_ &= ~(1u << root_parameter_float_constants_pixel);

@@ -163,6 +163,9 @@ function Install-PatchedRuntime {
 
     Remove-Item -LiteralPath $StampPath -ErrorAction SilentlyContinue
     foreach ($leaf in $RuntimeFiles) { Copy-Item -LiteralPath $built[$leaf] (Join-Path $Sdk $leaf) -Force }
+    # tools\rexglue's headers come from the stock release zip and are never reinstalled otherwise; a patch that adds
+    # or changes a public header (e.g. 0115's include/rex/audio/thread_priority.h) needs it mirrored here too.
+    Copy-Item -LiteralPath (Join-Path $src 'include\rex') (Join-Path $Sdk 'include') -Recurse -Force
     $lines = Write-RuntimeStamp $Sdk $inputsSha256
     $problems = Test-PatchedRuntime $Sdk
     if ($problems.Count) { throw "The installed runtime and GPU plugin do not match the patches: $($problems -join '; ')" }

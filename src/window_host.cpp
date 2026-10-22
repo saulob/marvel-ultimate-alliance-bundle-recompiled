@@ -32,6 +32,9 @@
 
 #include "aspect_ratio.h"
 #include "cursor_input.h"
+#include "frame_limiter.h"
+#include "frame_pacing.h"
+#include "hang_watchdog.h"
 #include "input_activity.h"
 #include "settings.h"
 #include "window_title.h"
@@ -302,11 +305,31 @@ void LogFirstPresent() {
               drawable.height);
 }
 
+// The idle-present thread repeats the last swap through the swap routine while the game submits no frames.
+constexpr uint32_t kRepeatPresentSite = 0x8249EFE0;
+thread_local bool t_repeat_present = false;
+
 }  // namespace
+
+REX_EXTERN(__imp__sub_82498340);
+
+REX_HOOK_RAW(sub_82498340) {
+  t_repeat_present = uint32_t(ctx.lr) == kRepeatPresentSite;
+  __imp__sub_82498340(ctx, base);
+  t_repeat_present = false;
+}
 
 // Named like the SDK's export, so REX_EXTERN would call this hook again: the original is called by its entry point.
 REX_HOOK_RAW(__imp__VdSwap) {
+  const bool repeat = t_repeat_present;
+  if (!repeat) {
+    mua::PaceGuestFrame();
+  }
   rex::ppc::HostToGuestFunction<rex::kernel::xboxkrnl::VdSwap_entry>(ctx, base);
   LogFirstPresent();
-  CountGuestFrame();
+  if (!repeat) {
+    mua::NoteGuestFrame();
+    mua::CountPresentForDiagnostics();
+    CountGuestFrame();
+  }
 }

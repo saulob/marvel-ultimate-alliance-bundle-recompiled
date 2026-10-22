@@ -1,0 +1,20 @@
+Builds the GPU plugin with ThinLTO in Release on Windows, so the command processor's per-draw path can be inlined
+across its translation units.
+
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -113,6 +113,13 @@
+ 
+ target_compile_options(rexgpu-xenos PRIVATE -Wno-unused-variable)
+ 
++# ThinLTO in Release on Windows: the command processor's per-draw path calls across many translation units (render
++# target, texture and pipeline caches, shared memory, register file), which only link-time optimization can inline.
++if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++    target_compile_options(rexgpu-xenos PRIVATE $<$<CONFIG:Release>:-flto=thin>)
++    target_link_options(rexgpu-xenos PRIVATE $<$<CONFIG:Release>:-flto=thin> $<$<CONFIG:Release>:LINKER:/opt:lldlto=3>)
++endif()
++
+ rex_target_pch(rexgpu-xenos
+     <mutex>
+     <unordered_map>

@@ -1,0 +1,451 @@
+ReXGlue development commit 3cd7243 (rexglue-sdk, after v0.10.0), merged by hand onto 0047: XN_SYS_INPUTDEVICESCHANGED is broadcast when a pad connects or disconnects, guest input reads a neutral pad while a XAM dialog is open (buttons still held when it closes stay masked until released), SetState rejects a null vibration, and the vibration and stick deadzone cvars (defaults keep the previous behaviour).
+
+diff --git a/include/rex/input/flags.h b/include/rex/input/flags.h
+index f29d8ac..eb2ff98 100644
+--- a/include/rex/input/flags.h
++++ b/include/rex/input/flags.h
+@@ -16,3 +16,6 @@
+ REXCVAR_DECLARE(bool, guide_button);
+ REXCVAR_DECLARE(std::string, hid_mappings_file);
+ REXCVAR_DECLARE(std::string, input_backend);
++REXCVAR_DECLARE(bool, vibration);
++REXCVAR_DECLARE(double, left_stick_deadzone_percentage);
++REXCVAR_DECLARE(double, right_stick_deadzone_percentage);
+diff --git a/include/rex/input/input.h b/include/rex/input/input.h
+index 450eb34..dd1e791 100644
+--- a/include/rex/input/input.h
++++ b/include/rex/input/input.h
+@@ -15,6 +15,11 @@
+ 
+ namespace rex::input {
+ 
++// XInput's published thresholds.
++constexpr int32_t X_INPUT_GAMEPAD_LEFT_THUMB_DEADZONE = 7849;
++constexpr int32_t X_INPUT_GAMEPAD_RIGHT_THUMB_DEADZONE = 8689;
++constexpr uint8_t X_INPUT_GAMEPAD_TRIGGER_THRESHOLD = 30;
++
+ enum X_INPUT_CAPS {
+   X_INPUT_CAPS_FFB_SUPPORTED = 0x0001,
+   X_INPUT_CAPS_WIRELESS = 0x0002,
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 340c463..6802993 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -10,8 +10,12 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <array>
++#include <atomic>
++#include <bitset>
+ #include <functional>
+ #include <memory>
++#include <utility>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
+@@ -45,15 +49,38 @@ class InputSystem : public system::IInputSystem {
+ 
+   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* out_caps);
+   X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);
++  /// GetState for the emulator's own UI, which reads while the guest is blocked.
++  X_RESULT GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state);
+   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
+   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
+ 
++  /// While any blocker is held the guest reads a neutral pad. Buttons still
++  /// held when the last one drops stay masked until released, so the press
++  /// that dismissed the dialog does not also reach the game.
++  void AddUIInputBlocker();
++  void RemoveUIInputBlocker();
++
++  bool GetVibrationEnabled() const;
++  void ToggleVibration();
++
++  std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
++  /// Guest user whose device most recently produced a button press.
++  uint32_t GetLastUsedUser() const { return last_used_user_; }
++
+  private:
++  using JoystickValue = std::pair<uint16_t, uint16_t>;
+   /// Re-enumerates every driver and notifies the assignment when the set
+   /// changed.
+   void RefreshDevices();
+   InputDriver* DriverForDevice(DeviceId id);
+   const DeviceInfo* DeviceInfoFor(DeviceId id) const;
++  /// The device that speaks for a user, preferring the one most recently in
++  /// the player's hands.
++  DeviceId ChooseDeviceForUser(uint32_t user_index) const;
++
++  void UpdateConnectedUser(uint32_t user_index, bool connected);
++  void AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const;
++  X_INPUT_VIBRATION ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const;
+ 
+   rex::ui::Window* window_ = nullptr;
+ 
+@@ -66,6 +93,15 @@ class InputSystem : public system::IInputSystem {
+   // does not renumber pad two.
+   std::vector<DeviceInfo> devices_;
+   std::vector<InputDriver*> device_owners_;
++
++  std::bitset<kMaxGuestUsers> connected_users_;
++  uint32_t last_used_user_ = 0;
++  // {left, right} stick maxima, scaling the deadzone percentages.
++  std::array<std::pair<JoystickValue, JoystickValue>, kMaxGuestUsers> user_max_joystick_value_ = {};
++
++  std::atomic<int> ui_input_blockers_{0};
++  // Masked out per user until the guest sees them released.
++  std::array<uint16_t, kMaxGuestUsers> consumed_buttons_ = {};
+ };
+ 
+ /// Called on the input polling thread when a device's state changes. Passive:
+diff --git a/include/rex/input/state_merge.h b/include/rex/input/state_merge.h
+index 42ef908..7f804b9 100644
+--- a/include/rex/input/state_merge.h
++++ b/include/rex/input/state_merge.h
+@@ -17,9 +17,8 @@
+ 
+ namespace rex::input {
+ 
+-// XInput's published thresholds.
+-constexpr int32_t kThumbDeadzone = 7849;
+-constexpr uint8_t kTriggerThreshold = 30;
++constexpr int32_t kThumbDeadzone = X_INPUT_GAMEPAD_LEFT_THUMB_DEADZONE;
++constexpr uint8_t kTriggerThreshold = X_INPUT_GAMEPAD_TRIGGER_THRESHOLD;
+ 
+ /// Folds src into dst: buttons OR, triggers max, stick axes larger magnitude,
+ /// packet number newest.
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index e46f4b3..99bbb0b 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -26,11 +26,21 @@
+ #include <rex/input/state_merge.h>
+ #include <rex/input/xinput/xinput_input_driver.h>
+ #include <rex/logging.h>
++#include <rex/system/kernel_state.h>
+ 
+ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
+     .allowed({"sdl", "xinput"});
+ 
+ REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
++
++REXCVAR_DEFINE_BOOL(vibration, true, "Input", "Enable controller vibration");
++
++REXCVAR_DEFINE_DOUBLE(left_stick_deadzone_percentage, 0.0, "Input",
++                      "Deadzone applied to the left stick, as a fraction of its range")
++    .range(0.0, 1.0);
++REXCVAR_DEFINE_DOUBLE(right_stick_deadzone_percentage, 0.0, "Input",
++                      "Deadzone applied to the right stick, as a fraction of its range")
++    .range(0.0, 1.0);
+ namespace rex::input {
+ 
+ namespace {
+@@ -61,6 +71,9 @@ void ForgetInputActivity(DeviceId id) {
+   g_last_device_gamepad.erase(static_cast<uint64_t>(id));
+ }
+ 
++// XN_SYS_INPUTDEVICESCHANGED
++constexpr uint32_t kXNotificationSystemInputDevicesChanged = 0x00000012;
++
+ }  // namespace
+ 
+ InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
+@@ -216,27 +229,33 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
+   return nullptr;
+ }
+ 
+-X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+-                                      X_INPUT_CAPABILITIES* out_caps) {
+-  SCOPE_profile_cpu_f("hid");
+-  if (!out_caps || !assignment_) {
+-    return X_ERROR_DEVICE_NOT_CONNECTED;
++DeviceId InputSystem::ChooseDeviceForUser(uint32_t user_index) const {
++  if (!assignment_) {
++    return DeviceId::kInvalid;
+   }
+-
+-  RefreshDevices();
+   std::vector<DeviceId> ids;
+   assignment_->DevicesForUser(user_index, ids);
+   if (ids.empty()) {
+-    return X_ERROR_DEVICE_NOT_CONNECTED;
++    return DeviceId::kInvalid;
+   }
+-
+   // Prefer the pad in hand, so button glyphs follow it rather than whichever
+   // device enumerated first.
+   DeviceId chosen = active_devices_.Active(user_index);
+   if (std::find(ids.begin(), ids.end(), chosen) == ids.end()) {
+     chosen = ids.front();
+   }
++  return chosen;
++}
++
++X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
++                                      X_INPUT_CAPABILITIES* out_caps) {
++  SCOPE_profile_cpu_f("hid");
++  if (!out_caps || !assignment_) {
++    return X_ERROR_DEVICE_NOT_CONNECTED;
++  }
+ 
++  RefreshDevices();
++  DeviceId chosen = ChooseDeviceForUser(user_index);
+   auto* driver = DriverForDevice(chosen);
+   if (!driver) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -244,8 +263,69 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+   return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+ }
+ 
++void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
++  if (user_index >= kMaxGuestUsers || connected_users_.test(user_index) == connected) {
++    return;
++  }
++  connected_users_.set(user_index, connected);
++  if (connected) {
++    REXLOG_INFO("New controller connected to slot {}.", user_index);
++  } else {
++    REXLOG_INFO("Controller disconnected from slot {}.", user_index);
++  }
++
++  // Titles poll capabilities off this rather than every frame, so without it
++  // a pad plugged in mid-game is never noticed.
++  if (auto* kernel_state = REX_KERNEL_STATE()) {
++    kernel_state->BroadcastNotification(kXNotificationSystemInputDevicesChanged, 0);
++  }
++
++  if (!connected) {
++    user_max_joystick_value_[user_index] = {};
++    consumed_buttons_[user_index] = 0;
++    return;
++  }
++
++  // Deadzone percentages scale against the device's own range.
++  DeviceId chosen = ChooseDeviceForUser(user_index);
++  auto* driver = DriverForDevice(chosen);
++  if (!driver) {
++    return;
++  }
++  X_INPUT_CAPABILITIES caps = {};
++  if (driver->GetDeviceCapabilities(chosen, 0, &caps) != X_ERROR_SUCCESS) {
++    return;
++  }
++  user_max_joystick_value_[user_index] = {{caps.gamepad.thumb_lx, caps.gamepad.thumb_ly},
++                                          {caps.gamepad.thumb_rx, caps.gamepad.thumb_ry}};
++}
++
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
++
++  // A dialog owns the controller.
++  if (ui_input_blockers_.load() > 0) {
++    if (out_state) {
++      std::memset(out_state, 0, sizeof(*out_state));
++    }
++    return X_ERROR_SUCCESS;
++  }
++
++  X_RESULT result = GetStateForUI(user_index, out_state);
++
++  if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers &&
++      consumed_buttons_[user_index] != 0) {
++    const uint16_t buttons = out_state->gamepad.buttons;
++    // Each button leaves the mask once the player lets go of it.
++    consumed_buttons_[user_index] &= buttons;
++    out_state->gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
++  }
++
++  return result;
++}
++
++X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
++  SCOPE_profile_cpu_f("hid");
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -276,17 +356,100 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   }
+ 
+   if (!any) {
++    UpdateConnectedUser(user_index, false);
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
++  UpdateConnectedUser(user_index, true);
++  AdjustDeadzoneLevels(user_index, &merged.gamepad);
++  if (static_cast<uint16_t>(merged.gamepad.buttons) != 0 && user_index < kMaxGuestUsers) {
++    last_used_user_ = user_index;
++  }
+   if (out_state) {
+     *out_state = merged;
+   }
+   return X_ERROR_SUCCESS;
+ }
+ 
++void InputSystem::AddUIInputBlocker() {
++  ui_input_blockers_.fetch_add(1);
++}
++
++void InputSystem::RemoveUIInputBlocker() {
++  // Whatever is held right now stays masked until released, so the press that
++  // dismissed the dialog is not also read as a press in the game.
++  X_INPUT_STATE state = {};
++  for (uint32_t user_index = 0; user_index < kMaxGuestUsers; user_index++) {
++    if (GetStateForUI(user_index, &state) == X_ERROR_SUCCESS) {
++      consumed_buttons_[user_index] |= static_cast<uint16_t>(state.gamepad.buttons);
++    }
++  }
++
++  ui_input_blockers_.fetch_sub(1);
++}
++
++bool InputSystem::GetVibrationEnabled() const {
++  return REXCVAR_GET(vibration);
++}
++
++void InputSystem::ToggleVibration() {
++  REXCVAR_SET(vibration, !REXCVAR_GET(vibration));
++  // The guest's next SetState may never come while a motor is running.
++  X_INPUT_VIBRATION silence = {};
++  for (uint32_t user_index = 0; user_index < kMaxGuestUsers; user_index++) {
++    SetState(user_index, &silence);
++  }
++}
++
++void InputSystem::AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const {
++  if (user_index >= kMaxGuestUsers || !gamepad) {
++    return;
++  }
++
++  // Radial: the cutoff follows the stick's angle, so a diagonal is not held to
++  // a larger displacement than a cardinal push.
++  auto apply = [](double percentage, const JoystickValue& max, int16_t& axis_x, int16_t& axis_y) {
++    if (percentage <= 0.0 || percentage >= 1.0) {
++      return;
++    }
++    const double deadzone_x = max.first * percentage;
++    const double deadzone_y = max.second * percentage;
++    const double theta = std::atan2(static_cast<double>(axis_y), static_cast<double>(axis_x));
++    const double cutoff_x = std::cos(theta) * deadzone_x;
++    const double cutoff_y = std::sin(theta) * deadzone_y;
++    if (axis_x > -cutoff_x && axis_x < cutoff_x) {
++      axis_x = 0;
++    }
++    if (axis_y > -cutoff_y && axis_y < cutoff_y) {
++      axis_y = 0;
++    }
++  };
++
++  const auto& maxima = user_max_joystick_value_[user_index];
++  int16_t lx = gamepad->thumb_lx;
++  int16_t ly = gamepad->thumb_ly;
++  apply(REXCVAR_GET(left_stick_deadzone_percentage), maxima.first, lx, ly);
++  gamepad->thumb_lx = lx;
++  gamepad->thumb_ly = ly;
++
++  int16_t rx = gamepad->thumb_rx;
++  int16_t ry = gamepad->thumb_ry;
++  apply(REXCVAR_GET(right_stick_deadzone_percentage), maxima.second, rx, ry);
++  gamepad->thumb_rx = rx;
++  gamepad->thumb_ry = ry;
++}
++
++X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const {
++  X_INPUT_VIBRATION modified = *vibration;
++  if (!REXCVAR_GET(vibration)) {
++    modified.left_motor_speed = 0;
++    modified.right_motor_speed = 0;
++  }
++  return modified;
++}
++
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+   SCOPE_profile_cpu_f("hid");
+-  if (!assignment_) {
++  if (!assignment_ || !vibration) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+ 
+@@ -294,6 +457,8 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+   std::vector<DeviceId> ids;
+   assignment_->DevicesForUser(user_index, ids);
+ 
++  const X_INPUT_VIBRATION modified = ModifyVibrationLevel(vibration);
++
+   // Every pad on this user belongs to the same player, so all of them buzz.
+   // Only pads decide the result: synthetic devices accept any vibration and
+   // would otherwise report success for a pad that never rumbled.
+@@ -307,7 +472,8 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+     if (!driver || !info) {
+       continue;
+     }
+-    X_RESULT result = driver->SetDeviceVibration(id, vibration);
++    X_INPUT_VIBRATION per_device = modified;
++    X_RESULT result = driver->SetDeviceVibration(id, &per_device);
+     if (info->synthetic) {
+       any_synthetic = true;
+       continue;
+diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
+index 5a572ce..e38cd25 100644
+--- a/src/kernel/xam/xam_ui.cpp
++++ b/src/kernel/xam/xam_ui.cpp
+@@ -21,6 +21,7 @@ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
+                     "Don't display any UI, using defaults for prompts as needed");
+ #include <rex/kernel/xam/private.h>
+ #include <rex/hook.h>
++#include <rex/input/input_system.h>
+ #include <rex/types.h>
+ #include <rex/system/xtypes.h>
+ #include <rex/thread.h>
+@@ -54,6 +55,35 @@ using namespace rex::system;
+ 
+ extern std::atomic<int> xam_dialogs_shown_;
+ 
++namespace {
++
++// Holds guest input for as long as a dialog is on screen, so the title does
++// not act on the presses driving it - including the one that dismisses it.
++class ScopedGuestInputBlock {
++ public:
++  ScopedGuestInputBlock() {
++    auto* runtime = REX_KERNEL_STATE()->emulator();
++    input_system_ =
++        runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
++    if (input_system_) {
++      input_system_->AddUIInputBlocker();
++    }
++  }
++  ~ScopedGuestInputBlock() {
++    if (input_system_) {
++      input_system_->RemoveUIInputBlocker();
++    }
++  }
++
++  ScopedGuestInputBlock(const ScopedGuestInputBlock&) = delete;
++  ScopedGuestInputBlock& operator=(const ScopedGuestInputBlock&) = delete;
++
++ private:
++  rex::input::InputSystem* input_system_ = nullptr;
++};
++
++}  // namespace
++
+ class XamDialog : public rex::ui::ImGuiDialog {
+  public:
+   void set_close_callback(std::function<void()> close_callback) {
+@@ -81,6 +111,7 @@ X_RESULT xeXamDispatchDialog(T* dialog, std::function<X_RESULT(T*)> close_callba
+     REX_KERNEL_STATE()->BroadcastNotification(0x9, true);
+   };
+   auto run = [dialog, close_callback]() -> X_RESULT {
++    ScopedGuestInputBlock input_block;
+     X_RESULT result;
+     dialog->set_close_callback(
+         [&dialog, &result, &close_callback]() { result = close_callback(dialog); });
+@@ -122,6 +153,7 @@ X_RESULT xeXamDispatchDialogEx(T* dialog,
+     REX_KERNEL_STATE()->BroadcastNotification(0x9, true);
+   };
+   auto run = [dialog, close_callback](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
++    ScopedGuestInputBlock input_block;
+     rex::ui::WindowedAppContext* app_context = REX_KERNEL_STATE()->emulator()->app_context();
+     X_RESULT result;
+     dialog->set_close_callback([&dialog, &result, &extended_error, &length, &close_callback]() {

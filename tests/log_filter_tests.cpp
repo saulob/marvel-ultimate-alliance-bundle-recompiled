@@ -287,6 +287,54 @@ void TestSessionLifecycle(const std::filesystem::path& dir) {
   CHECK(mua::ActiveLogFile().empty());
 }
 
+void TestHardExitDiscard(const std::filesystem::path& dir) {
+  std::printf("a window close discards a Minimal log without shutting logging down\n");
+  const std::filesystem::path closed = dir / "marvel_ultimate_alliance_801.log";
+  const std::filesystem::path crashed = dir / "marvel_ultimate_alliance_802.log";
+  const std::filesystem::path next = dir / "marvel_ultimate_alliance_803.log";
+  const std::filesystem::path previous = dir / "marvel_ultimate_alliance_804.log";
+  const std::filesystem::path unrelated = dir / "notes.log";
+  WriteText(closed, "normal session\n");
+  WriteText(crashed, "run started\nCRASH REPORT\n");
+  WriteText(next, "next session\n");
+  WriteText(previous, "previous session\n");
+  WriteText(unrelated, "unrelated\n");
+  SetDetailedLogging(false);
+
+  rex::cvar::SetFlagByName("log_file", closed.string());
+  mua::DiscardSessionLogBeforeHardExit();
+  rex::cvar::SetFlagByName("log_file", crashed.string());
+  mua::DiscardSessionLogBeforeHardExit();
+  CHECK(std::filesystem::exists(crashed));
+  CHECK(!std::filesystem::exists(crashed.string() + ".discard"));
+  CHECK(!std::filesystem::exists(closed));
+  CHECK(!std::filesystem::exists(closed.string() + ".discard"));
+
+  const std::filesystem::path marked = dir / "marvel_ultimate_alliance_805.log";
+  WriteText(marked, "marked by an older build\n");
+  WriteText(marked.string() + ".discard", "");
+  WriteText(next.string() + ".discard", "");
+  WriteText(unrelated.string() + ".discard", "");
+
+  rex::cvar::SetFlagByName("log_file", next.string());
+  mua::RemoveDiscardedSessionLogs();
+  CHECK(!std::filesystem::exists(marked));
+  CHECK(!std::filesystem::exists(marked.string() + ".discard"));
+  CHECK(std::filesystem::exists(crashed));
+  CHECK(std::filesystem::exists(next));
+  CHECK(std::filesystem::exists(previous));
+  CHECK(std::filesystem::exists(unrelated));
+  CHECK(!std::filesystem::exists(next.string() + ".discard"));
+
+  SetDetailedLogging(true);
+  WriteText(closed, "normal session\n");
+  rex::cvar::SetFlagByName("log_file", closed.string());
+  mua::DiscardSessionLogBeforeHardExit();
+  CHECK(std::filesystem::exists(closed));
+  CHECK(!std::filesystem::exists(closed.string() + ".discard"));
+  rex::cvar::SetFlagByName("log_file", "");
+}
+
 void TestMissingAndRepeatedFinalization() {
   std::printf("a missing active log and a repeated finalization are harmless\n");
   SetDetailedLogging(false);
@@ -471,6 +519,17 @@ int RunChildMode(const std::wstring& mode, const std::filesystem::path& dir) {
     mua::FinalizeSessionLog();
     std::_Exit(0);
   }
+  if (mode == L"window-close" || mode == L"window-close-held") {
+    HANDLE held = INVALID_HANDLE_VALUE;
+    if (mode == L"window-close-held") {
+      held = CreateFileW(mua::ActiveLogFile().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                         OPEN_EXISTING, 0, nullptr);
+    }
+    mua::DiscardSessionLogBeforeHardExit();
+    REXLOG_WARN("straggler warning after window close");
+    rex::FlushLogging();
+    std::_Exit(0);
+  }
   if (mode == L"delete-fail") {
     const std::filesystem::path active = mua::ActiveLogFile();
     const HANDLE held = CreateFileW(active.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -546,6 +605,26 @@ void TestChildProcesses(const std::filesystem::path& root) {
   std::filesystem::create_directories(hard_exit);
   CHECK(RunChild(L"--child hard-exit \"" + hard_exit.wstring() + L"\"") == 0);
   CHECK(!AnyFile(hard_exit, "", ".log"));
+
+  const std::filesystem::path window_close = root / "child_window_close";
+  std::filesystem::create_directories(window_close);
+  const std::filesystem::path previous_log = window_close / "marvel_ultimate_alliance_900.log";
+  const std::filesystem::path unrelated = window_close / "notes.txt";
+  WriteText(previous_log, "previous session\n");
+  WriteText(unrelated, "unrelated\n");
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    CHECK(RunChild(L"--child window-close " + std::wstring(L"\"") + window_close.wstring() + L"\"") == 0);
+    CHECK(CountLogs(window_close) == 1);
+    CHECK(!AnyFile(window_close, "", ".discard"));
+  }
+  CHECK(std::filesystem::exists(previous_log));
+  CHECK(std::filesystem::exists(unrelated));
+
+  const std::filesystem::path window_close_held = root / "child_window_close_held";
+  std::filesystem::create_directories(window_close_held);
+  CHECK(RunChild(L"--child window-close-held \"" + window_close_held.wstring() + L"\"") == 0);
+  CHECK(AnyFile(window_close_held, "", ".log"));
+  CHECK(AnyFile(window_close_held, "", ".discard"));
 
   const std::filesystem::path delete_fail = root / "child_delete_fail";
   std::filesystem::create_directories(delete_fail);
@@ -668,7 +747,6 @@ void TestWiring() {
   CHECK(Has(session, "BeginSessionLogHandoff"));
   CHECK(Has(session, "TakeInheritedSessionLog"));
   CHECK(!Has(session, "remove_all"));
-  CHECK(!Has(session, "directory_iterator"));
 
   const std::string diagnostics = ReadSource("diagnostics.cpp");
   CHECK(Has(diagnostics, "Runtime configuration:"));
@@ -680,7 +758,9 @@ void TestWiring() {
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
   CHECK(Has(app, "mua::ApplyDetailedLogging();"));
   CHECK(Has(app, "mua::InstallSessionLogCleanup();"));
-  CHECK(Has(app, "mua::FinalizeSessionLog();"));
+  CHECK(Has(app, "mua::DiscardSessionLogBeforeHardExit();"));
+  CHECK(Has(app, "mua::RemoveDiscardedSessionLogs();"));
+  CHECK(!Has(app, "mua::FinalizeSessionLog();"));
   CHECK(Has(app, "mua::TakeInheritedSessionLog({"));
   CHECK(Has(app, "void LaunchModule() override"));
   CHECK(Has(app, "mua::LogStartupDiagnostics("));
@@ -731,6 +811,7 @@ int main() {
   TestSettingValue(dir);
   TestCrashReportIndependent();
   TestSessionLifecycle(dir);
+  TestHardExitDiscard(dir);
   TestMissingAndRepeatedFinalization();
 #if defined(_WIN32)
   TestInheritedSessionValidation(dir);

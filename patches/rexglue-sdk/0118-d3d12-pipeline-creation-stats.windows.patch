@@ -1,0 +1,87 @@
+Adapted from the generic technique in king-kong-recompiled tools/rexglue-patches/0002-D3D12-pipeline-creation-times-in-REX_DEV_PIPELINE_ST.patch (TekRantGaming), rewritten independently: that repo states no license of its own for its SDK-tree patches (unlike the other reference repos ported this pass, which explicitly keep the ReXGlue SDK under its own BSD license), so this re-derives the same idea without reusing its text. SDK-tree diagnostic, off unless REX_DEV_PIPELINE_STATS is set: extends the existing once-a-second pipeline-wait log line (Marvel's patch 0048) with how many pipelines the background creation threads finished since the last line and their mean and worst creation time.
+
+diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
+--- a/include/rex/graphics/d3d12/pipeline_cache.h
++++ b/include/rex/graphics/d3d12/pipeline_cache.h
+@@ -98,6 +98,10 @@
+   // Returns whether the pipeline is ready to use.
+   bool WaitForPipeline(void* handle, int64_t& budget_us) const;
+ 
++  // REX_DEV_PIPELINE_STATS: how many pipelines the background threads finished since the last call, and the
++  // average and worst creation time among them. Resets the running totals.
++  void ConsumeCreationTimings(uint32_t& finished_count, double& mean_ms, double& worst_ms);
++
+   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
+     return reinterpret_cast<const Pipeline*>(handle)->state.load(std::memory_order_acquire);
+   }
+@@ -412,6 +416,9 @@
+   // when set.
+   std::priority_queue<Pipeline*, std::vector<Pipeline*>, PipelineCreationPriorityComparator>
+       creation_queue_;
++  // Running totals behind ConsumeCreationTimings.
++  std::atomic<uint32_t> creation_timing_count_{0};
++  std::atomic<uint64_t> creation_timing_sum_us_{0}, creation_timing_worst_us_{0};
+   // Number of threads that are currently creating a pipeline - incremented when
+   // a pipeline is dequeued (the completion event can't be triggered before this
+   // is zero). Protected with creation_request_lock_.
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -2556,8 +2556,13 @@
+   (ready ? drawn : skipped)++;
+   const auto now = std::chrono::steady_clock::now();
+   if (now - last >= std::chrono::seconds(1)) {
+-    REXGPU_WARN("Pipeline waits: {} drawn after waiting, {} skipped, {:.1f} ms waited", drawn, skipped,
+-                waited_total_us / 1000.0);
++    uint32_t finished_count;
++    double mean_ms, worst_ms;
++    pipeline_cache_->ConsumeCreationTimings(finished_count, mean_ms, worst_ms);
++    REXGPU_WARN(
++        "Pipeline waits: {} drawn after waiting, {} skipped, {:.1f} ms waited; {} finished "
++        "creating in the background (mean {:.1f} ms, worst {:.1f} ms)",
++        drawn, skipped, waited_total_us / 1000.0, finished_count, mean_ms, worst_ms);
+     waited_total_us = 0;
+     drawn = skipped = 0;
+     last = now;
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -3244,6 +3244,7 @@
+       ++creation_threads_busy_;
+     }
+ 
++    const auto creation_started_at = std::chrono::steady_clock::now();
+     PipelineRuntimeDescription runtime_description;
+     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+       pipeline_to_create->state.store(nullptr, std::memory_order_release);
+@@ -3254,6 +3255,18 @@
+       pipeline_to_create->creation_done.store(true, std::memory_order_release);
+     }
+ 
++    {
++      const uint64_t elapsed_us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                               std::chrono::steady_clock::now() - creation_started_at)
++                                               .count());
++      creation_timing_count_.fetch_add(1, std::memory_order_relaxed);
++      creation_timing_sum_us_.fetch_add(elapsed_us, std::memory_order_relaxed);
++      uint64_t previous_worst = creation_timing_worst_us_.load(std::memory_order_relaxed);
++      while (elapsed_us > previous_worst && !creation_timing_worst_us_.compare_exchange_weak(
++                                                previous_worst, elapsed_us, std::memory_order_relaxed)) {
++      }
++    }
++
+     // Pipeline created - the thread is not busy anymore, safe to set the
+     // completion event if needed (at the next iteration, or in some other
+     // thread).
+@@ -3306,4 +3319,11 @@
+   return pipeline->state.load(std::memory_order_acquire) != nullptr;
+ }
+ 
++void PipelineCache::ConsumeCreationTimings(uint32_t& finished_count, double& mean_ms, double& worst_ms) {
++  finished_count = creation_timing_count_.exchange(0, std::memory_order_relaxed);
++  const uint64_t sum_us = creation_timing_sum_us_.exchange(0, std::memory_order_relaxed);
++  mean_ms = finished_count ? sum_us / 1000.0 / finished_count : 0.0;
++  worst_ms = creation_timing_worst_us_.exchange(0, std::memory_order_relaxed) / 1000.0;
++}
++
+ }  // namespace rex::graphics::d3d12

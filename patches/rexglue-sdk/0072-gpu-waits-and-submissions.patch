@@ -1,0 +1,84 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..f0f2340 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -168,6 +168,8 @@ class CommandProcessor {
+   virtual void MakeCoherent();
+   virtual void PrepareForWait();
+   virtual void ReturnFromWait();
++  // Called while the command processor waits; returns whether it needs to be polled again soon.
++  virtual bool PollBackgroundWork() { return false; }
+ 
+   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
+   virtual void OnPrimaryBufferEnd() {}
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 50e43e2..8cfb2d5 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -251,21 +251,26 @@ void CommandProcessor::WorkerThreadMain() {
+     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
+       // We've run out of commands to execute.
+-      // We spin here waiting for new ones, as the overhead of waiting on our
+-      // event is too high.
++      // A short yield burst catches back-to-back submissions, then sleep on the write pointer
++      // event so the core is free for the guest threads feeding the ring.
++      constexpr uint32_t kIdleYieldCount = 32;
+       PrepareForWait();
++      bool poll_background_work = PollBackgroundWork();
+       uint32_t loop_count = 0;
+       do {
+-        // If we spin around too much, revert to a "low-power" state.
+-        if (loop_count > 500) {
+-          const int wait_time_ms = 5;
++        if (loop_count < kIdleYieldCount) {
++          rex::thread::MaybeYield();
++          loop_count++;
++        } else {
++          // Background work needs timely polling; thread calls posted without a write pointer
++          // update are only noticed when the wait times out.
+           rex::thread::Wait(write_ptr_index_event_.get(), true,
+-                            std::chrono::milliseconds(wait_time_ms));
++                            std::chrono::milliseconds(poll_background_work ? 1 : 5));
+         }
+-
+-        rex::thread::MaybeYield();
+-        loop_count++;
+         write_ptr_index = write_ptr_index_.load();
++        if (poll_background_work) {
++          poll_background_work = PollBackgroundWork();
++        }
+       } while (worker_running_ && pending_fns_.empty() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+       ReturnFromWait();
+@@ -1034,6 +1039,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+ 
+   bool is_memory = (wait_info & 0x10) != 0;
+ 
++  // The guest wait value is a poll interval hint, so re-poll quickly before sleeping and never
++  // sleep longer than 1 ms, not to delay the ring after the condition has already been met.
++  constexpr uint32_t kYieldPollCount = 16;
++  uint32_t unmatched_poll_count = 0;
+   bool matched = false;
+   do {
+     uint32_t value = 0;
+@@ -1075,14 +1084,16 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+         break;
+     }
+     if (!matched) {
++      PollBackgroundWork();
+       // Wait.
+       if (wait >= 0x100) {
+         PrepareForWait();
+-        if (!REXCVAR_GET(vsync)) {
+-          // User wants it fast and dangerous.
++        if (unmatched_poll_count < kYieldPollCount || !REXCVAR_GET(vsync)) {
++          // Without vsync the user wants it fast and dangerous.
+           rex::thread::MaybeYield();
++          ++unmatched_poll_count;
+         } else {
+-          rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
++          rex::thread::Sleep(std::chrono::milliseconds(1));
+         }
+         rex::thread::SyncMemory();
+         ReturnFromWait();

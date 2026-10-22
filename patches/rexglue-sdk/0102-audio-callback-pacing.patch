@@ -1,0 +1,55 @@
+Taken unchanged from crackdown-xbox360-recompiled patches/rexglue-sdk/0051 (commit e7b1ebd): the audio worker spaces the client render callbacks just under the 5.33 ms frame duration instead of calling the guest mixer back to back when the driver frees queue slots in a burst; after a stall the schedule restarts from now instead of catching up. Cvar audio_callback_pacing (default true).
+
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 7a711a8..4d1cb1d 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -24,10 +24,18 @@
+ #include <rex/thread.h>
+ #include <rex/cvar.h>
+ 
++#include <algorithm>
++#include <chrono>
++
++#include <SDL3/SDL_timer.h>
++
+ REXCVAR_DEFINE_INT32(
+     audio_maxqframes, 8, "Audio",
+     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
+ 
++REXCVAR_DEFINE_BOOL(audio_callback_pacing, true, "Audio",
++                    "Ask the game for audio frames at the hardware's steady rate instead of in bursts");
++
+ // As with normal Microsoft, there are like twelve different ways to access
+ // the audio APIs. Early games use XMA*() methods almost exclusively to touch
+ // decoders. Later games use XAudio*() and direct memory writes to the XMA
+@@ -100,6 +108,11 @@ void AudioSystem::WorkerThreadMain() {
+   // Initialize driver and ringbuffer.
+   Initialize();
+ 
++  // The driver frees queue slots in bursts. Spacing callbacks just under the 5.33 ms frame duration keeps the
++  // queue full without calling the game's mixer back to back, which would return silence.
++  constexpr auto kCallbackInterval = std::chrono::microseconds(5333 * 39 / 40);
++  std::chrono::steady_clock::time_point next_callback[kMaximumClientCount] = {};
++
+   // Main run loop.
+   uint32_t diag_pump_count = 0;
+   while (worker_running_) {
+@@ -140,6 +153,17 @@ void AudioSystem::WorkerThreadMain() {
+       global_lock.unlock();
+ 
+       if (client_callback) {
++        if (REXCVAR_GET(audio_callback_pacing)) {
++          auto now = std::chrono::steady_clock::now();
++          if (now < next_callback[index]) {
++            SDL_DelayNS(uint64_t(
++                std::chrono::duration_cast<std::chrono::nanoseconds>(next_callback[index] - now).count()));
++            now = std::chrono::steady_clock::now();
++          }
++          // Keeping the schedule stops a late wake from lowering the average rate. After a stall, restart
++          // from now instead of catching up in a burst.
++          next_callback[index] = std::max(next_callback[index] + kCallbackInterval, now + kCallbackInterval / 2);
++        }
+         if (diag_pump_count < 10) {
+           REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
+                        client_callback, client_callback_arg, index);

@@ -1,0 +1,159 @@
+Ported from hard-corps-uprising-recompiled patches/rexglue-sdk/0023-d3d12-resolve-copy-into-textures.windows.patch (same license basis as 0120). The D3D12 Host-RT backend half of 0122: D3D12RenderTargetCache::Resolve takes the direct-copy path 0122 identifies, and D3D12TextureCache::PrepareResolveTextureCopies prepares the destination texture for it. Gated on GetPath() == Path::kHostRenderTargets; the ROV path is untouched.
+
+diff --git a/include/rex/graphics/d3d12/texture_cache.h b/include/rex/graphics/d3d12/texture_cache.h
+index 4d845c7..2907b72 100644
+--- a/include/rex/graphics/d3d12/texture_cache.h
++++ b/include/rex/graphics/d3d12/texture_cache.h
+@@ -162,6 +162,13 @@ class D3D12TextureCache final : public TextureCache {
+                                      uint32_t* width_unscaled_out = nullptr,
+                                      uint32_t* height_unscaled_out = nullptr);
+ 
++  // Textures filled from the render target of a resolve instead of being loaded from its memory.
++  // Prepare before the resolve marks its range as resolved, perform after, with the render target
++  // in the copy source state.
++  uint32_t PrepareResolveTextureCopies(const draw_util::ResolveTextureCopy& copy);
++  void PerformResolveTextureCopies(const draw_util::ResolveTextureCopy& copy,
++                                   ID3D12Resource* source);
++
+  protected:
+   bool IsSignedVersionSeparateForFormat(TextureKey key) const override;
+   bool IsScaledResolveSupportedForFormat(TextureKey key) const override;
+@@ -253,6 +260,7 @@ class D3D12TextureCache final : public TextureCache {
+ 
+     ID3D12Resource* resource() const { return resource_.Get(); }
+ 
++    D3D12_RESOURCE_STATES resource_state() const { return resource_state_; }
+     D3D12_RESOURCE_STATES SetResourceState(D3D12_RESOURCE_STATES new_state) {
+       D3D12_RESOURCE_STATES old_state = resource_state_;
+       resource_state_ = new_state;
+@@ -481,6 +489,10 @@ class D3D12TextureCache final : public TextureCache {
+ 
+   std::array<D3D12TextureBinding, xenos::kTextureFetchConstantCount> d3d12_texture_bindings_;
+ 
++  static constexpr uint32_t kMaxResolveTextureCopies = 4;
++  Texture* resolve_copy_textures_[kMaxResolveTextureCopies];
++  uint32_t resolve_copy_texture_count_ = 0;
++
+   // Unsupported texture formats used during this frame (for research and
+   // testing).
+   enum : uint8_t {
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index b83706f..6133fe0 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1380,9 +1380,32 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+             shared_memory.MarkUAVWritesCommitNeeded();
+           }
+ 
++          // Textures sampling the destination must be found while they still match the memory.
++          draw_util::ResolveTextureCopy texture_copy;
++          RenderTarget* texture_copy_source = nullptr;
++          ResolveTextureCopyResult texture_copy_result =
++              GetPath() == Path::kHostRenderTargets
++                  ? PlanResolveTextureCopy(resolve_info, texture_copy, texture_copy_source)
++                  : ResolveTextureCopyResult::kDisabled;
++          if (texture_copy_result == ResolveTextureCopyResult::kEligible &&
++              copy_shader != draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA) {
++            texture_copy_result = ResolveTextureCopyResult::kFormat;
++          }
++          uint32_t texture_copy_count =
++              texture_copy_result == ResolveTextureCopyResult::kEligible
++                  ? texture_cache.PrepareResolveTextureCopies(texture_copy)
++                  : 0;
++
+           // Invalidate textures and mark the range as scaled if needed.
+           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                             resolve_info.copy_dest_extent_length);
++          if (texture_copy_count) {
++            auto& source = *static_cast<D3D12RenderTarget*>(texture_copy_source);
++            command_processor_.PushTransitionBarrier(
++                source.resource(), source.SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE),
++                D3D12_RESOURCE_STATE_COPY_SOURCE);
++            texture_cache.PerformResolveTextureCopies(texture_copy, source.resource());
++          }
+           written_address_out = resolve_info.copy_dest_extent_start;
+           written_length_out = resolve_info.copy_dest_extent_length;
+           copied = true;
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 2be0e8e..ce8525c 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -1390,9 +1390,12 @@ ID3D12Resource* D3D12TextureCache::RequestSwapTexture(D3D12_SHADER_RESOURCE_VIEW
+       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   srv_desc_out.Format = GetDXGIUnormFormat(key);
+   srv_desc_out.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++  uint32_t host_swizzle = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(key));
++  if (texture->content_red_blue_swapped()) {
++    host_swizzle = SwapRedBlueSwizzle(host_swizzle);
++  }
+   srv_desc_out.Shader4ComponentMapping =
+-      GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(key)) |
+-      D3D12_SHADER_COMPONENT_MAPPING_ALWAYS_SET_BIT_AVOIDING_ZEROMEM_MISTAKES;
++      host_swizzle | D3D12_SHADER_COMPONENT_MAPPING_ALWAYS_SET_BIT_AVOIDING_ZEROMEM_MISTAKES;
+   srv_desc_out.Texture2D.MostDetailedMip = 0;
+   srv_desc_out.Texture2D.MipLevels = 1;
+   srv_desc_out.Texture2D.PlaneSlice = 0;
+@@ -1410,6 +1413,63 @@ ID3D12Resource* D3D12TextureCache::RequestSwapTexture(D3D12_SHADER_RESOURCE_VIEW
+   return texture_resource;
+ }
+ 
++uint32_t D3D12TextureCache::PrepareResolveTextureCopies(const draw_util::ResolveTextureCopy& copy) {
++  Texture* found[kMaxResolveTextureCopies];
++  uint32_t found_count = FindResolveCopyTargets(copy, found, kMaxResolveTextureCopies);
++  resolve_copy_texture_count_ = 0;
++  for (uint32_t i = 0; i < found_count; ++i) {
++    // Loaded with a plain copy into a format of the render target's typeless family. A copy
++    // destination not used since may still have its previous copy unordered with a new one.
++    if (GetLoadShaderIndex(found[i]->key()) == kLoadShaderIndex32bpb &&
++        static_cast<D3D12Texture*>(found[i])->resource_state() !=
++            D3D12_RESOURCE_STATE_COPY_DEST) {
++      resolve_copy_textures_[resolve_copy_texture_count_++] = found[i];
++    }
++  }
++  return resolve_copy_texture_count_;
++}
++
++void D3D12TextureCache::PerformResolveTextureCopies(const draw_util::ResolveTextureCopy& copy,
++                                                    ID3D12Resource* source) {
++  for (uint32_t i = 0; i < resolve_copy_texture_count_; ++i) {
++    D3D12Texture& texture = *static_cast<D3D12Texture*>(resolve_copy_textures_[i]);
++    command_processor_.PushTransitionBarrier(
++        texture.resource(), texture.SetResourceState(D3D12_RESOURCE_STATE_COPY_DEST),
++        D3D12_RESOURCE_STATE_COPY_DEST);
++  }
++  command_processor_.SubmitBarriers();
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  D3D12_TEXTURE_COPY_LOCATION location_source, location_dest;
++  location_source.pResource = source;
++  location_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  location_source.SubresourceIndex = 0;
++  location_dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  location_dest.SubresourceIndex = 0;
++  for (uint32_t i = 0; i < resolve_copy_texture_count_; ++i) {
++    D3D12Texture& texture = *static_cast<D3D12Texture*>(resolve_copy_textures_[i]);
++    const TextureKey& key = texture.key();
++    draw_util::ResolveTextureCopyRegion regions[draw_util::kMaxResolveTextureCopyRegions];
++    uint32_t region_count = draw_util::GetResolveTextureCopyRegions(
++        copy, key.GetWidth() * draw_resolution_scale_x(),
++        key.GetHeight() * draw_resolution_scale_y(), regions);
++    location_dest.pResource = texture.resource();
++    for (uint32_t j = 0; j < region_count; ++j) {
++      const draw_util::ResolveTextureCopyRegion& region = regions[j];
++      D3D12_BOX box;
++      box.left = region.source_x;
++      box.top = region.source_y;
++      box.front = 0;
++      box.right = region.source_x + region.width;
++      box.bottom = region.source_y + region.height;
++      box.back = 1;
++      command_list.D3DCopyTextureRegion(&location_dest, region.dest_x, region.dest_y, 0,
++                                        &location_source, &box);
++    }
++    EndResolveCopyIntoTexture(texture, copy.red_blue_swapped);
++  }
++  resolve_copy_texture_count_ = 0;
++}
++
+ D3D12TextureCache::D3D12Texture::D3D12Texture(D3D12TextureCache& texture_cache,
+                                               const TextureKey& key, ID3D12Resource* resource,
+                                               D3D12_RESOURCE_STATES resource_state,

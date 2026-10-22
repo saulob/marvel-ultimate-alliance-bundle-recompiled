@@ -1,0 +1,247 @@
+A call the Direct3D 12 runtime rejects while recording (a copy or barrier with invalid parameters) makes Close() fail
+with E_INVALIDARG, and the command list can't be reset after that: every later submission then fails to close with
+E_FAIL and nothing is drawn again. On a failed Close() the submission is recorded again into a new command list
+without the rejected calls, which are found by closing prefixes of the recorded commands and logged with their
+arguments (rate-limited). The poisoned command list is replaced either way.
+
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 19a638c..796a965 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -338,6 +338,9 @@ class D3D12CommandProcessor : public CommandProcessor {
+   void LogDeviceRemovalDiagnostics(ID3D12Device* device, HRESULT reason);
+   void ExecuteSubmissionCommands(ID3D12CommandAllocator* command_allocator,
+                                  DeferredCommandList& commands, uint64_t submission);
++  bool RecordWithoutRejectedCommands(ID3D12CommandAllocator* command_allocator,
++                                     DeferredCommandList& commands, uint64_t submission,
++                                     HRESULT close_result);
+   std::atomic<bool> submission_rejection_logged_{false};
+ 
+   void UpdateDebugMarkersEnabled();
+diff --git a/include/rex/graphics/d3d12/deferred_command_list.h b/include/rex/graphics/d3d12/deferred_command_list.h
+index 837feed..f8bb8f8 100644
+--- a/include/rex/graphics/d3d12/deferred_command_list.h
++++ b/include/rex/graphics/d3d12/deferred_command_list.h
+@@ -37,10 +37,16 @@ class DeferredCommandList {
+   // Exchanges the recorded commands with another list's (async submission hands the recorded
+   // stream to its thread and keeps an empty one with its capacity).
+   void SwapStream(DeferredCommandList& other) { command_stream_.swap(other.command_stream_); }
+-  void Execute(ID3D12GraphicsCommandList* command_list, ID3D12GraphicsCommandList1* command_list_1);
++  // Records the first command_limit commands, leaving out those whose indices are in
++  // skipped_commands (ascending).
++  void Execute(ID3D12GraphicsCommandList* command_list, ID3D12GraphicsCommandList1* command_list_1,
++               size_t command_limit = SIZE_MAX,
++               const std::vector<size_t>* skipped_commands = nullptr);
++  size_t GetCommandCount() const;
+   // DEBUG_SAULO: how many of each command are recorded, and the arguments of the last few, for
+   // the log when the runtime rejects the submission.
+   std::string Describe(size_t tail_commands) const;
++  std::string DescribeCommand(size_t index) const;
+ 
+   D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
+                                                   D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
+@@ -646,6 +652,7 @@ class DeferredCommandList {
+   };
+ 
+   void* WriteCommand(Command command, size_t arguments_size_bytes);
++  std::string DescribeEntries(const std::vector<const uintmax_t*>& entries) const;
+ 
+   const D3D12CommandProcessor& command_processor_;
+ 
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 2b1eae1..df62d81 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -3696,10 +3696,10 @@ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HR
+   }
+ }
+ 
+-// DEBUG_SAULO: closes and executes one submission. The recording errors the D3D12 runtime detects
+-// make Close fail, and executing such a list removes the device with INVALID_CALL - so it is left
+-// out, and logged with what it holds. A removal the queue reports right after the execute is logged
+-// with the submission that raised it.
++// Closes and executes one submission. A call the Direct3D 12 runtime rejects while recording makes
++// Close fail and leaves the command list unusable (Reset fails too), and executing it would remove
++// the device with INVALID_CALL. The submission is then recorded again into a new command list
++// without the rejected calls, found by recording prefixes of it.
+ void D3D12CommandProcessor::ExecuteSubmissionCommands(ID3D12CommandAllocator* command_allocator,
+                                                       DeferredCommandList& commands,
+                                                       uint64_t submission) {
+@@ -3708,18 +3708,8 @@ void D3D12CommandProcessor::ExecuteSubmissionCommands(ID3D12CommandAllocator* co
+   command_list_->Reset(command_allocator, nullptr);
+   commands.Execute(command_list_, command_list_1_);
+   const HRESULT close_result = command_list_->Close();
+-  if (FAILED(close_result)) {
+-    static std::atomic<uint32_t> close_failures{0};
+-    const uint32_t failure = close_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+-    if (failure == 1) {
+-      REXGPU_ERROR(
+-          "D3D12 submission {}: the command list failed to close (HRESULT 0x{:08X}) and was not "
+-          "executed, {}",
+-          submission, static_cast<unsigned>(close_result), commands.Describe(32));
+-    } else if ((failure & (failure - 1)) == 0) {
+-      REXGPU_ERROR("D3D12 submission {}: {} command lists failed to close so far (HRESULT 0x{:08X})",
+-                   submission, failure, static_cast<unsigned>(close_result));
+-    }
++  if (FAILED(close_result) &&
++      !RecordWithoutRejectedCommands(command_allocator, commands, submission, close_result)) {
+     return;
+   }
+   ID3D12CommandList* execute_command_lists[] = {command_list_};
+@@ -3731,6 +3721,80 @@ void D3D12CommandProcessor::ExecuteSubmissionCommands(ID3D12CommandAllocator* co
+   }
+ }
+ 
++bool D3D12CommandProcessor::RecordWithoutRejectedCommands(
++    ID3D12CommandAllocator* command_allocator, DeferredCommandList& commands, uint64_t submission,
++    HRESULT close_result) {
++  constexpr size_t kMaxRejectedCommands = 16;
++  ID3D12Device* device = GetD3D12Provider().GetDevice();
++  std::vector<size_t> rejected;
++  auto record = [&](size_t command_limit,
++                    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>& list) -> bool {
++    command_allocator->Reset();
++    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocator,
++                                         nullptr, IID_PPV_ARGS(&list)))) {
++      return false;
++    }
++    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList1> list_1;
++    list.As(&list_1);
++    commands.Execute(list.Get(), list_1.Get(), command_limit, &rejected);
++    return SUCCEEDED(list->Close());
++  };
++  auto closes = [&](size_t command_limit) {
++    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
++    return record(command_limit, list);
++  };
++
++  const size_t command_count = commands.GetCommandCount();
++  bool found = true;
++  while (!closes(command_count)) {
++    if (rejected.size() == kMaxRejectedCommands) {
++      found = false;
++      break;
++    }
++    // The shortest prefix that doesn't close ends with the next rejected call.
++    size_t closing = rejected.empty() ? 0 : rejected.back() + 1;
++    size_t failing = command_count;
++    while (failing - closing > 1) {
++      const size_t middle = closing + (failing - closing) / 2;
++      (closes(middle) ? closing : failing) = middle;
++    }
++    rejected.push_back(failing - 1);
++  }
++
++  static std::atomic<uint32_t> rejections{0};
++  const uint32_t rejection = rejections.fetch_add(1, std::memory_order_relaxed) + 1;
++  if (rejection <= 4 || (rejection & (rejection - 1)) == 0) {
++    REXGPU_ERROR(
++        "D3D12 submission {}: the command list failed to close (HRESULT 0x{:08X}, {} time(s) so "
++        "far), {}",
++        submission, static_cast<unsigned>(close_result), rejection,
++        found ? "recorded again without the calls the runtime rejected:"
++              : "more calls were rejected than searched for, the submission is dropped:");
++    for (size_t index : rejected) {
++      REXGPU_ERROR("  command {} of {}:{}", index, command_count, commands.DescribeCommand(index));
++    }
++  }
++
++  // The failed list can't be reset again, so a new one takes its place.
++  Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
++  bool recorded = found && record(SIZE_MAX, list);
++  if (!recorded) {
++    list.Reset();
++    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocator,
++                                         nullptr, IID_PPV_ARGS(&list)))) {
++      REXGPU_ERROR("D3D12 submission {}: failed to create a new command list", submission);
++      return false;
++    }
++    list->Close();
++  }
++  list->SetName(L"Xenos submission");
++  ui::d3d12::util::ReleaseAndNull(command_list_1_);
++  ui::d3d12::util::ReleaseAndNull(command_list_);
++  command_list_ = list.Detach();
++  command_list_->QueryInterface(IID_PPV_ARGS(&command_list_1_));
++  return recorded;
++}
++
+ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+diff --git a/src/graphics/d3d12/deferred_command_list.cpp b/src/graphics/d3d12/deferred_command_list.cpp
+index ac27cfe..e2962ab 100644
+--- a/src/graphics/d3d12/deferred_command_list.cpp
++++ b/src/graphics/d3d12/deferred_command_list.cpp
+@@ -31,17 +31,30 @@ void DeferredCommandList::Reset() {
+ }
+ 
+ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+-                                  ID3D12GraphicsCommandList1* command_list_1) {
++                                  ID3D12GraphicsCommandList1* command_list_1, size_t command_limit,
++                                  const std::vector<size_t>* skipped_commands) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   const uintmax_t* stream = command_stream_.data();
+   size_t stream_remaining = command_stream_.size();
+   ID3D12PipelineState* current_pipeline_state = nullptr;
+-  while (stream_remaining != 0) {
++  size_t next_skipped =
++      skipped_commands && !skipped_commands->empty() ? (*skipped_commands)[0] : SIZE_MAX;
++  size_t skipped_passed = 0;
++  for (size_t command_index = 0; stream_remaining != 0 && command_index < command_limit;
++       ++command_index) {
+     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
+     stream += kCommandHeaderSizeElements;
+     stream_remaining -= kCommandHeaderSizeElements;
++    if (command_index == next_skipped) {
++      ++skipped_passed;
++      next_skipped = skipped_passed < skipped_commands->size() ? (*skipped_commands)[skipped_passed]
++                                                               : SIZE_MAX;
++      stream += header.arguments_size_elements;
++      stream_remaining -= header.arguments_size_elements;
++      continue;
++    }
+     switch (header.command) {
+       case Command::kD3DClearDepthStencilView: {
+         auto& args = *reinterpret_cast<const ClearDepthStencilViewHeader*>(stream);
+@@ -359,8 +372,37 @@ std::string DeferredCommandList::Describe(size_t tail_commands) const {
+       text += std::string(" ") + CommandName(i) + "=" + std::to_string(counts[i]);
+     }
+   }
++  return text + DescribeEntries(tail);
++}
++
++size_t DeferredCommandList::GetCommandCount() const {
++  size_t count = 0;
++  for (size_t offset = 0; offset + kCommandHeaderSizeElements <= command_stream_.size(); ++count) {
++    const CommandHeader& header =
++        *reinterpret_cast<const CommandHeader*>(command_stream_.data() + offset);
++    offset += kCommandHeaderSizeElements + header.arguments_size_elements;
++  }
++  return count;
++}
++
++std::string DeferredCommandList::DescribeCommand(size_t index) const {
++  size_t offset = 0;
++  for (size_t i = 0; i < index && offset + kCommandHeaderSizeElements <= command_stream_.size();
++       ++i) {
++    const CommandHeader& header =
++        *reinterpret_cast<const CommandHeader*>(command_stream_.data() + offset);
++    offset += kCommandHeaderSizeElements + header.arguments_size_elements;
++  }
++  if (offset + kCommandHeaderSizeElements > command_stream_.size()) {
++    return "(no such command)";
++  }
++  return DescribeEntries({command_stream_.data() + offset});
++}
++
++std::string DeferredCommandList::DescribeEntries(const std::vector<const uintmax_t*>& entries) const {
++  std::string text;
+   char buffer[256];
+-  for (const uintmax_t* entry : tail) {
++  for (const uintmax_t* entry : entries) {
+     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(entry);
+     const void* arguments = entry + kCommandHeaderSizeElements;
+     text += std::string("\n  ") + CommandName(size_t(header.command));

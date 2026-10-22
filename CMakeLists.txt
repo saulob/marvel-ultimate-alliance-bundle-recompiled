@@ -169,15 +169,22 @@ get_directory_property(MUA_TRG_VERSION DIRECTORY "${_trg_patched_dir}" DEFINITIO
 set(MUA_SOURCES
     src/main.cpp
     src/active_log.cpp
+    src/audio_mixer_priority.cpp
     src/audio_pcm_firewall.cpp
     src/crash_report.cpp
+    src/crt_native.cpp
     src/diagnostics.cpp
     src/game_files.cpp
     src/game_profile.cpp
     src/graphics_adapters.cpp
     src/frame_counter.cpp
+    src/frame_limiter.cpp
+    src/frame_wait.cpp
+    src/frame_pacing.cpp
+    src/gpu_fence_wait.cpp
     src/guest_functions.cpp
     src/imgui_gamepad.cpp
+    src/indirect_tail_calls.cpp
     src/input_summary.cpp
     src/launcher.cpp
     src/launcher_achievements.cpp
@@ -194,6 +201,8 @@ set(MUA_SOURCES
     src/user_data.cpp
     src/window_host.cpp
     src/xex_identity.cpp
+    src/xaudio_worker_barrier.cpp
+    src/hang_watchdog.cpp
 )
 
 set(MUA_APP_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/marvel_ultimate_alliance.manifest")
@@ -202,7 +211,29 @@ target_link_options(marvel_ultimate_alliance PRIVATE "LINKER:/MANIFESTINPUT:${MU
 set_property(TARGET marvel_ultimate_alliance APPEND PROPERTY LINK_DEPENDS "${MUA_APP_MANIFEST}")
 
 mua_setup_target(marvel_ultimate_alliance GPU_PLUGINS xenos)
-target_link_libraries(marvel_ultimate_alliance PRIVATE trg::launcher shcore synchronization dxgi shell32)
+
+# ThinLTO in Release and RelWithDebInfo, from the Crackdown PC port; the runtime and GPU plugin are prebuilt. Debug compiles
+# at -O0, which marks every function optnone, so LTO would optimize nothing there.
+function(mua_enable_thinlto target)
+    set(_lto "$<CONFIG:Release,RelWithDebInfo>")
+    if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+        # lld-link runs the LTO backend at -O2 unless told otherwise; Release compiles at -O3.
+        set(_link -flto=thin "$<$<CONFIG:Release>:-Wl,/opt:lldlto=3>"
+            "-Wl,/lldltocache:${CMAKE_BINARY_DIR}/lto-cache")
+    else()
+        return()
+    endif()
+    target_compile_options(${target} PRIVATE "$<$<AND:${_lto},$<COMPILE_LANGUAGE:CXX>>:-flto=thin>")
+    get_target_property(_type ${target} TYPE)
+    if(NOT _type STREQUAL "OBJECT_LIBRARY")
+        target_link_options(${target} PRIVATE "$<${_lto}:${_link}>")
+    endif()
+endfunction()
+mua_enable_thinlto(marvel_ultimate_alliance)
+if(TARGET marvel_ultimate_alliance_recomp)
+    mua_enable_thinlto(marvel_ultimate_alliance_recomp)
+endif()
+target_link_libraries(marvel_ultimate_alliance PRIVATE trg::launcher shcore synchronization dxgi shell32 dbghelp)
 # The SDK stages its DLLs only when the program links, so a rebuilt runtime or GPU plugin has to
 # make it link again; tools/build.ps1 also checks the staged copies.
 foreach(_sdk_dll rexruntime rexruntimed rexruntimerd rexgpu-xenos rexgpu-xenosd rexgpu-xenosrd)
