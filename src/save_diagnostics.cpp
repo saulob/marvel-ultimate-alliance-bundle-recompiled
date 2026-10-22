@@ -6,6 +6,8 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xenumerator.h>
 
 #include "guest_map.h"
 #include "save_diagnostics.h"
@@ -52,6 +54,14 @@ void LogProfileRead(const uint8_t* memory, uint32_t user, uint32_t count, uint32
     REXLOG_INFO("[DEBUG_SAULO][Profile] read setting {:08X}: source={} type={} size={}", setting.id, setting.source,
                 setting.type, setting.size);
   }
+}
+
+int64_t EnumeratorItems(const uint8_t* memory, uint32_t handle_out, uint32_t status) {
+  if (status != kErrorSuccess || !handle_out) return -1;
+  auto* kernel = rex::system::kernel_state();
+  if (!kernel) return -1;
+  auto enumerator = kernel->object_table()->LookupObject<rex::system::XEnumerator>(mua::LoadBE32(memory, handle_out));
+  return enumerator ? int64_t(static_cast<rex::system::XStaticUntypedEnumerator&>(*enumerator).item_count()) : -1;
 }
 
 }  // namespace
@@ -120,11 +130,12 @@ REX_HOOK_RAW(MUA_GUEST_CONTENT_ENUMERATE) {
   const uint32_t user = ctx.r3.u32;
   const uint32_t device = ctx.r4.u32;
   const uint32_t type = ctx.r5.u32;
+  const uint32_t handle_out = ctx.r9.u32;
   const bool log = Budget(used, 12);
   MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_ENUMERATE)(ctx, base);
   if (log) {
-    REXLOG_INFO("[DEBUG_SAULO][Content] enumerate: user={} device={} type={} status={}", user, device, type,
-                ctx.r3.u32);
+    REXLOG_INFO("[DEBUG_SAULO][Content] enumerate: user={} device={} type={} status={} items={}", user, device, type,
+                ctx.r3.u32, EnumeratorItems(Memory(base), handle_out, ctx.r3.u32));
   }
 }
 

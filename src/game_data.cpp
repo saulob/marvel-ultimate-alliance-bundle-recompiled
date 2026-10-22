@@ -29,6 +29,10 @@ void Move(const fs::path& from, const fs::path& to, std::vector<std::string>& lo
 
 }  // namespace
 
+fs::path AchievementStoreFile(const GameDefinition& game, const fs::path& user_data_root) {
+  return GameUserDataRoot(game, user_data_root) / "achievements" / std::format("{:08X}.toml", ProfileOf(game).title_id);
+}
+
 std::vector<std::string> MigrateLegacyGameData(const fs::path& user_data_root) {
   std::vector<std::string> log;
   const fs::path legacy = user_data_root / "games";
@@ -37,6 +41,7 @@ std::vector<std::string> MigrateLegacyGameData(const fs::path& user_data_root) {
     if (game.id == GameId::kMua1Gold) {
       const std::string title_folder = std::format("{:08X}", ProfileOf(game).title_id);
       Move(user_data_root / title_folder, folder / title_folder, log);
+      Move(user_data_root / "achievements" / (title_folder + ".toml"), AchievementStoreFile(game, user_data_root), log);
     } else {
       Move(legacy / std::string(game.key), folder, log);
     }

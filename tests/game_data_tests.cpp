@@ -10,6 +10,7 @@
 
 #include "game_data.h"
 #include "game_definition.h"
+#include "game_profile.h"
 #include "launcher.h"
 
 namespace fs = std::filesystem;
@@ -92,6 +93,34 @@ void TestMua1FolderAndSettingsMove() {
   CHECK(Read(scratch.root / "mua1_gold" / "game_settings.toml") == "mua_frame_rate = 90\n");
   CHECK(!fs::exists(scratch.root / "games" / "mua1") && !fs::exists(scratch.root / "games" / "mua1.toml"));
   CHECK(!fs::exists(scratch.root / "mua1_gold" / "415607DA"));
+}
+
+void TestAchievementStoresAreSeparate() {
+  std::printf("games sharing a title ID keep separate achievement stores\n");
+  const fs::path root = "user_data";
+  CHECK(mua::ProfileOf(Mua1()).title_id == mua::ProfileOf(Gold()).title_id);
+  CHECK(mua::ProfileOf(Mua2()).title_id != mua::ProfileOf(Gold()).title_id);
+  CHECK(mua::AchievementStoreFile(Mua1(), root) == root / "mua1" / "achievements" / "415607DA.toml");
+  CHECK(mua::AchievementStoreFile(Gold(), root) == root / "mua1_gold" / "achievements" / "415607DA.toml");
+  CHECK(mua::AchievementStoreFile(Mua2(), root) == root / "mua2" / "achievements" / "4156082F.toml");
+  CHECK(mua::AchievementStoreFile(Mua1(), root) != mua::AchievementStoreFile(Gold(), root));
+}
+
+void TestGoldLegacyAchievementsMove() {
+  std::printf("the root achievements of the Gold-only layout move to Gold Edition alone\n");
+  Scratch scratch;
+  Write(scratch.root / "achievements" / "415607DA.toml", "legacy unlocks");
+  mua::MigrateLegacyGameData(scratch.root);
+  CHECK(Read(mua::AchievementStoreFile(Gold(), scratch.root)) == "legacy unlocks");
+  CHECK(!fs::exists(scratch.root / "achievements" / "415607DA.toml"));
+  CHECK(!fs::exists(scratch.root / "mua1") && !fs::exists(scratch.root / "mua2"));
+
+  Scratch kept;
+  Write(kept.root / "achievements" / "415607DA.toml", "legacy unlocks");
+  Write(mua::AchievementStoreFile(Gold(), kept.root), "current unlocks");
+  mua::MigrateLegacyGameData(kept.root);
+  CHECK(Read(mua::AchievementStoreFile(Gold(), kept.root)) == "current unlocks");
+  CHECK(Read(kept.root / "achievements" / "415607DA.toml") == "legacy unlocks");
 }
 
 void TestNothingIsOverwritten() {
@@ -188,6 +217,8 @@ int main() {
   TestFolders();
   TestGoldTitleFolderMoves();
   TestMua1FolderAndSettingsMove();
+  TestAchievementStoresAreSeparate();
+  TestGoldLegacyAchievementsMove();
   TestNothingIsOverwritten();
   TestNothingIsCreatedWithoutData();
   TestDispatch();

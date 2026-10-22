@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -235,6 +236,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     startup_window.controller = mua::ControllerSummary();
     mua::LogStartupDiagnostics(game_settings_, mua::MonitorForSetting(monitor), monitor, game_data_root(),
                                startup_window);
+    LogAchievementStore(mua::GetRecompiledImage());
     ReXApp::LaunchModule();
   }
 
@@ -302,6 +304,25 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       return {};
     }
     return std::format("The {} runtime is not part of this build.", game.display_name);
+  }
+
+  // DEBUG_SAULO: the achievements the game's XDBF lists and the store they persist to.
+  void LogAchievementStore(const mua::RecompiledImage& image) {
+    if (!image.game || !runtime() || !runtime()->kernel_state()) {
+      return;
+    }
+    auto& achievements = runtime()->kernel_state()->achievements();
+    const auto listed = achievements.ListAchievements();
+    const auto unlocked = std::ranges::count_if(listed, [&](const auto& info) { return achievements.IsUnlocked(info.id); });
+    REXLOG_INFO("DEBUG_SAULO achievements: module={} listed={} unlocked={} store={}", ImageKey(image), listed.size(),
+                unlocked, mua::Utf8(mua::AchievementStoreFile(mua::Game(*image.game), user_data_.root)));
+    static std::atomic<int> logged{0};
+    achievements.RegisterUnlockCallback([key = std::string(ImageKey(image))](const rex::system::AchievementEvent& event) {
+      if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+        REXLOG_INFO("DEBUG_SAULO achievement unlocked: module={} id={} label={}", key, event.achievement.id,
+                    event.achievement.label);
+      }
+    });
   }
 
   // DEBUG_SAULO: the files the GPU plugin builds its pipelines from, shared by both games through the title ID.
