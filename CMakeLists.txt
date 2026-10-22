@@ -174,7 +174,11 @@ set(MUA_SOURCES
     src/crash_report.cpp
     src/crt_native.cpp
     src/diagnostics.cpp
+    src/disc_identity.cpp
+    src/game_definition.cpp
     src/game_files.cpp
+    src/game_install.cpp
+    src/game_library.cpp
     src/game_profile.cpp
     src/graphics_adapters.cpp
     src/frame_counter.cpp

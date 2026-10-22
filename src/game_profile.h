@@ -18,13 +18,14 @@ struct GameProfile {
   uint32_t media_id;
   std::string_view pe_name;
   uint64_t xex_size;
-  std::string_view xex_sha256;  // upper-case hex; the authoritative fingerprint of the recompiled binary
+  std::string_view xex_sha256;  // upper-case hex; the authoritative fingerprint of the game's binary
   std::span<const CompanionFile> companion_files;
+  uint64_t install_bytes = 0;  // size of the extracted disc, for the free-space check; 0 skips it
 };
 
-std::span<const GameProfile> SupportedProfiles();
+// Every disc build the launcher can identify. A profile says what the files are, not that the runtime can start them.
+std::span<const GameProfile> KnownProfiles();
 
-// The profile the launcher presents when nothing has been detected.
-const GameProfile& DefaultProfile();
+const GameProfile* ProfileById(std::string_view id);
 
 }  // namespace mua

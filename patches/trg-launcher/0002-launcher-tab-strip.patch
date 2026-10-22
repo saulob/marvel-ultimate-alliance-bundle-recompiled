@@ -1,0 +1,145 @@
+diff --git a/include/trg/launcher.h b/include/trg/launcher.h
+index 00b405c..5d25f19 100644
+--- a/include/trg/launcher.h
++++ b/include/trg/launcher.h
+@@ -119,6 +119,19 @@ struct Page {
+   std::string blurb;  // one line under the title
+   std::function<void(Ui&)> draw;
+   std::function<bool()> needs_attention;  // shows a dot in the sidebar (e.g. game not installed)
++  std::function<bool()> visible;          // hidden from the sidebar while it returns false; default: always shown
++};
++
++// One tab of the strip under the header, e.g. one per game.
++struct Tab {
++  std::string label;
++  std::string short_label;  // drawn when `label` does not fit the tab
++};
++
++struct TabStrip {
++  std::vector<Tab> tabs;
++  std::function<int()> selected;    // index of the current tab
++  std::function<void(int)> select;  // a tab was clicked
+ };
+ 
+ struct Option {
+@@ -183,6 +196,9 @@ struct LauncherConfig {
+   std::string hints = "Enter  Play        Esc  Quit        Ctrl+S  Save";
+   std::string note = "Settings are saved when you press Play.";
+   bool save_on_play = true;
++
++  TabStrip tab_strip;          // drawn under the header when it has tabs
++  float header_height = 0.0f;  // logical pixels at 96 DPI; 0 sizes the header from the window
+ };
+ 
+ // --------------------------------------------------------------------- ui ---
+@@ -305,7 +321,10 @@ class Launcher {
+  private:
+   friend class Ui;
+   void DrawHeader(ImVec2 origin, float w, float h);
++  void DrawTabStrip(ImVec2 origin, float width, float height);
+   void DrawSidebar(ImVec2 size);
++  bool PageVisible(int index) const;
++  void EnsureVisiblePage();
+   void DrawContent(ImVec2 size);
+   void DrawFooter(ImVec2 origin, float w, float h);
+   void DrawPlayButton(ImVec2 size, bool can_play);
+diff --git a/src/launcher.cpp b/src/launcher.cpp
+index 81104f7..9bbee08 100644
+--- a/src/launcher.cpp
++++ b/src/launcher.cpp
+@@ -773,8 +773,23 @@ int Launcher::FindPage(std::string_view name) const {
+   return -1;
+ }
+ 
++bool Launcher::PageVisible(int index) const {
++  const Page& page = config_.pages[size_t(index)];
++  return !page.visible || page.visible();
++}
++
++void Launcher::EnsureVisiblePage() {
++  if (config_.pages.empty() || PageVisible(page_)) return;
++  for (int i = 0; i < int(config_.pages.size()); ++i) {
++    if (!PageVisible(i)) continue;
++    page_ = i;
++    ui_.capturing_.clear();
++    return;
++  }
++}
++
+ void Launcher::GoToPage(int index) {
+-  if (index < 0 || index >= int(config_.pages.size())) return;
++  if (index < 0 || index >= int(config_.pages.size()) || !PageVisible(index)) return;
+   page_ = index;
+   ui_.capturing_.clear();
+ }
+@@ -817,13 +832,20 @@ Result Launcher::Frame() {
+                    ImGuiWindowFlags_NoBringToFrontOnFocus);
+   ImGui::PopStyleVar();
+   const float w = vp->Size.x, h = vp->Size.y;
+-  const float header = std::clamp(h * 0.2f, 120 * s_, 190 * s_);
++  const float header = config_.header_height > 0.0f ? config_.header_height * s_ : std::clamp(h * 0.2f, 120 * s_, 190 * s_);
+   const float footer = 78 * s_;
+   const float margin = 22 * s_;
+ 
+   DrawHeader(vp->Pos, w, header);
+ 
+-  const float body_top = header + margin * 0.6f;
++  float body_top = header + margin * 0.6f;
++  if (!config_.tab_strip.tabs.empty()) {
++    const float strip_top = header + 4 * s_;
++    const float strip_height = 42 * s_;
++    DrawTabStrip(ImVec2(vp->Pos.x + margin, vp->Pos.y + strip_top), w - margin * 2, strip_height);
++    body_top = strip_top + strip_height + 10 * s_;
++  }
++  EnsureVisiblePage();
+   const float body_h = std::max(100 * s_, h - body_top - footer);
+   const float sidebar_w = std::clamp(w * 0.17f, 170 * s_, 230 * s_);
+   ImGui::SetCursorPos(ImVec2(margin, body_top));
+@@ -940,6 +962,39 @@ void Launcher::DrawHeader(ImVec2 origin, float w, float h) {
+   dl->PopClipRect();
+ }
+ 
++void Launcher::DrawTabStrip(ImVec2 origin, float width, float height) {
++  const Theme& t = config_.theme;
++  const TabStrip& strip = config_.tab_strip;
++  const int count = int(strip.tabs.size());
++  const int selected = strip.selected ? strip.selected() : 0;
++  const float gap = 8 * s_;
++  const float pad = 16 * s_;
++  const float tab_w = (width - gap * float(count - 1)) / float(count);
++  ImDrawList* dl = ImGui::GetWindowDrawList();
++  ImGui::PushFont(config_.fonts.semibold, 0.0f);
++  for (int i = 0; i < count; ++i) {
++    const Tab& tab = strip.tabs[size_t(i)];
++    const ImVec2 min(origin.x + float(i) * (tab_w + gap), origin.y);
++    const ImVec2 max(min.x + tab_w, min.y + height);
++    ImGui::PushID(i);
++    ImGui::SetCursorScreenPos(min);
++    const bool clicked = ImGui::InvisibleButton("##tab", ImVec2(tab_w, height));
++    const bool hot = ImGui::IsItemHovered();
++    ImGui::PopID();
++    const bool active = i == selected;
++    dl->AddRectFilled(min, max, Col(active ? t.accent : hot ? t.frame_hot : t.frame), 8 * s_);
++    const bool fits = ImGui::CalcTextSize(tab.label.c_str()).x + pad * 2 <= tab_w;
++    const std::string& label = fits || tab.short_label.empty() ? tab.label : tab.short_label;
++    const ImVec2 text = ImGui::CalcTextSize(label.c_str());
++    dl->PushClipRect(min, max, true);
++    dl->AddText(ImVec2(min.x + std::max(pad * 0.5f, (tab_w - text.x) * 0.5f), min.y + (height - text.y) * 0.5f),
++                Col(active ? t.on_accent : t.text), label.c_str());
++    dl->PopClipRect();
++    if (clicked && !active && strip.select) strip.select(i);
++  }
++  ImGui::PopFont();
++}
++
+ void Launcher::DrawSidebar(ImVec2 size) {
+   const Theme& t = config_.theme;
+   ImGui::BeginChild("##sidebar", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+@@ -948,6 +1003,7 @@ void Launcher::DrawSidebar(ImVec2 size) {
+   ImGui::SetCursorPos(ImVec2(pad, pad));
+   ImGui::PushFont(config_.fonts.semibold, 0.0f);
+   for (int i = 0; i < int(config_.pages.size()); ++i) {
++    if (!PageVisible(i)) continue;
+     const Page& page = config_.pages[size_t(i)];
+     const bool selected = page_ == i;
+     ImGui::SetCursorPosX(pad);

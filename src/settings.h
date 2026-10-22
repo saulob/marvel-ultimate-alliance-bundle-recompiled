@@ -10,9 +10,12 @@
 
 #include "trg/settings.h"
 
+#include "game_definition.h"
 #include "window_placement.h"
 
 REXCVAR_DECLARE(bool, mua_launcher);
+REXCVAR_DECLARE(std::string, mua_game);
+REXCVAR_DECLARE(std::string, mua_games_root);
 REXCVAR_DECLARE(bool, mua_skip_launcher);
 REXCVAR_DECLARE(int32_t, mua_frame_rate);
 REXCVAR_DECLARE(bool, mua_show_fps);
@@ -37,9 +40,17 @@ class GameSettings;
 // Allowing tearing is VSync Off.
 inline constexpr char kTearingSetting[] = "d3d12_allow_variable_refresh_rate_and_tearing";
 
+inline constexpr char kSelectedGameKey[] = "mua_game";
+
 // The player's settings file, loaded over the shipped marvel_ultimate_alliance.toml.
 inline std::filesystem::path PlayerSettingsPath(const std::filesystem::path& user_data_root) {
   return user_data_root / "settings.toml";
+}
+
+// A game's own settings: only the values that differ from settings.toml.
+inline std::filesystem::path GameSettingsPath(const std::filesystem::path& user_data_root,
+                                              const GameDefinition& game) {
+  return user_data_root / "games" / (std::string(game.key) + ".toml");
 }
 void LoadPlayerSettings(const std::filesystem::path& path);
 
@@ -101,18 +112,33 @@ class GameSettings final : public trg::SettingsStore {
 
   // Sets the running game's cvars that differ from the pending values.
   void Apply() const;
+  // Sets the cvars of the settings that belong to the selected game.
+  void ApplyGameSettings() const;
 
   // Records the window settings this process creates its window with.
   void MarkWindowCreated();
   // Whether the pending window size, monitor, VSync or graphics card needs a new process.
   bool WindowChanged() const;
 
+  // Game-specific settings read and write the selected game's own values; the rest are shared.
+  void SelectGame(GameId game);
+  GameId SelectedGame() const { return game_; }
+
  private:
+  using Values = std::map<std::string, std::string>;
+
+  std::filesystem::path GameFile(GameId game) const;
+  const std::string* GameValue(std::string_view key) const;
+  bool SaveGameValues(GameId game);
+
   std::filesystem::path player_file_;
   std::filesystem::path shipped_config_;
-  std::map<std::string, std::string> saved_;
-  std::map<std::string, std::string> pending_;
-  std::map<std::string, std::string> window_created_;
+  Values saved_;
+  Values pending_;
+  std::map<GameId, Values> game_saved_;
+  std::map<GameId, Values> game_pending_;
+  GameId game_ = GameId::kMua1Gold;
+  Values window_created_;
   std::set<std::string> unregistered_;
 };
 

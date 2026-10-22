@@ -144,12 +144,12 @@ void TestControllerActivityFilter() {
 
 void TestWindowTitle() {
   std::printf("window title\n");
-  const std::string game = kWindowTitle;
+  const std::string game = "Marvel Ultimate Alliance Gold Edition Recompiled";
   const std::optional<std::string> resolution = "3360x1440";
-  CHECK(WindowTitleText(std::nullopt, std::nullopt) == game);
-  CHECK(WindowTitleText(resolution, std::nullopt) == game + " | 3360x1440");
-  CHECK(WindowTitleText(std::nullopt, 60.0) == game + " | FPS: 60.00");
-  CHECK(WindowTitleText(resolution, 59.994) == game + " | 3360x1440 | FPS: 59.99");
+  CHECK(WindowTitleText(game, std::nullopt, std::nullopt) == game);
+  CHECK(WindowTitleText(game, resolution, std::nullopt) == game + " | 3360x1440");
+  CHECK(WindowTitleText(game, std::nullopt, 60.0) == game + " | FPS: 60.00");
+  CHECK(WindowTitleText(game, resolution, 59.994) == game + " | 3360x1440 | FPS: 59.99");
 }
 
 void TestFrameCounter() {

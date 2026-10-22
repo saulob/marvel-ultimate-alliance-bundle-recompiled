@@ -47,6 +47,11 @@ mua_add_test(diagnostics_tests headless SOURCES src/diagnostics.cpp)
 mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12)
 mua_add_test(crash_report_tests headless SOURCES src/crash_report.cpp LIBS shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(user_data_tests headless SOURCES src/user_data.cpp)
+mua_add_test(game_library_tests headless
+    SOURCES src/game_definition.cpp src/game_files.cpp src/game_library.cpp src/game_profile.cpp src/xex_identity.cpp)
+mua_add_test(game_install_tests headless
+    SOURCES src/game_definition.cpp src/game_files.cpp src/game_install.cpp src/game_library.cpp src/game_profile.cpp
+            src/xex_identity.cpp)
 mua_add_test(shader_storage_repair_tests headless SOURCES src/shader_storage_repair.cpp)
 mua_add_test(resolve_order_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(audio_pcm_firewall_tests headless)
@@ -72,8 +77,8 @@ mua_add_test(shutdown_order_tests runtime LIBS rex::runtime)
 mua_add_test(title_thread_shutdown_tests runtime LIBS rex::runtime)
 mua_add_test(filesystem_mapping_tests runtime LIBS rex::runtime)
 mua_add_test(settings_tests runtime
-    SOURCES src/settings.cpp src/crash_report.cpp src/diagnostics.cpp src/game_files.cpp src/game_profile.cpp
-            src/graphics_adapters.cpp src/input_summary.cpp src/log_filter.cpp src/active_log.cpp src/platform.cpp
-            src/session_log.cpp src/system_info.cpp src/xex_identity.cpp
+    SOURCES src/settings.cpp src/crash_report.cpp src/diagnostics.cpp src/game_definition.cpp src/game_files.cpp
+            src/game_profile.cpp src/graphics_adapters.cpp src/input_summary.cpp src/log_filter.cpp
+            src/active_log.cpp src/platform.cpp src/session_log.cpp src/system_info.cpp src/xex_identity.cpp
     LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization
     DEFINES ${MUA_TEST_BUILD_DEFINES})

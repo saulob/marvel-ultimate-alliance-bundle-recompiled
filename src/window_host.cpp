@@ -76,7 +76,9 @@ std::optional<std::string> ShownRenderResolution() {
 // Composes all title parts together, so one update never drops another.
 void RefreshTitle() {
   const std::optional<double> fps = REXCVAR_GET(mua_show_fps) ? g_title_fps : std::nullopt;
-  const std::string title = mua::WindowTitleText(ShownRenderResolution(), fps);
+  const mua::GameDefinition* game = mua::ActiveGame();
+  const std::string title =
+      mua::WindowTitleText(game ? mua::GameWindowTitle(*game) : std::string(kWindowTitle), ShownRenderResolution(), fps);
   if (title != g_shown_title) {
     g_shown_title = title;
     g_window->SetTitle(title);

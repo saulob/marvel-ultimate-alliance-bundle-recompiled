@@ -175,7 +175,7 @@ if ($running) {
     return
 }
 
-$gameArgs = @("--game_data_root=`"$GameData`"", "--user_data_root=`"$UserData`"")
+$gameArgs = @("--mua_games_root=`"$(Join-Path $Root 'game')`"", "--user_data_root=`"$UserData`"")
 Write-Host 'Launching:'
 Write-Host "  $Exe $($gameArgs -join ' ')"
 Write-Host "  logs: $(Join-Path $BuildDir 'logs')"

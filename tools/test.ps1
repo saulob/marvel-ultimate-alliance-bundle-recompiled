@@ -114,7 +114,7 @@ try {
         if ($LASTEXITCODE) { throw "Building $group failed ($LASTEXITCODE)" }
     }
 
-    $headless = @('aspect_ratio', 'audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'gpu_perf_patches', 'graphics_adapter', 'render_scale', 'keyboard', 'launcher_quit',
+    $headless = @('aspect_ratio', 'audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'game_install', 'game_library', 'gpu_perf_patches', 'graphics_adapter', 'render_scale', 'keyboard', 'launcher_quit',
                   'lifecycle', 'log_path', 'multisampling', 'relaunch', 'resolve_order', 'runtime_config',
                   'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'sound_stream_ring', 'user_data', 'window_host',
                   'window_placement', 'xaudio_barrier', 'd3d12_async_submission', 'd3d12_sampler_memo',

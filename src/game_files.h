@@ -32,7 +32,7 @@ struct GameCheck {
 
 // The one readiness check: the launcher, Play and the startup decision all use it.
 GameCheck CheckGameFiles(const std::filesystem::path& game_dir,
-                         std::span<const GameProfile> profiles = SupportedProfiles());
+                         std::span<const GameProfile> profiles = KnownProfiles());
 
 // Upper-case hex SHA-256 of a file, empty when it cannot be read.
 std::string Sha256Hex(const std::filesystem::path& file);

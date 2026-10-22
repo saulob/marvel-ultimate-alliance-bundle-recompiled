@@ -31,6 +31,10 @@
 
 REXCVAR_DEFINE_BOOL(mua_launcher, true, "Marvel Ultimate Alliance",
                     "Show the launcher before the game starts (hold Shift at start to force it)");
+REXCVAR_DEFINE_STRING(mua_game, "mua1-gold", "Marvel Ultimate Alliance",
+                      "Game the launcher has selected: mua1, mua1-gold or mua2");
+REXCVAR_DEFINE_STRING(mua_games_root, "", "Marvel Ultimate Alliance",
+                      "Folder holding the game folders and disc images (default: game next to the program)");
 REXCVAR_DEFINE_BOOL(mua_skip_launcher, false, "Marvel Ultimate Alliance",
                     "Skip the launcher once (set when the launcher restarts the game)");
 REXCVAR_DEFINE_INT32(mua_frame_rate, mua::kFrameRateDefault, "Marvel Ultimate Alliance",
@@ -68,6 +72,7 @@ namespace {
 std::vector<std::string> GameSettingKeys() {
   std::vector<std::string> keys = {
       "mua_launcher",
+      kSelectedGameKey,
       "fullscreen",
       "window_width",
       "window_height",
@@ -93,6 +98,12 @@ std::vector<std::string> GameSettingKeys() {
 }
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
+
+constexpr std::string_view kGameScopedKeys[] = {"mua_frame_rate"};
+
+bool IsGameKey(std::string_view key) {
+  return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
+}
 
 const std::vector<std::string> kWindowKeys = {
     "window_width",
@@ -146,14 +157,50 @@ std::optional<std::string> ConfigValue(const toml::table& table, std::string_vie
   return node->value_exact<std::string>();
 }
 
-trg::TextFileSettings OpenPlayerFile(const std::filesystem::path& path) {
+trg::TextFileSettings OpenSettingsFile(const std::filesystem::path& path, std::string_view header) {
   std::error_code ec;
   std::filesystem::create_directories(path.parent_path(), ec);
   if (!std::filesystem::exists(path, ec)) {
-    std::ofstream(path) << "# Marvel Ultimate Alliance player settings, written by the launcher.\n"
-                           "# Loaded after marvel_ultimate_alliance.toml. Remove a line to use the shipped value.\n";
+    std::ofstream(path) << header;
   }
   return trg::TextFileSettings(Utf8(path));
+}
+
+trg::TextFileSettings OpenPlayerFile(const std::filesystem::path& path) {
+  return OpenSettingsFile(path,
+                          "# Marvel Ultimate Alliance player settings, written by the launcher.\n"
+                          "# Loaded after marvel_ultimate_alliance.toml. Remove a line to use the shipped value.\n");
+}
+
+std::vector<std::pair<std::string, std::string>> ChangedValues(const std::map<std::string, std::string>& saved,
+                                                              const std::map<std::string, std::string>& pending) {
+  std::vector<std::pair<std::string, std::string>> changes;
+  for (const auto& [key, value] : pending) {
+    const auto it = saved.find(key);
+    if (it == saved.end() || it->second != value) {
+      changes.emplace_back(key, value);
+    }
+  }
+  return changes;
+}
+
+std::map<std::string, std::string> ReadGameValues(const std::filesystem::path& file) {
+  std::map<std::string, std::string> values;
+  std::error_code ec;
+  if (file.empty() || !std::filesystem::exists(file, ec)) {
+    return values;
+  }
+  try {
+    const toml::table table = toml::parse_file(Utf8(file));
+    for (const std::string_view key : kGameScopedKeys) {
+      if (const auto value = ConfigValue(table, key)) {
+        values[std::string(key)] = key == "mua_frame_rate" ? std::to_string(FrameRateFromText(*value)) : *value;
+      }
+    }
+  } catch (const toml::parse_error& e) {
+    REXLOG_WARN("Cannot read {}: {}", Utf8(file.filename()), e.what());
+  }
+  return values;
 }
 
 std::string CvarText(std::string_view name, std::string_view fallback) {
@@ -271,6 +318,13 @@ void GameSettings::Capture(const std::filesystem::path& player_file, const std::
   pending_ = saved_;
   std::string& frame_rate = pending_["mua_frame_rate"];
   frame_rate = std::to_string(FrameRateFromText(frame_rate));
+  game_saved_.clear();
+  for (const GameDefinition& game : AllGames()) {
+    game_saved_[game.id] = ReadGameValues(GameFile(game.id));
+  }
+  game_pending_ = game_saved_;
+  const GameDefinition* selected = FindGame(pending_[kSelectedGameKey]);
+  game_ = selected ? selected->id : DefaultGame().id;
 }
 
 void GameSettings::CaptureLateRegistered() {
@@ -288,23 +342,48 @@ void GameSettings::CaptureLateRegistered() {
 }
 
 std::string GameSettings::Get(std::string_view key, std::string_view def) const {
+  if (const std::string* value = IsGameKey(key) ? GameValue(key) : nullptr; value && !value->empty()) {
+    return *value;
+  }
   const auto it = pending_.find(std::string(key));
   return it == pending_.end() || it->second.empty() ? std::string(def) : it->second;
 }
 
 void GameSettings::Set(std::string_view key, std::string value) {
+  if (IsGameKey(key)) {
+    game_pending_[game_][std::string(key)] = std::move(value);
+    return;
+  }
   pending_[std::string(key)] = std::move(value);
 }
 
+void GameSettings::SelectGame(GameId game) {
+  game_ = game;
+  pending_[kSelectedGameKey] = std::string(Game(game).key);
+}
+
+std::filesystem::path GameSettings::GameFile(GameId game) const {
+  return player_file_.empty() ? std::filesystem::path() : GameSettingsPath(player_file_.parent_path(), Game(game));
+}
+
+const std::string* GameSettings::GameValue(std::string_view key) const {
+  const auto values = game_pending_.find(game_);
+  if (values == game_pending_.end()) {
+    return nullptr;
+  }
+  const auto value = values->second.find(std::string(key));
+  return value == values->second.end() ? nullptr : &value->second;
+}
+
 bool GameSettings::Save() {
-  std::vector<std::pair<std::string, std::string>> changes;
-  for (const auto& [key, value] : pending_) {
-    const auto saved = saved_.find(key);
-    if (saved == saved_.end() || saved->second != value) {
-      changes.emplace_back(key, value);
+  const auto changes = ChangedValues(saved_, pending_);
+  std::vector<GameId> changed_games;
+  for (const auto& [game, values] : game_pending_) {
+    if (!ChangedValues(game_saved_[game], values).empty()) {
+      changed_games.push_back(game);
     }
   }
-  if (changes.empty()) {
+  if (changes.empty() && changed_games.empty()) {
     return true;
   }
   for (const auto& [key, value] : changes) {
@@ -314,15 +393,37 @@ bool GameSettings::Save() {
     }
   }
 
-  trg::TextFileSettings file = OpenPlayerFile(player_file_);
-  for (const auto& [key, value] : changes) {
+  if (!changes.empty()) {
+    trg::TextFileSettings file = OpenPlayerFile(player_file_);
+    for (const auto& [key, value] : changes) {
+      file.Set(key, TomlValue(key, value));
+    }
+    if (!file.Save()) {
+      REXLOG_ERROR("Cannot write player settings to {}", Utf8(player_file_.filename()));
+      return false;
+    }
+    saved_ = pending_;
+  }
+  return std::ranges::all_of(changed_games, [this](GameId game) { return SaveGameValues(game); });
+}
+
+bool GameSettings::SaveGameValues(GameId game) {
+  const std::filesystem::path path = GameFile(game);
+  if (path.empty()) {
+    return false;
+  }
+  const GameDefinition& definition = Game(game);
+  trg::TextFileSettings file = OpenSettingsFile(
+      path, "# " + std::string(definition.display_name) +
+                " settings, written by the launcher.\n# Loaded over settings.toml. Remove a line to use the shared value.\n");
+  for (const auto& [key, value] : ChangedValues(game_saved_[game], game_pending_[game])) {
     file.Set(key, TomlValue(key, value));
   }
   if (!file.Save()) {
-    REXLOG_ERROR("Cannot write player settings to {}", Utf8(player_file_.filename()));
+    REXLOG_ERROR("Cannot write {} settings to {}", definition.key, Utf8(path.filename()));
     return false;
   }
-  saved_ = pending_;
+  game_saved_[game] = game_pending_[game];
   return true;
 }
 
@@ -346,20 +447,38 @@ void GameSettings::ResetToDefaults() {
     REXLOG_WARN("Cannot read {}: {}", Utf8(shipped_config_.filename()), e.what());
   }
   for (const std::string& key : kGameSettingKeys) {
+    if (key == kSelectedGameKey) {
+      continue;
+    }
     const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(key);
     pending_[key] = ConfigValue(shipped, key).value_or(info ? info->default_value : std::string());
+  }
+  for (auto& [game, values] : game_pending_) {
+    for (auto& [key, value] : values) {
+      value = pending_[key];
+    }
   }
 }
 
 void GameSettings::Apply() const {
   for (const auto& [key, value] : pending_) {
-    if (IsWindowKey(key) || rex::cvar::GetFlagByName(key) == value) {
+    if (IsWindowKey(key) || IsGameKey(key) || rex::cvar::GetFlagByName(key) == value) {
       continue;
     }
     rex::cvar::SetFlagByName(key, value);
   }
+  ApplyGameSettings();
   ApplyShaderWait();
   ApplyMultisampling();
+}
+
+void GameSettings::ApplyGameSettings() const {
+  for (const std::string_view key : kGameScopedKeys) {
+    const std::string value = Get(key);
+    if (!value.empty() && rex::cvar::GetFlagByName(key) != value) {
+      rex::cvar::SetFlagByName(key, value);
+    }
+  }
 }
 
 void ApplyShaderWait() {
@@ -461,7 +580,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.display.aspect = InfoFor(aspect).key;
 
   const GameCheck game = CheckGameFiles(game_dir);
-  diagnostics.game.title_id = game.identity ? game.identity->title_id : DefaultProfile().title_id;
+  diagnostics.game.title_id = game.identity ? game.identity->title_id : ProfileOf(DefaultGame()).title_id;
   diagnostics.game.executable = "default.xex";
   diagnostics.game.size = game.xex_size;
   diagnostics.game.fingerprint = game.profile ? std::string("profile:") + std::string(game.profile->id) : "";

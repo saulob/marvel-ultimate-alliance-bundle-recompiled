@@ -24,9 +24,11 @@
 #include "active_log.h"
 #include "aspect_ratio.h"
 #include "diagnostics.h"
+#include "disc_identity.h"
 #include "frame_counter.h"
 #include "frame_limiter.h"
 #include "game_files.h"
+#include "game_library.h"
 #include "graphics_adapters.h"
 #include "guest_functions.h"
 #include "hang_watchdog.h"
@@ -60,6 +62,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   void OnConfigurePaths(rex::PathConfig& paths) override {
     shipped_config_ = paths.config_path;
     const std::filesystem::path port_folder = mua::PortFolder();
+    explicit_game_root_ = paths.game_data_root;
     if (paths.game_data_root.empty()) {
       paths.game_data_root = port_folder / "game";
     }
@@ -114,7 +117,20 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       rex::platform::env::set("REX_DEV_FRAME_LOG", "3,5");
     }
     game_settings_.Capture(mua::PlayerSettingsPath(user_data_root()), shipped_config_);
-    show_launcher_ = mua::ShouldShowLauncher(game_data_root());
+    games_root_ = REXCVAR_GET(mua_games_root).empty() ? mua::PortFolder() / "game"
+                                                      : mua::PathFromUtf8(REXCVAR_GET(mua_games_root));
+    library_.emplace(games_root_, explicit_game_root_, mua::ReadDiscIdentity);
+    if (const auto explicit_game = library_->explicit_game()) {
+      game_settings_.SelectGame(*explicit_game);
+    } else if (!explicit_game_root_.empty()) {
+      REXLOG_WARN("--game_data_root {} does not hold a supported game; using the games folder",
+                  mua::Utf8(explicit_game_root_));
+    } else if (!mua::FindGame(REXCVAR_GET(mua_game))) {
+      REXLOG_WARN("mua_game \"{}\" is not a game; selecting {}", REXCVAR_GET(mua_game), mua::DefaultGame().key);
+    }
+    const mua::GameId selected = game_settings_.SelectedGame();
+    REXLOG_INFO("{}", mua::SelectedGameLogText(library_->State(selected), RuntimeBlocker()));
+    show_launcher_ = mua::ShouldShowLauncher(mua::BootableGame(*library_, selected, RuntimeBlocker()) != nullptr);
     if (show_launcher_) {
       mua::PrepareLauncherWindow();
     }
@@ -130,27 +146,32 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);
     }
     game_settings_.CaptureLateRegistered();
+    const mua::GameState selected = library_->State(game_settings_.SelectedGame());
     if (!show_launcher_) {
+      ActivateGame(selected);
+      game_settings_.ApplyGameSettings();
       mua::ApplyShaderWait();
       mua::ApplyMultisampling();
       mua::PinGuestVideoMode();
-      return defaults;
+      return RoutedPaths(defaults, selected);
     }
     if (!imgui_drawer()) {
+      ActivateGame(selected);
       game_settings_.Apply();
       mua::PinGuestVideoMode();
-      return defaults;
+      return RoutedPaths(defaults, selected);
     }
     REXLOG_INFO("Launcher shown");
     mua::LauncherCallbacks callbacks;
-    callbacks.play = [this, resume, defaults] {
-      app_context().CallInUIThreadDeferred([this, resume, defaults] {
+    callbacks.play = [this, resume, defaults](const mua::GameState& game) {
+      app_context().CallInUIThreadDeferred([this, resume, defaults, game] {
+        ActivateGame(game);
         game_settings_.Apply();
         mua::ApplyDetailedLogging();
         mua::PinGuestVideoMode();
         REXLOG_INFO("DEBUG_SAULO Play: fullscreen setting {}, window fullscreen {}",
                     rex::cvar::GetFlagByName("fullscreen"), window() && window()->IsFullscreen());
-        resume(defaults);
+        resume(RoutedPaths(defaults, game));
       });
     };
     callbacks.window_changed = [this] { return game_settings_.WindowChanged(); };
@@ -176,17 +197,13 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     const std::filesystem::path port_folder = mua::PortFolder();
     const std::filesystem::path logs_dir =
         mua::LogsFolder(port_folder, defaults.user_data_root, mua::ActiveLogFile(), false);
-    mua::LauncherPaths paths{defaults.game_data_root,
-                             defaults.user_data_root,
+    mua::LauncherPaths paths{defaults.user_data_root,
                              mua::PlayerSettingsPath(defaults.user_data_root),
                              logs_dir,
                              user_data_.outcome,
                              immediate_drawer(),
-                             {}};
-    if (!mua::GetRecompiledImage().available) {
-      paths.runtime_blocker = "Recompiled game code has not been generated for this build yet.";
-    }
-    mua::ShowLauncher(imgui_drawer(), std::move(paths), game_settings_, std::move(callbacks));
+                             RuntimeBlocker()};
+    mua::ShowLauncher(imgui_drawer(), std::move(paths), *library_, game_settings_, std::move(callbacks));
     return std::nullopt;
   }
 
@@ -247,6 +264,36 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   }
 
  private:
+  static std::string RuntimeBlocker() {
+    return mua::GetRecompiledImage().available ? std::string()
+                                               : "Recompiled game code has not been generated for this build yet.";
+  }
+
+  // A game that cannot run gets no game folder, so the runtime never starts another game's code on its files.
+  static rex::PathConfig RoutedPaths(const rex::PathConfig& defaults, const mua::GameState& game) {
+    rex::PathConfig paths = defaults;
+    if (mua::CanPlay(game, RuntimeBlocker())) {
+      paths.game_data_root = game.data_dir;
+    } else {
+      paths.game_data_root.clear();
+      REXLOG_ERROR("{} cannot be started: refusing to boot it", game.game->display_name);
+    }
+    return paths;
+  }
+
+  // The window and the title follow the profile the files were verified against.
+  void ActivateGame(const mua::GameState& game) {
+    const bool runnable = mua::CanPlay(game, RuntimeBlocker()) && game.check.profile;
+    const mua::GameDefinition* verified = runnable ? mua::GameForProfile(*game.check.profile) : nullptr;
+    if (!verified) {
+      return;
+    }
+    mua::SetActiveGame(verified->id);
+    if (window()) {
+      window()->SetTitle(mua::GameWindowTitle(*verified));
+    }
+  }
+
   // The cache folder ReXGlue derived from the system root follows the user data root unless it was set explicitly.
   void ChooseUserData(rex::PathConfig& paths, const std::filesystem::path& port_folder) {
     user_data_ = mua::SelectUserData({port_folder, paths.user_data_root, !REXCVAR_GET(user_data_root).empty()});
@@ -260,6 +307,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   }
 
   mua::GameSettings game_settings_;
+  std::optional<mua::GameLibrary> library_;
+  std::filesystem::path games_root_;
+  std::filesystem::path explicit_game_root_;
   std::filesystem::path shipped_config_;
   mua::UserDataSelection user_data_;
   bool show_launcher_ = false;

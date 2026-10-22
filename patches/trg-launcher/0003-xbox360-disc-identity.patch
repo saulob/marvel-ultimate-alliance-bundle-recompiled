@@ -1,0 +1,63 @@
+diff --git a/include/trg/xbox360.h b/include/trg/xbox360.h
+index e652cf7..0456264 100644
+--- a/include/trg/xbox360.h
++++ b/include/trg/xbox360.h
+@@ -9,6 +9,16 @@ namespace trg {
+ 
+ class Task;
+ 
++struct Xbox360DiscIdentity {
++  uint32_t title_id = 0;
++  uint32_t media_id = 0;
++};
++
++// The title ID and media ID in the image's default.xex (its execution info
++// header), or zeros when the file is not an Xbox 360 disc image or has no
++// readable default.xex.
++Xbox360DiscIdentity ReadXbox360DiscIdentity(const std::string& utf8_image);
++
+ // The title ID in the image's default.xex (its execution info header), or 0
+ // when the file is not an Xbox 360 disc image or has no readable default.xex.
+ uint32_t ReadXbox360TitleId(const std::string& utf8_image);
+diff --git a/src/xbox360.cpp b/src/xbox360.cpp
+index 57d6156..4baee5d 100644
+--- a/src/xbox360.cpp
++++ b/src/xbox360.cpp
+@@ -108,9 +108,9 @@ uint32_t BE32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) <
+ 
+ }  // namespace
+ 
+-uint32_t ReadXbox360TitleId(const std::string& utf8_image) {
++Xbox360DiscIdentity ReadXbox360DiscIdentity(const std::string& utf8_image) {
+   Disc d;
+-  if (!d.Open(utf8_image)) return 0;
++  if (!d.Open(utf8_image)) return {};
+   for (const Entry& e : d.List(d.root_sector(), d.root_size())) {
+     if (e.dir || e.name.size() != 11 ||
+         !std::equal(e.name.begin(), e.name.end(), "default.xex",
+@@ -119,18 +119,20 @@ uint32_t ReadXbox360TitleId(const std::string& utf8_image) {
+     std::vector<uint8_t> h(std::min<uint32_t>(e.size, 0x4000));
+     if (h.size() < 0x18 || !d.Read(d.base() + uint64_t(e.sector) * kSector, h.data(), h.size()) ||
+         std::memcmp(h.data(), "XEX2", 4))
+-      return 0;
+-    // Optional headers: (key, value) pairs; 0x00040006 = execution info, title ID at +12.
++      return {};
++    // Optional headers: (key, value) pairs; 0x00040006 = execution info, media ID at +0, title ID at +12.
+     const uint32_t count = BE32(&h[0x14]);
+     for (uint32_t i = 0; i < count && 0x18 + size_t(i) * 8 + 8 <= h.size(); ++i) {
+       const uint32_t key = BE32(&h[0x18 + i * 8]), value = BE32(&h[0x18 + i * 8 + 4]);
+-      if (key == 0x00040006 && size_t(value) + 16 <= h.size()) return BE32(&h[value + 12]);
++      if (key == 0x00040006 && size_t(value) + 16 <= h.size()) return {BE32(&h[value + 12]), BE32(&h[value])};
+     }
+-    return 0;
++    return {};
+   }
+-  return 0;
++  return {};
+ }
+ 
++uint32_t ReadXbox360TitleId(const std::string& utf8_image) { return ReadXbox360DiscIdentity(utf8_image).title_id; }
++
+ std::string ExtractXbox360Disc(Task& task, const std::string& utf8_image, const std::string& utf8_out_dir) {
+   Disc d;
+   if (!d.Open(utf8_image)) return "That file is not an Xbox 360 disc image.";

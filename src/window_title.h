@@ -3,6 +3,7 @@
 #include <charconv>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "aspect_ratio.h"
 #include "window_host.h"
@@ -16,8 +17,9 @@ inline std::string RenderResolutionText(int resolution_scale, AspectRatio aspect
 }
 
 // The game title, then the render resolution and the frame rate when they are shown, separated by " | ".
-inline std::string WindowTitleText(std::optional<std::string> resolution, std::optional<double> fps) {
-  std::string title = kWindowTitle;
+inline std::string WindowTitleText(std::string_view game_title, std::optional<std::string> resolution,
+                                   std::optional<double> fps) {
+  std::string title(game_title);
   if (resolution) {
     title += " | " + *resolution;
   }

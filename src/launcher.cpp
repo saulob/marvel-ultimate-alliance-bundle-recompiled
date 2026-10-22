@@ -31,7 +31,11 @@
 #include "aspect_ratio.h"
 #include "dpi.h"
 #include "frame_limiter.h"
+#include "game_definition.h"
+#include "disc_identity.h"
 #include "game_files.h"
+#include "game_install.h"
+#include "game_library.h"
 #include "graphics_adapters.h"
 #include "multisampling.h"
 #include "imgui_gamepad.h"
@@ -52,6 +56,8 @@ constexpr std::pair<int, int> kLauncherWindowSize = {1280, 720};
 constexpr double kLauncherMaxShare = 0.9;
 // How long the saved message stays on screen before the game starts.
 constexpr double kPlayFeedbackSeconds = 0.4;
+// Logical pixels.
+constexpr float kHeaderHeight = 92.0f;
 
 constexpr ImGuiConfigFlags kNavFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
 
@@ -127,12 +133,11 @@ const char* StateName(GameFileState state) {
   return "unknown";
 }
 
-GameCheck CheckAndLogGameFiles(const std::filesystem::path& game_dir) {
-  GameCheck check = CheckGameFiles(game_dir);
-  REXLOG_INFO("Game files: {} (profile {}, default.xex {} bytes, SHA-256 {})", StateName(check.state),
-              check.profile ? check.profile->id : "none", check.xex_size,
+void LogGameFiles(const GameState& state) {
+  const GameCheck& check = state.check;
+  REXLOG_INFO("Game files ({}): {} (profile {}, default.xex {} bytes, SHA-256 {})", state.game->key,
+              StateName(check.state), check.profile ? check.profile->id : "none", check.xex_size,
               check.xex_sha256.empty() ? std::string("not read") : check.xex_sha256);
-  return check;
 }
 
 struct StatusText {
@@ -141,34 +146,58 @@ struct StatusText {
   std::string detail;
 };
 
-StatusText Describe(const GameCheck& check, const LauncherPaths& paths) {
-  const std::string_view target = DefaultProfile().display_name;
-  switch (check.state) {
-    case GameFileState::kMissing:
-      return {trg::Status::kAttention, "Game files needed",
-              std::format("Extract your own {} disc into the game folder.", target)};
-    case GameFileState::kReadError:
+StatusText Describe(const GameState& state, std::string_view runtime_blocker) {
+  switch (AvailabilityOf(state, runtime_blocker)) {
+    case GameAvailability::kReady:
+      return {trg::Status::kReady, "Ready to play", Utf8(state.data_dir)};
+    case GameAvailability::kRuntimeUnavailable:
+      return {trg::Status::kAttention, "Game files verified",
+              state.game->runtime_supported ? std::string(runtime_blocker)
+                                            : std::string("This game has no recompiled runtime in this build yet.")};
+    case GameAvailability::kUnsupportedFiles:
+      return {trg::Status::kAttention, "Different version of the game",
+              "The installed files are not the supported version."};
+    case GameAvailability::kIncomplete:
+      return {trg::Status::kAttention, "Game files incomplete",
+              std::format("Missing or changed: {}", state.check.missing_file)};
+    case GameAvailability::kUnreadable:
       return {trg::Status::kAttention, "Could not read the game files",
               "Check that the game folder and default.xex can be read."};
-    case GameFileState::kUnrecognized:
-      return {trg::Status::kAttention, "Unrecognized game files",
-              "default.xex is not a supported Marvel Ultimate Alliance release."};
-    case GameFileState::kDifferentVersion:
-      return {trg::Status::kAttention, "Different version of the game",
-              std::format("default.xex does not match the supported {} build.", target)};
-    case GameFileState::kIncomplete:
-      return {trg::Status::kAttention, "Game files incomplete", std::format("Missing or changed: {}", check.missing_file)};
-    case GameFileState::kValid:
+    case GameAvailability::kNotInstalled:
       break;
   }
-  if (!paths.runtime_blocker.empty()) {
-    return {trg::Status::kAttention, "Game files verified", paths.runtime_blocker};
+  return {trg::Status::kAttention, "Game files needed", "This port requires your own Xbox 360 disc image."};
+}
+
+std::string PlayBlockedReason(const GameState& state, std::string_view runtime_blocker) {
+  if (AvailabilityOf(state, runtime_blocker) != GameAvailability::kRuntimeUnavailable) {
+    return "The game files are not ready: see the Play page.";
   }
-  return {trg::Status::kReady, "Ready to play", Utf8(paths.game_dir)};
+  return state.game->runtime_supported ? std::string(runtime_blocker)
+                                       : std::format("{} cannot be started by this port yet.", state.game->display_name);
 }
 
 std::string HexId(uint32_t id) {
   return std::format("{:08X}", id);
+}
+
+std::string PackageText(const GameState& state) {
+  return std::format("{} \xC2\xB7 Title ID {}", state.game->package_label,
+                     HexId(ProfileOf(*state.game).title_id));
+}
+
+struct InstallOutcome {
+  InstallResult result;
+  const GameDefinition* game = nullptr;
+};
+
+void DrawFailure(trg::Ui& ui, const std::string& title, const std::string& text) {
+  ui.Spacer(4);
+  ImGui::PushStyleColor(ImGuiCol_Text, ui.theme().warn_dot);
+  ImGui::TextUnformatted(title.c_str());
+  ImGui::PopStyleColor();
+  ui.Help(text.c_str());
+  ui.Spacer(4);
 }
 
 std::string Size(int width, int height) {
@@ -200,13 +229,14 @@ std::vector<trg::Option> AspectRatioOptions() {
 
 class LauncherDialog final : public rex::ui::ImGuiDialog {
  public:
-  LauncherDialog(rex::ui::ImGuiDrawer* drawer, LauncherPaths paths, GameSettings& settings,
+  LauncherDialog(rex::ui::ImGuiDrawer* drawer, LauncherPaths paths, GameLibrary library, GameSettings& settings,
                  LauncherCallbacks callbacks)
       : ImGuiDialog(drawer),
         paths_(std::move(paths)),
         cb_(std::move(callbacks)),
+        library_(std::move(library)),
         settings_(settings),
-        check_(CheckAndLogGameFiles(paths_.game_dir)),
+        selected_(settings.SelectedGame()),
         monitors_(ListMonitors()),
         graphics_adapters_(ListGraphicsAdapters()) {
     header_art_ = LoadHeaderArt(paths_.immediate_drawer);
@@ -224,6 +254,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     if (done_) {
       return;
     }
+    PollInstall();
     TrackPlacement();
     if (!nav_taken_) {
       saved_nav_flags_ = io.ConfigFlags & kNavFlags;
@@ -266,16 +297,13 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   // Every PLAY (mouse, Enter, Xbox Start) ends here. The one save happens here; StartGame never saves.
   void RequestPlay() {
-    if (starting_) {
+    if (starting_ || install_.running()) {
       return;
     }
-    check_ = CheckAndLogGameFiles(paths_.game_dir);
-    if (check_.state != GameFileState::kValid) {
-      launcher_->SetStatus(Describe(check_, paths_).title + ".", 6.0);
-      return;
-    }
-    if (!paths_.runtime_blocker.empty()) {
-      launcher_->SetStatus(paths_.runtime_blocker, 6.0);
+    library_.RefreshFiles(selected_);
+    LogGameFiles(Selected());
+    if (!GameReady()) {
+      launcher_->SetStatus(PlayBlockedReason(Selected(), paths_.runtime_blocker), 6.0);
       return;
     }
     if (!launcher_->Save()) {
@@ -300,8 +328,12 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       return;
     }
     RestoreStartupWindow();
-    REXLOG_INFO("Starting the game");
-    Finish(cb_.play);
+    REXLOG_INFO("Starting {}", Selected().game->display_name);
+    Finish([play = cb_.play, game = Selected()] {
+      if (play) {
+        play(game);
+      }
+    });
   }
 
   // Drawn outside the disabled frame so the message keeps full brightness.
@@ -436,7 +468,43 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     }
   }
 
-  bool GameReady() const { return check_.state == GameFileState::kValid; }
+  const GameState& Selected() const { return library_.State(selected_); }
+
+  bool GameReady() const { return CanPlay(Selected(), paths_.runtime_blocker); }
+
+  void SelectGame(GameId game) {
+    if (game == selected_) {
+      return;
+    }
+    if (install_.running()) {
+      launcher_->SetStatus("Wait for the install to finish.", 4.0);
+      return;
+    }
+    install_failure_.clear();
+    install_failure_text_.clear();
+    selected_ = game;
+    settings_.SelectGame(game);
+    achievements_.reset();
+    achievements_tried_ = false;
+    library_.RefreshFiles(game);
+    library_.RescanPackages();
+    REXLOG_INFO("{}", SelectedGameLogText(Selected(), paths_.runtime_blocker));
+    LogGameFiles(Selected());
+  }
+
+  std::function<bool()> PageShown(LauncherPage page) {
+    return [this, page] { return Selected().game->HasPage(page); };
+  }
+
+  trg::TabStrip MakeTabStrip() {
+    trg::TabStrip strip;
+    for (const GameDefinition& game : AllGames()) {
+      strip.tabs.push_back({std::string(game.tab_label), std::string(game.short_label)});
+    }
+    strip.selected = [this] { return int(selected_); };
+    strip.select = [this](int index) { SelectGame(AllGames()[size_t(index)].id); };
+    return strip;
+  }
 
   trg::LauncherConfig MakeConfig() {
     trg::LauncherConfig c;
@@ -458,59 +526,123 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     c.branding.background = LauncherHeader(header_art_ ? reinterpret_cast<ImTextureID>(header_art_.get())
                                                        : ImTextureID{},
                                            art_aspect);
+    c.header_height = kHeaderHeight;
+    c.tab_strip = MakeTabStrip();
     c.pages = {
         {"Play", "Check the game files and start playing.", [this](trg::Ui& ui) { PagePlay(ui); },
-         [this] { return !GameReady(); }},
+         [this] { return !GameReady(); }, PageShown(LauncherPage::kPlay)},
         {"Display", "Window, monitor and how the picture fits your screen.",
-         [this](trg::Ui& ui) { PageDisplay(ui); }},
+         [this](trg::Ui& ui) { PageDisplay(ui); }, {}, PageShown(LauncherPage::kDisplay)},
         {"Graphics", "Render resolution, anti-aliasing and texture filtering.",
-         [this](trg::Ui& ui) { PageGraphics(ui); }},
-        {"Gameplay", "What the window shows while you play.", [](trg::Ui& ui) { PageGameplay(ui); }},
-        {"Achievements", "Your achievements on this PC.", [this](trg::Ui& ui) { PageAchievements(ui); }},
-        {"Controls", "Controller and keyboard.", [](trg::Ui& ui) { PageControls(ui); }},
+         [this](trg::Ui& ui) { PageGraphics(ui); }, {}, PageShown(LauncherPage::kGraphics)},
+        {"Gameplay", "What the window shows while you play.", [this](trg::Ui& ui) { PageGameplay(ui); }, {},
+         PageShown(LauncherPage::kGameplay)},
+        {"Achievements", "Your achievements on this PC.", [this](trg::Ui& ui) { PageAchievements(ui); }, {},
+         PageShown(LauncherPage::kAchievements)},
+        {"Controls", "Controller and keyboard.", [](trg::Ui& ui) { PageControls(ui); }, {},
+         PageShown(LauncherPage::kControls)},
         {"About", "About this port, and where your files and settings live.",
-         [this](trg::Ui& ui) { PageAbout(ui); }},
+         [this](trg::Ui& ui) { PageAbout(ui); }, {}, PageShown(LauncherPage::kAbout)},
     };
     c.can_play = [this] {
-      if (!GameReady()) {
-        return trg::PlayCheck{false, "The game files are not ready: see the Play page.", 0};
+      if (install_.running()) {
+        return trg::PlayCheck{false, "Wait for the install to finish.", 0};
       }
-      if (!paths_.runtime_blocker.empty()) {
-        return trg::PlayCheck{false, paths_.runtime_blocker, 0};
+      if (GameReady()) {
+        return trg::PlayCheck{};
       }
-      return trg::PlayCheck{};
+      return trg::PlayCheck{false, PlayBlockedReason(Selected(), paths_.runtime_blocker), 0};
     };
     return c;
   }
 
   void PagePlay(trg::Ui& ui) {
-    const StatusText text = Describe(check_, paths_);
-    ui.StatusCard(text.status, text.title.c_str(), text.detail.c_str());
-
-    if (paths_.game_dir.empty()) {
-      ui.Help("No game folder was given: start the game with --game_data_root.");
+    const GameState& state = Selected();
+    if (install_.running()) {
+      ui.StatusCard(trg::Status::kBusy, "Installing game files", nullptr, std::max(0.0f, install_.fraction()));
     } else {
-      const std::string target(DefaultProfile().display_name);
-      const std::string detected = check_.profile ? std::string(check_.profile->display_name) : "Not detected";
-      const std::string ids = check_.identity ? std::format("{} / {}", HexId(check_.identity->title_id),
-                                                             HexId(check_.identity->media_id))
-                                              : "Not read";
-      ui.Info("Target", target.c_str());
-      ui.Info("Detected", detected.c_str());
-      ui.Info("Title ID / Media ID", ids.c_str());
-      ui.Info("Recompiled code", paths_.runtime_blocker.empty() ? "Connected" : "Not generated");
-      ui.FolderRow("Game files",
-                   "No game files are included with this port. Extract your own disc into this folder, then check again.",
-                   "Open game folder", Utf8(paths_.game_dir));
-      if (ui.ButtonRow("Check game files", "Check the game folder again after copying files into it.",
-                       "Check again")) {
-        check_ = CheckAndLogGameFiles(paths_.game_dir);
-        achievements_.reset();
-        achievements_tried_ = false;
+      const StatusText text = Describe(state, paths_.runtime_blocker);
+      ui.StatusCard(text.status, text.title.c_str(), text.detail.c_str());
+    }
+    if (!install_failure_.empty()) {
+      DrawFailure(ui, install_failure_, install_failure_text_);
+    }
+    const std::string package = PackageText(state);
+    ui.Row("Game package", package.c_str());
+    if (!ui.TaskProgress(install_)) {
+      const bool clicked = state.check.state != GameFileState::kMissing
+                               ? ImGui::Button("Reinstall from package...", ImVec2(-FLT_MIN, 0))
+                               : ui.AccentButton("Install from package...");
+      if (clicked) {
+        BrowseAndInstall();
       }
     }
     ui.LauncherVisibilityRow("mua_launcher");
     ui.EndRows();
+  }
+
+  void BrowseAndInstall() {
+    PollInstall();
+    if (install_.running()) {
+      return;
+    }
+    const GameDefinition& game = *Selected().game;
+    const std::string picked = trg::BrowseForFile(std::format("Select your {} disc image", game.display_name),
+                                                  {{"Xbox 360 disc image", "*.iso;*.xiso"}});
+    if (picked.empty()) {
+      return;
+    }
+    install_failure_.clear();
+    install_failure_text_.clear();
+    achievements_.reset();
+    achievements_tried_ = false;
+    outcome_ = std::make_shared<InstallOutcome>();
+    outcome_->game = &game;
+    const std::filesystem::path disc = PathFromUtf8(picked);
+    const bool started = install_.Start(
+        "Reading disc...",
+        [outcome = outcome_, disc, games_root = library_.games_root()](trg::Task& task) {
+          InstallHooks hooks;
+          hooks.phase = [&task](const char* text) {
+            task.SetLabel(text);
+            task.Progress(0, 0);
+          };
+          hooks.cancelled = [&task] { return task.cancelled(); };
+          outcome->result = InstallFromDisc(*outcome->game, disc, games_root, DiscInstallServices(task), hooks);
+          return outcome->result.ok() ? std::string() : DescribeInstall(outcome->result, *outcome->game).title;
+        });
+    if (started) {
+      REXLOG_INFO("Installing {} from {}", game.display_name, Utf8(disc.filename()));
+    }
+  }
+
+  // Runs every frame so a finished install is picked up whichever page is open.
+  void PollInstall() {
+    std::string error;
+    if (install_.Finish(&error) == trg::Task::State::kIdle) {
+      return;
+    }
+    const std::shared_ptr<InstallOutcome> outcome = std::move(outcome_);
+    if (!outcome) {
+      return;
+    }
+    const InstallResult& result = outcome->result;
+    const InstallMessage message = DescribeInstall(result, *outcome->game);
+    library_.RefreshFiles(outcome->game->id);
+    if (result.ok() || result.status == InstallStatus::kCancelled) {
+      if (result.ok()) {
+        REXLOG_INFO("Game files installed: {} files, {} bytes", result.files, result.bytes);
+        LogGameFiles(library_.State(outcome->game->id));
+      } else {
+        REXLOG_INFO("Game install cancelled");
+      }
+      launcher_->SetStatus(message.title + ". " + message.text, 6.0);
+      return;
+    }
+    REXLOG_WARN("Game install failed: {} ({})", message.title, result.detail);
+    install_failure_ = message.title;
+    install_failure_text_ = message.text;
+    launcher_->SetStatus("Install failed: " + install_failure_, 8.0);
   }
 
   void PageDisplay(trg::Ui& ui) {
@@ -536,15 +668,15 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     }
   }
 
-  static void PageGameplay(trg::Ui& ui) {
+  void PageGameplay(trg::Ui& ui) {
     std::vector<trg::Option> frame_rates;
     for (auto& [value, label] : FrameRateChoices()) {
       frame_rates.push_back({std::move(value), std::move(label)});
     }
     ui.Choice("Frame rate", kFrameRateHelp, "mua_frame_rate", "60", frame_rates, 4);
-    ui.Toggle("Frame rate in title",
-              "Shows the game's frame rate in the window title: Marvel Ultimate Alliance Recompiled | FPS: 60.00",
-              "mua_show_fps", true, "Off", "On");
+    const std::string fps_help =
+        "Shows the game's frame rate in the window title: " + GameWindowTitle(*Selected().game) + " | FPS: 60.00";
+    ui.Toggle("Frame rate in title", fps_help.c_str(), "mua_show_fps", true, "Off", "On");
     ui.Toggle("Render resolution in title", "Shows the game's render resolution in the window title",
               "mua_show_render_resolution", false, "Off", "On");
     ui.Toggle("Frame counter", "Shows the game's frame rate in the corner. F2 toggles it while playing.",
@@ -708,13 +840,14 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   }
 
   void PageAchievements(trg::Ui& ui) {
-    if (!GameReady()) {
-      ui.Paragraph("Extract the game files to see its achievements.");
+    if (Selected().check.state != GameFileState::kValid) {
+      ui.Paragraph("Install the game files to see its achievements.");
       return;
     }
     if (!achievements_ && !achievements_tried_) {
       achievements_tried_ = true;
-      achievements_ = std::make_unique<LauncherAchievements>(paths_.game_dir, paths_.user_dir, paths_.immediate_drawer);
+      achievements_ =
+          std::make_unique<LauncherAchievements>(Selected().data_dir, paths_.user_dir, paths_.immediate_drawer);
     }
     if (!achievements_ || !achievements_->ok()) {
       ui.Paragraph("The achievements could not be read from the game files.");
@@ -793,8 +926,13 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         "Marvel Ultimate Alliance for Xbox 360, statically recompiled to run natively on PC with the ReXGlue "
         "SDK. No game code or assets are included: the game runs from your own game files.");
     ui.Spacer(4);
-    if (!paths_.game_dir.empty()) {
-      ui.FolderRow("Game files", "Where the game data is read from.", "Open game folder", Utf8(paths_.game_dir));
+    const GameState& state = Selected();
+    std::error_code ec;
+    if (std::filesystem::is_directory(state.data_dir, ec)) {
+      ui.FolderRow("Game files", "Where the game data is read from.", "Open game folder", Utf8(state.data_dir));
+    } else {
+      ui.FolderRow("Games folder", "Where the game folders and disc images go.", "Open games folder",
+                   Utf8(library_.games_root()));
     }
     ui.FolderRow("Saves and settings", UserDataFolderHelp(paths_.user_data_outcome), "Open data folder",
                  Utf8(paths_.user_dir));
@@ -818,8 +956,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     }
     ui.Info("Port version", MUA_PORT_VERSION);
     ui.Info("Libraries", "ReXGlue SDK " REXGLUE_VERSION_STRING "   \xC2\xB7   TRG Launcher " MUA_TRG_VERSION);
-    const std::string game = std::format("Xbox 360 disc, title {}, {}", HexId(DefaultProfile().title_id),
-                                         DefaultProfile().display_name);
+    const std::string game =
+        std::format("Xbox 360 disc, title {}, {}", HexId(ProfileOf(*state.game).title_id), state.game->display_name);
     ui.Info("Game", game.c_str());
   }
 
@@ -836,8 +974,13 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   LauncherPaths paths_;
   LauncherCallbacks cb_;
+  GameLibrary library_;
   GameSettings& settings_;
-  GameCheck check_;
+  GameId selected_;
+  trg::Task install_;
+  std::shared_ptr<InstallOutcome> outcome_;
+  std::string install_failure_;
+  std::string install_failure_text_;
   std::vector<MonitorInfo> monitors_;
   std::vector<GraphicsAdapter> graphics_adapters_;
   std::string host_render_targets_adapter_;
@@ -917,11 +1060,10 @@ void UpdateLauncherFonts(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer*
   g_font_density = density;
 }
 
-bool ShouldShowLauncher(const std::filesystem::path& game_dir) {
+bool ShouldShowLauncher(bool game_ready) {
   const bool skip_once = REXCVAR_GET(mua_skip_launcher);
   rex::cvar::ResetToDefault("mua_skip_launcher");
-  return LauncherWanted(CheckAndLogGameFiles(game_dir).state == GameFileState::kValid, skip_once, ShiftHeld(),
-                        REXCVAR_GET(mua_launcher));
+  return LauncherWanted(game_ready, skip_once, ShiftHeld(), REXCVAR_GET(mua_launcher));
 }
 
 namespace {
@@ -950,9 +1092,9 @@ void PrepareLauncherWindow() {
   InstallPreShowPlacement(PlanPreShow(saved, WorkAreas()), saved);
 }
 
-void ShowLauncher(rex::ui::ImGuiDrawer* drawer, LauncherPaths paths, GameSettings& settings,
+void ShowLauncher(rex::ui::ImGuiDrawer* drawer, LauncherPaths paths, GameLibrary library, GameSettings& settings,
                   LauncherCallbacks callbacks) {
-  new LauncherDialog(drawer, std::move(paths), settings, std::move(callbacks));
+  new LauncherDialog(drawer, std::move(paths), std::move(library), settings, std::move(callbacks));
 }
 
 }  // namespace mua

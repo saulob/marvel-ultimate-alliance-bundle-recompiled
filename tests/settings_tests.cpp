@@ -179,6 +179,83 @@ void TestDisplayModeStartup(const Scratch& scratch) {
   }
 }
 
+void TestSelectedGamePersists(const Scratch& scratch) {
+  std::printf("the saved selected game is the one the next start selects\n");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Save());
+  CHECK(toml::parse_file(scratch.player.string())["mua_game"].value<std::string>() == "mua2");
+
+  rex::cvar::LoadConfig(scratch.player);
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  CHECK(reopened.SelectedGame() == mua::GameId::kMua2);
+
+  rex::cvar::SetFlagByName("mua_game", "nonsense");
+  mua::GameSettings unknown;
+  unknown.Capture(scratch.player, scratch.shipped);
+  CHECK(unknown.SelectedGame() == mua::DefaultGame().id);
+
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  fs::remove(scratch.player);
+}
+
+void TestGameSettings(const Scratch& scratch) {
+  std::printf("a game's own settings stay with that game and the shared ones do not move\n");
+  const fs::path games = scratch.player.parent_path() / "games";
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  rex::cvar::SetFlagByName("mua_frame_rate", "60");
+  rex::cvar::SetFlagByName("mua_show_render_resolution", "false");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.SelectedGame() == mua::GameId::kMua1Gold);
+
+  settings.Set("mua_frame_rate", "120");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_frame_rate") == "60");
+  settings.Set("mua_frame_rate", "30");
+  settings.Set("mua_show_render_resolution", "true");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_frame_rate") == "120");
+  CHECK(settings.Get("mua_show_render_resolution") == "true");
+  CHECK(settings.Get(mua::kSelectedGameKey) == "mua1-gold");
+
+  CHECK(settings.Save());
+  const toml::table gold = toml::parse_file((games / "mua1-gold.toml").string());
+  const toml::table mua2 = toml::parse_file((games / "mua2.toml").string());
+  CHECK(gold["mua_frame_rate"].value<int64_t>() == 120);
+  CHECK(mua2["mua_frame_rate"].value<int64_t>() == 30);
+  CHECK(!fs::exists(games / "mua1.toml"));
+  const toml::table shared = toml::parse_file(scratch.player.string());
+  CHECK(shared["mua_show_render_resolution"].value<bool>() == true);
+  CHECK(!shared.contains("mua_frame_rate"));
+
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  CHECK(reopened.Get("mua_frame_rate") == "120");
+  reopened.SelectGame(mua::GameId::kMua2);
+  CHECK(reopened.Get("mua_frame_rate") == "30");
+  reopened.SelectGame(mua::GameId::kMua1);
+  CHECK(reopened.Get("mua_frame_rate") == "60");
+
+  reopened.SelectGame(mua::GameId::kMua1Gold);
+  reopened.Apply();
+  CHECK(rex::cvar::GetFlagByName("mua_frame_rate") == "120");
+
+  reopened.ResetToDefaults();
+  CHECK(reopened.Get("mua_frame_rate") == "60");
+  reopened.SelectGame(mua::GameId::kMua2);
+  CHECK(reopened.Get("mua_frame_rate") == "60");
+  CHECK(reopened.SelectedGame() == mua::GameId::kMua2);
+
+  rex::cvar::SetFlagByName("mua_frame_rate", "60");
+  rex::cvar::SetFlagByName("mua_show_render_resolution", "false");
+  fs::remove_all(games);
+  fs::remove(scratch.player);
+}
+
 void TestGuestVideoModePin() {
   std::printf("the guest video mode does not follow the window\n");
   rex::cvar::SetFlagByName("window_width", "1920");
@@ -201,6 +278,8 @@ int main() {
   TestWindowChange(scratch);
   TestApply();
   TestDisplayModeStartup(scratch);
+  TestSelectedGamePersists(scratch);
+  TestGameSettings(scratch);
   TestGuestVideoModePin();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
