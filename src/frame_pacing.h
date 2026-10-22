@@ -8,7 +8,7 @@
 
 namespace mua {
 
-// World::Update (sub_821BAE40) steps the game by the wall-clock time since its last call: at least 1 microsecond
+// World::Update steps the game by the wall-clock time since its last call: at least 1 microsecond
 // and at most 0.1 s, the rest of a longer frame is dropped. There is no fixed step or accumulator, so every update
 // is followed by one render and a faster presentation changes how often the game steps, not how fast it runs.
 inline constexpr double kWorldDeltaMin = 1e-6;

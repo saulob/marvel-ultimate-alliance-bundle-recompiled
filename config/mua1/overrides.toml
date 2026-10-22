@@ -1,0 +1,37 @@
+# Manual analysis fixes for Marvel Ultimate Alliance (default.xex, title 415607DA, media 26848425)
+
+[functions]
+# Leaf bodies with no .pdata entry that follow a this-adjusting thunk (addi r3, r3, 12; b) and are reached only by its tail call.
+0x8216DBA8 = { end = 0x8216DC44 }
+0x8224FCF8 = { end = 0x8224FD94 }
+0x82266700 = { end = 0x8226679C }
+0x822667A8 = { end = 0x82266844 }
+0x822668F0 = { end = 0x8226699C }
+0x8224DA20 = { end = 0x8224DABC }
+0x82314BD0 = { end = 0x82314C6C }
+0x82344948 = { end = 0x823449E4 }
+0x8234B9B0 = { end = 0x8234BA4C }
+0x8239D100 = { end = 0x8239D19C }
+0x823D51E0 = { end = 0x823D527C }
+0x82494EC0 = { end = 0x82494ED4 }
+
+# Thunk (addi r3, r3, 4; b) reached by a tail call between two functions.
+0x8249ED60 = { end = 0x8249ED68 }
+
+# Tail-call target between two .pdata functions: loads a pointer, returns early on null, else jumps through a table slot.
+0x82621368 = { end = 0x82621388 }
+
+# Sanitizes the mixed frame before XAudioSubmitRenderDriverFrame in sub_82494B40; r4 is the frame address.
+[[midasm_hook]]
+address = 0x82494B70
+name = "mua_audio_pcm_firewall"
+registers = ["r4"]
+after_instruction = false
+
+# The rendezvous spin in sub_8248C808 (XAudio mix workers) has no kernel wait, so title termination cannot stop it.
+[[midasm_hook]]
+address = 0x8248C8E4
+name = "mua_audio_barrier_escape"
+registers = []
+after_instruction = false
+return_on_true = true

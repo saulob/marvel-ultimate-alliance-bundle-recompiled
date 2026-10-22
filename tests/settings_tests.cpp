@@ -204,7 +204,7 @@ void TestSelectedGamePersists(const Scratch& scratch) {
 
 void TestGameSettings(const Scratch& scratch) {
   std::printf("a game's own settings stay with that game and the shared ones do not move\n");
-  const fs::path games = scratch.player.parent_path() / "games";
+  const fs::path root = scratch.player.parent_path();
   rex::cvar::SetFlagByName("mua_game", "mua1-gold");
   rex::cvar::SetFlagByName("mua_frame_rate", "60");
   rex::cvar::SetFlagByName("mua_show_render_resolution", "false");
@@ -223,11 +223,11 @@ void TestGameSettings(const Scratch& scratch) {
   CHECK(settings.Get(mua::kSelectedGameKey) == "mua1-gold");
 
   CHECK(settings.Save());
-  const toml::table gold = toml::parse_file((games / "mua1-gold.toml").string());
-  const toml::table mua2 = toml::parse_file((games / "mua2.toml").string());
+  const toml::table gold = toml::parse_file((root / "mua1_gold" / "game_settings.toml").string());
+  const toml::table mua2 = toml::parse_file((root / "mua2" / "game_settings.toml").string());
   CHECK(gold["mua_frame_rate"].value<int64_t>() == 120);
   CHECK(mua2["mua_frame_rate"].value<int64_t>() == 30);
-  CHECK(!fs::exists(games / "mua1.toml"));
+  CHECK(!fs::exists(root / "mua1" / "game_settings.toml"));
   const toml::table shared = toml::parse_file(scratch.player.string());
   CHECK(shared["mua_show_render_resolution"].value<bool>() == true);
   CHECK(!shared.contains("mua_frame_rate"));
@@ -252,7 +252,8 @@ void TestGameSettings(const Scratch& scratch) {
 
   rex::cvar::SetFlagByName("mua_frame_rate", "60");
   rex::cvar::SetFlagByName("mua_show_render_resolution", "false");
-  fs::remove_all(games);
+  fs::remove_all(root / "mua1_gold");
+  fs::remove_all(root / "mua2");
   fs::remove(scratch.player);
 }
 

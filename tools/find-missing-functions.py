@@ -1,14 +1,16 @@
 """Finds code only reached through data pointers, vtables or lis/addi pairs that
 ReXGlue v0.10.0 did not register as functions, classifies each candidate and
-writes the HIGH-confidence ones to config/discovered-functions.toml.
+writes the HIGH-confidence ones to config/<game>/discovered-functions.toml.
 
-  python tools/find-missing-functions.py                report only
-  python tools/find-missing-functions.py --apply-high   also rewrite the TOML
-  python tools/find-missing-functions.py --verify       check generated output
-  python tools/find-missing-functions.py --self-test    check the decoder and the known manual cases
+  python tools/find-missing-functions.py --game mua1-gold               report only
+  python tools/find-missing-functions.py --game mua1 --apply-high       also rewrite the TOML
+  python tools/find-missing-functions.py --game mua1 --verify           check generated output
+  python tools/find-missing-functions.py --game mua1 --self-test        check the decoder and the known manual cases
 
-Needs a codegen run (generated/default) and the decompressed image game/analysis/default.image.bin
-(build/dump_image.exe game/extracted default.xex game/analysis/default.image.bin).
+--game picks mua1 or mua1-gold (default). It needs a codegen run (generated/<game>) and the decompressed image
+(build/dump_image.exe game/<folder> default.xex game/analysis/<image>):
+  mua1-gold  game/extracted    default.image.bin
+  mua1       game/mua1         mua1.image.bin
 Method ported from the Hard Corps: Uprising recompilation project.
 """
 import bisect
@@ -22,18 +24,40 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-IMAGE_PATH = os.path.join(ROOT, 'game', 'analysis', 'default.image.bin')
-IMAGE_SHA256 = '92ea21814b6d2f818d042b562bcac2532c3a6c3bb78ff30c59569786b3498c51'
-GEN = os.path.join(ROOT, 'generated', 'default')
-OVERRIDES = os.path.join(ROOT, 'config', 'overrides.toml')
-DISCOVERED = os.path.join(ROOT, 'config', 'discovered-functions.toml')
-REPORT = os.path.join(ROOT, 'build', 'missing-functions-report.txt')
 
 BASE = 0x82000000
-RDATA = (0x82000400, 0x820E6570)
-PDATA = (0x820E6600, 0x821152F8)
-CODE_RANGES = ((0x82120000, 0x8287A480), (0x8287B200, 0x82880ECC))   # .text without its import thunks, then PSFD00
-DATA = (0x82890000, 0x82C45C5C)
+# Sections of each supported default.xex image. CODE is .text without its import thunks, then PSFD00.
+GAMES = {
+    'mua1-gold': dict(
+        image='default.image.bin', size=0xD00000,
+        sha256='92ea21814b6d2f818d042b562bcac2532c3a6c3bb78ff30c59569786b3498c51',
+        rdata=(0x82000400, 0x820E6570), pdata=(0x820E6600, 0x821152F8),
+        code=((0x82120000, 0x8287A480), (0x8287B200, 0x82880ECC)), data=(0x82890000, 0x82C45C5C),
+        manual_only={0x82543C70}),   # starts after a null pad inside a region GapFill merged: a hand-made boundary
+    'mua1': dict(
+        image='mua1.image.bin', size=0xCB0000,
+        sha256='b82fcd8cf3fbc879d35aae8ab312385b39ca65e2b2d47da706b92f34b3c08c75',
+        rdata=(0x82000400, 0x820D9F60), pdata=(0x820DA000, 0x82108A98),
+        code=((0x82110000, 0x8284AF70), (0x8284BC00, 0x828518CC)), data=(0x82860000, 0x82C0E89C),
+        manual_only=set()),
+}
+
+
+def select_game(name):
+    global IMAGE_PATH, IMAGE_SIZE, IMAGE_SHA256, GEN, OVERRIDES, DISCOVERED, REPORT
+    global RDATA, PDATA, CODE_RANGES, DATA, MANUAL_ONLY
+    game = GAMES[name]
+    IMAGE_PATH = os.path.join(ROOT, 'game', 'analysis', game['image'])
+    IMAGE_SIZE, IMAGE_SHA256 = game['size'], game['sha256']
+    GEN = os.path.join(ROOT, 'generated', name)
+    OVERRIDES = os.path.join(ROOT, 'config', name, 'overrides.toml')
+    DISCOVERED = os.path.join(ROOT, 'config', name, 'discovered-functions.toml')
+    REPORT = os.path.join(ROOT, 'build', f'missing-functions-report-{name}.txt')
+    RDATA, PDATA, CODE_RANGES, DATA = game['rdata'], game['pdata'], game['code'], game['data']
+    MANUAL_ONLY = game['manual_only']
+
+
+select_game('mua1-gold')
 CXX_EH_MAGIC = 0x19930520
 MAX_HIGH_BYTES = 0x400
 
@@ -669,9 +693,6 @@ def verify():
     return failures == 0
 
 
-MANUAL_ONLY = {0x82543C70}   # starts after a null pad inside a region GapFill merged: kept as a hand-made boundary
-
-
 def jump_table_leaks(cands, refs, known):
     leaks = []
     for c in cands:
@@ -722,8 +743,13 @@ def decode_word(word):
 def main(argv):
     global IMG
     apply_high = '--apply-high' in argv
+    if '--game' in argv:
+        name = argv[argv.index('--game') + 1]
+        if name not in GAMES:
+            sys.exit(f'unknown --game {name}: {", ".join(GAMES)}')
+        select_game(name)
     IMG = open(IMAGE_PATH, 'rb').read()
-    if len(IMG) != 0xD00000:
+    if len(IMG) != IMAGE_SIZE:
         sys.exit(f'{IMAGE_PATH}: unexpected size 0x{len(IMG):X}')
     if hashlib.sha256(IMG).hexdigest() != IMAGE_SHA256:
         sys.exit(f'{IMAGE_PATH}: not the supported image dump')

@@ -234,16 +234,12 @@ void CheckWindowDisplay(void* native_window, int monitor) {
   }
 }
 
-bool RelaunchSelf(std::wstring_view extra_args) {
+bool RelaunchExecutable(const std::filesystem::path& executable, std::wstring_view extra_args) {
   BeginSessionLogHandoff();
   std::wstring command_line = GetCommandLineW();
   command_line += L' ';
   command_line += extra_args;
-  wchar_t exe[MAX_PATH];
-  if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
-    CancelSessionLogHandoff();
-    return false;
-  }
+  const wchar_t* exe = executable.c_str();
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
@@ -256,6 +252,12 @@ bool RelaunchSelf(std::wstring_view extra_args) {
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
   return true;
+}
+
+void HideNativeWindow(void* native_handle) {
+  if (native_handle) {
+    ShowWindow(static_cast<HWND>(native_handle), SW_HIDE);
+  }
 }
 
 }  // namespace mua

@@ -99,8 +99,7 @@ void TestPolicy() {
 }
 
 void TestGameMaxFps() {
-  std::printf("the game's max_fps follows the launcher rate
-");
+  std::printf("the game's max_fps follows the launcher rate\n");
   CHECK(GameMaxFpsFor(30) == 31);
   CHECK(GameFrameInterval(31) == 1.0f / 31.0f);
   for (const int rate : {60, 90, 120, 144, 165, 240}) {
@@ -204,18 +203,27 @@ void TestWait() {
 void TestWiring() {
   std::printf("frame rate wiring\n");
   const std::string limiter = ReadSource("frame_limiter.cpp");
-  CHECK(Has(limiter, "REX_HOOK_RAW(sub_82497D00)"));
+  CHECK(Has(limiter, "REX_HOOK_RAW(MUA_GUEST_PRESENT_CALLBACK)"));
+  CHECK(!Has(limiter, "#if MUA_GUEST_HAS_PRESENT_CALLBACK"));
   CHECK(Has(limiter, "mua::PresentArgument(ctx.r3.u32)"));
-  CHECK(Has(limiter, "argument & ~kPresentIntervalMask"));
-  CHECK(Has(limiter, "kPresentIntervalMask = 0xF00"));
+  CHECK(Has(limiter, "guest::ImmediatePresentArgument(argument)"));
   CHECK(Has(limiter, "PresentModeFor(ConfiguredFrameRate())"));
   CHECK(Has(limiter, "REXCVAR_GET(mua_frame_rate)"));
 
-  const std::string host = ReadSource("window_host.cpp");
+  const std::string host = ReadSource("swap_hooks.cpp");
   CHECK(Has(host, "REX_HOOK_RAW(__imp__VdSwap)"));
   CHECK(Has(host, "mua::PaceGuestFrame()"));
-  CHECK(Has(host, "kRepeatPresentSite = 0x8249EFE0"));
-  CHECK(Has(host, "REX_HOOK_RAW(sub_82498340)"));
+  CHECK(Has(host, "mua::guest::kRepeatPresentSite"));
+  CHECK(Has(host, "REX_HOOK_RAW(MUA_GUEST_SWAP)"));
+
+  const std::string gold = ReadSource("guest_map_mua1_gold.h");
+  CHECK(Has(gold, "#define MUA_GUEST_PRESENT_CALLBACK sub_82497D00"));
+  CHECK(Has(gold, "#define MUA_GUEST_SWAP sub_82498340"));
+  CHECK(Has(gold, "kRepeatPresentSite = 0x8249EFE0"));
+  const std::string mua1 = ReadSource("guest_map_mua1.h");
+  CHECK(Has(mua1, "#define MUA_GUEST_PRESENT_CALLBACK sub_8248A0A0"));
+  CHECK(Has(mua1, "#define MUA_GUEST_SWAP sub_8248A2B8"));
+  CHECK(Has(mua1, "kRepeatPresentSite = 0x82484914"));
 
   const std::string settings = ReadSource("settings.cpp");
   CHECK(Has(settings, "REXCVAR_DEFINE_INT32(mua_frame_rate, mua::kFrameRateDefault"));

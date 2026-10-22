@@ -15,11 +15,12 @@
 #include <rex/ppc.h>
 #include <rex/system/kernel_state.h>
 
+#include "guest_map.h"
 #include "xaudio_barrier.h"
 
 bool mua_audio_barrier_escape();
 
-REX_EXTERN(__imp__sub_824A6BA8);
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_AUDIO_BARRIER));
 
 namespace {
 
@@ -91,7 +92,7 @@ void WaitForRelease(const mua::XAudioBarrier& barrier, uint64_t round) {
 
 }  // namespace
 
-// Codegen hook at the spin of sub_824A6BA8 (config/overrides.toml), also polled by the host rendezvous. The workers
+// Codegen hook at the spin of the rendezvous (overrides.toml), also polled by the host rendezvous. The workers
 // wait there for each other without a kernel wait, so one whose partner already stopped for title termination would
 // wait forever.
 bool mua_audio_barrier_escape() {
@@ -99,10 +100,10 @@ bool mua_audio_barrier_escape() {
   return kernel && kernel->is_terminating_title();
 }
 
-// sub_824A6BA8(engine, word): the XAudio mix workers' rendezvous once per audio pass. The title's version marks its
+// (engine, word): the XAudio mix workers' rendezvous once per audio pass. The title's version marks its
 // processor's byte in the guest word and spins until all are in or the word is reset, so a worker preempted in between
 // can miss the reset and spin forever with its partner. Only this function uses the word.
-REX_HOOK_RAW(sub_824A6BA8) {
+REX_HOOK_RAW(MUA_GUEST_AUDIO_BARRIER) {
   const uint32_t engine = ctx.r3.u32;
   if (!LoadGuest32(base, engine + kEngineActiveOffset)) {
     return;
@@ -110,7 +111,7 @@ REX_HOOK_RAW(sub_824A6BA8) {
   const uint8_t processor = LoadGuest8(base, ctx.r13.u32 + kPcrProcessorNumberOffset);
   mua::XAudioBarrier* barrier = processor < 8 ? BarrierFor(ctx.r4.u32) : nullptr;
   if (!barrier) {
-    __imp__sub_824A6BA8(ctx, base);
+    MUA_GUEST_ORIGINAL(MUA_GUEST_AUDIO_BARRIER)(ctx, base);
     return;
   }
   const mua::XAudioBarrier::Arrival arrival = barrier->Arrive(processor, ExpectedProcessors(base, engine));

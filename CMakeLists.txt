@@ -166,13 +166,10 @@ set_target_properties(trg_launcher PROPERTIES CXX_STANDARD 17)
 target_compile_definitions(trg_launcher PRIVATE _CRT_SECURE_NO_WARNINGS)
 get_directory_property(MUA_TRG_VERSION DIRECTORY "${_trg_patched_dir}" DEFINITION PROJECT_VERSION)
 
-set(MUA_SOURCES
+set(MUA_HOST_SOURCES
     src/main.cpp
     src/active_log.cpp
-    src/audio_mixer_priority.cpp
-    src/audio_pcm_firewall.cpp
     src/crash_report.cpp
-    src/crt_native.cpp
     src/diagnostics.cpp
     src/disc_identity.cpp
     src/game_definition.cpp
@@ -182,13 +179,10 @@ set(MUA_SOURCES
     src/game_profile.cpp
     src/graphics_adapters.cpp
     src/frame_counter.cpp
-    src/frame_limiter.cpp
     src/frame_wait.cpp
-    src/frame_pacing.cpp
-    src/gpu_fence_wait.cpp
+    src/game_data.cpp
     src/guest_functions.cpp
     src/imgui_gamepad.cpp
-    src/indirect_tail_calls.cpp
     src/input_summary.cpp
     src/launcher.cpp
     src/launcher_achievements.cpp
@@ -196,25 +190,32 @@ set(MUA_SOURCES
     src/log_path.cpp
     src/platform.cpp
     src/recomp_image.cpp
-    src/save_diagnostics.cpp
     src/session_log.cpp
     src/settings.cpp
     src/shader_storage_repair.cpp
-    src/sound_stream_ring.cpp
     src/system_info.cpp
     src/user_data.cpp
     src/window_host.cpp
     src/xex_identity.cpp
-    src/xaudio_worker_barrier.cpp
     src/hang_watchdog.cpp
 )
 
-set(MUA_APP_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/marvel_ultimate_alliance.manifest")
-add_executable(marvel_ultimate_alliance WIN32 ${MUA_SOURCES})
-target_link_options(marvel_ultimate_alliance PRIVATE "LINKER:/MANIFESTINPUT:${MUA_APP_MANIFEST}")
-set_property(TARGET marvel_ultimate_alliance APPEND PROPERTY LINK_DEPENDS "${MUA_APP_MANIFEST}")
+# The hooks bound to one game's guest addresses; only the programs that carry a recompiled module have them.
+set(MUA_RUNTIME_SOURCES
+    src/audio_mixer_priority.cpp
+    src/audio_pcm_firewall.cpp
+    src/crt_native.cpp
+    src/frame_limiter.cpp
+    src/frame_pacing.cpp
+    src/gpu_fence_wait.cpp
+    src/indirect_tail_calls.cpp
+    src/save_diagnostics.cpp
+    src/sound_stream_ring.cpp
+    src/swap_hooks.cpp
+    src/xaudio_worker_barrier.cpp
+)
 
-mua_setup_target(marvel_ultimate_alliance GPU_PLUGINS xenos)
+set(MUA_APP_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/marvel_ultimate_alliance.manifest")
 
 # ThinLTO in Release and RelWithDebInfo, from the Crackdown PC port; the runtime and GPU plugin are prebuilt. Debug compiles
 # at -O0, which marks every function optnone, so LTO would optimize nothing there.
@@ -233,19 +234,6 @@ function(mua_enable_thinlto target)
         target_link_options(${target} PRIVATE "$<${_lto}:${_link}>")
     endif()
 endfunction()
-mua_enable_thinlto(marvel_ultimate_alliance)
-if(TARGET marvel_ultimate_alliance_recomp)
-    mua_enable_thinlto(marvel_ultimate_alliance_recomp)
-endif()
-target_link_libraries(marvel_ultimate_alliance PRIVATE trg::launcher shcore synchronization dxgi shell32 dbghelp)
-# The SDK stages its DLLs only when the program links, so a rebuilt runtime or GPU plugin has to
-# make it link again; tools/build.ps1 also checks the staged copies.
-foreach(_sdk_dll rexruntime rexruntimed rexruntimerd rexgpu-xenos rexgpu-xenosd rexgpu-xenosrd)
-    if(EXISTS "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
-        set_property(TARGET marvel_ultimate_alliance APPEND PROPERTY LINK_DEPENDS
-            "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
-    endif()
-endforeach()
 
 # Every build checks that tools/rexglue holds the runtime and GPU plugin built from this branch's patches, and that
 # the copies next to the program are those; tools/build.ps1 rebuilds them when they are not. The Debug files stay stock.
@@ -254,28 +242,61 @@ find_program(MUA_WINDOWS_POWERSHELL NAMES powershell REQUIRED)
 set(MUA_REXGLUE_CHECK "${CMAKE_COMMAND}" -E env --unset=PSModulePath
     "${MUA_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/build-patched-rexruntime.ps1" -Check -Config $<CONFIG>)
 add_custom_target(mua_rexglue_check COMMAND ${MUA_REXGLUE_CHECK} VERBATIM)
-add_dependencies(marvel_ultimate_alliance mua_rexglue_check)
+
+# One program per game: it carries that game's recompiled module (generated/<key>), its guest hooks and the host code
+# every program shares. The launcher is the program without a module: it only starts the game's own program.
+function(mua_add_game_executable target module_key)
+    add_executable(${target} WIN32 ${MUA_HOST_SOURCES})
+    if(NOT "${module_key}" STREQUAL "")
+        target_sources(${target} PRIVATE ${MUA_RUNTIME_SOURCES})
+    endif()
+    target_link_options(${target} PRIVATE "LINKER:/MANIFESTINPUT:${MUA_APP_MANIFEST}")
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${MUA_APP_MANIFEST}")
+
+    mua_setup_target(${target} ${module_key} GPU_PLUGINS xenos)
+
+    mua_enable_thinlto(${target})
+    if(TARGET ${target}_recomp)
+        mua_enable_thinlto(${target}_recomp)
+    endif()
+    target_link_libraries(${target} PRIVATE trg::launcher shcore synchronization dxgi shell32 dbghelp)
+    # The SDK stages its DLLs only when the program links, so a rebuilt runtime or GPU plugin has to
+    # make it link again; tools/build.ps1 also checks the staged copies.
+    foreach(_sdk_dll rexruntime rexruntimed rexruntimerd rexgpu-xenos rexgpu-xenosd rexgpu-xenosrd)
+        if(EXISTS "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
+            set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+                "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
+        endif()
+    endforeach()
+    add_dependencies(${target} mua_rexglue_check)
+
+    target_compile_definitions(${target} PRIVATE
+        MUA_PORT_VERSION="${PROJECT_VERSION}${MUA_VERSION_SUFFIX}"
+        MUA_TRG_VERSION="${MUA_TRG_VERSION}"
+        MUA_BUILD_CONFIG="$<CONFIG>"
+        MUA_INPUT_ACTIVITY_CALLBACK=$<NOT:$<CONFIG:Debug>>)
+
+    # The runtime reads its cvars from <exe dir>/marvel_ultimate_alliance.toml, whichever game the program carries.
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/config/marvel_ultimate_alliance.toml"
+            "$<TARGET_FILE_DIR:${target}>"
+        VERBATIM
+    )
+endfunction()
+
+mua_add_game_executable(marvel_ultimate_alliance "")
+mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1)
+mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold)
+
 add_custom_target(mua_rexglue_staging ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE:rex::gpu-xenos>"
         "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
     COMMAND ${MUA_REXGLUE_CHECK} -Staged "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
     VERBATIM
 )
-add_dependencies(mua_rexglue_staging marvel_ultimate_alliance)
-
-target_compile_definitions(marvel_ultimate_alliance PRIVATE
-    MUA_PORT_VERSION="${PROJECT_VERSION}${MUA_VERSION_SUFFIX}"
-    MUA_TRG_VERSION="${MUA_TRG_VERSION}"
-    MUA_BUILD_CONFIG="$<CONFIG>"
-    MUA_INPUT_ACTIVITY_CALLBACK=$<NOT:$<CONFIG:Debug>>)
-
-# The runtime reads its cvars from <exe dir>/marvel_ultimate_alliance.toml.
-add_custom_command(TARGET marvel_ultimate_alliance POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/config/marvel_ultimate_alliance.toml"
-        "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
-    VERBATIM
-)
+add_dependencies(mua_rexglue_staging marvel_ultimate_alliance marvel_ultimate_alliance_mua1
+                 marvel_ultimate_alliance_mua1_gold)
 
 # Extracts an Xbox 360 disc image: tools/extract-disc.ps1
 add_executable(extract_disc tools/extract_disc/main.cpp)

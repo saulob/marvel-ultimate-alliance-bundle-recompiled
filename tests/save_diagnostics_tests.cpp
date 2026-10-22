@@ -118,6 +118,16 @@ void TestGeneratedStorage(const fs::path& generated) {
   CHECK(Has(load, "sub_8247EEF0(ctx, base);"));
 }
 
+void TestGeneratedStorageMua1(const fs::path& generated) {
+  std::printf("the MUA 1 wrappers are the same XAM imports at their own addresses\n");
+  CHECK(Has(Function(generated, "sub_824B25C8"), "__imp__XamUserReadProfileSettings(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_824B2630"), "__imp__XamUserWriteProfileSettings(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_82466A18"), "__imp__XamContentCreateEx(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_82466A80"), "__imp__XamContentClose(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_82466A88"), "__imp__XamContentCreateEnumerator(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_82467240"), "__imp__XamShowDeviceSelectorUI(ctx, base);"));
+}
+
 }  // namespace
 
 int Run() {
@@ -127,6 +137,10 @@ int Run() {
     std::printf("skipped generated checks: generated code is not there (%s)\n", generated.string().c_str());
   } else {
     TestGeneratedStorage(generated);
+  }
+  const fs::path mua1 = MUA_GENERATED_DIR_MUA1;
+  if (fs::exists(mua1 / "marvel_ultimate_alliance_recomp.33.cpp")) {
+    TestGeneratedStorageMua1(mua1);
   }
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

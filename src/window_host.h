@@ -34,3 +34,6 @@ mua::WindowSize CurrentDrawableSize(rex::ui::Window* window);
 void CreateCursorSync(rex::ui::ImGuiDrawer* drawer);
 
 GuestFrameStats GetGuestFrameStats();
+
+// Counts one genuine guest present for the frame rate sample.
+void NoteGuestPresent();

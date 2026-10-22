@@ -1,5 +1,5 @@
 # rexglue codegen rewrites the manifest with LF endings on every run.
-marvel_ultimate_alliance_manifest.toml text eol=lf
+*.manifest.toml text eol=lf
 
 *.sh text eol=lf
 # The runtime patches are applied with git apply.

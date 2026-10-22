@@ -23,8 +23,10 @@ constexpr std::array kGames = {
         .package_label = "Xbox 360 disc",
         .profile_id = "mua-x360",
         .legacy_folder = "",
-        .runtime_supported = false,
-        .pages = kInstallPages,
+        .runtime_supported = true,
+        .pages = kPlayablePages,
+        .executable = "marvel_ultimate_alliance_mua1.exe",
+        .data_folder = "mua1",
     },
     GameDefinition{
         .id = GameId::kMua1Gold,
@@ -37,6 +39,8 @@ constexpr std::array kGames = {
         .legacy_folder = "extracted",
         .runtime_supported = true,
         .pages = kPlayablePages,
+        .executable = "marvel_ultimate_alliance_mua1_gold.exe",
+        .data_folder = "mua1_gold",
     },
     GameDefinition{
         .id = GameId::kMua2,
@@ -49,6 +53,8 @@ constexpr std::array kGames = {
         .legacy_folder = "",
         .runtime_supported = false,
         .pages = kInstallPages,
+        .executable = "",
+        .data_folder = "mua2",
     },
 };
 
@@ -85,6 +91,10 @@ const GameDefinition* GameForProfile(const GameProfile& profile) {
 
 std::string GameWindowTitle(const GameDefinition& game) {
   return std::string(game.display_name) + " Recompiled";
+}
+
+std::filesystem::path GameUserDataRoot(const GameDefinition& game, const std::filesystem::path& user_data_root) {
+  return user_data_root / std::string(game.data_folder);
 }
 
 void SetActiveGame(GameId id) {

@@ -32,6 +32,7 @@ mua_add_test(window_placement_tests headless)
 mua_add_test(launcher_quit_tests headless)
 mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
+mua_add_test(guest_map_tests headless)
 mua_add_test(gpu_perf_patches_tests headless)
 mua_add_test(d3d12_async_submission_tests headless)
 mua_add_test(d3d12_sampler_memo_tests headless)
@@ -52,12 +53,18 @@ mua_add_test(game_library_tests headless
 mua_add_test(game_install_tests headless
     SOURCES src/game_definition.cpp src/game_files.cpp src/game_install.cpp src/game_library.cpp src/game_profile.cpp
             src/xex_identity.cpp)
+mua_add_test(game_data_tests headless
+    SOURCES src/game_data.cpp src/game_definition.cpp src/game_profile.cpp)
 mua_add_test(shader_storage_repair_tests headless SOURCES src/shader_storage_repair.cpp)
 mua_add_test(resolve_order_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(audio_pcm_firewall_tests headless)
 mua_add_test(xaudio_barrier_tests headless)
-mua_add_test(sound_stream_ring_tests headless DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/default")
-mua_add_test(save_diagnostics_tests headless DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/default")
+mua_add_test(sound_stream_ring_tests headless
+    DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
+            MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1")
+mua_add_test(save_diagnostics_tests headless
+    DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
+            MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1")
 mua_add_test(sdk_fix_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(runtime_config_tests headless
     DEFINES MUA_STAGED_CONFIG="$<TARGET_FILE_DIR:marvel_ultimate_alliance>/marvel_ultimate_alliance.toml"
@@ -71,8 +78,8 @@ mua_add_test(log_filter_tests runtime
     LIBS rex::runtime shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(physical_heap_stress runtime LIBS rex::runtime)
 mua_add_test(vmsum_tests runtime LIBS rex::runtime
-    DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/default"
-            MUA_PCH_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/generated/default/marvel_ultimate_alliance_pch.h")
+    DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
+            MUA_PCH_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold/marvel_ultimate_alliance_pch.h")
 mua_add_test(shutdown_order_tests runtime LIBS rex::runtime)
 mua_add_test(title_thread_shutdown_tests runtime LIBS rex::runtime)
 mua_add_test(filesystem_mapping_tests runtime LIBS rex::runtime)

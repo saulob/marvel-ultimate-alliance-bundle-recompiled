@@ -25,11 +25,13 @@ struct LauncherPaths {
   std::filesystem::path logs_dir;
   UserDataOutcome user_data_outcome = UserDataOutcome::kPortable;
   rex::ui::ImmediateDrawer* immediate_drawer = nullptr;  // for the achievement icons
-  std::string runtime_blocker;                           // why the runtime cannot start; empty when it can
+  std::function<std::string(const GameDefinition&)> runtime_blocker;  // why a game cannot start; empty when it can
 };
 
 struct LauncherCallbacks {
   std::function<void(const GameState&)> play;  // starts the selected game in this window
+  std::function<bool(const GameDefinition&)> other_executable;  // the game's module is in another program
+  std::function<bool(const GameState&)> start_other_executable;  // starts that program; false if it could not
   std::function<bool()> window_changed;     // the saved window size, monitor or VSync needs a new window
   std::function<bool()> restart;            // starts a new process with the saved settings; false if it could not
   std::function<void()> quit;

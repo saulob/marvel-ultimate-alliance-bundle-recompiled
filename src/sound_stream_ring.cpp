@@ -6,6 +6,8 @@
 #include <rex/hook.h>
 #include <rex/ppc.h>
 
+#include "guest_map.h"
+
 REX_EXTERN(__imp__KeResetEvent);
 
 namespace {
@@ -21,10 +23,10 @@ uint32_t LoadGuest32(uint8_t* base, uint32_t address) {
 
 }  // namespace
 
-// sub_8282DE78 is the sound streamer's inline ResetEvent (`stw 0,4(r3)`), which never reaches the kernel, so the host
+// This is the sound streamer's inline ResetEvent (`stw 0,4(r3)`), which never reaches the kernel, so the host
 // event the consumer waits on stays signaled and the wait returns with an empty ring. Only events the runtime already
 // shadows are reset on the host too.
-REX_HOOK_RAW(sub_8282DE78) {
+REX_HOOK_RAW(MUA_GUEST_RESET_EVENT) {
   const uint32_t object = ctx.r3.u32;
   ctx.r11.s64 = 0;
   std::memset(rex::memory::GuestPtr<uint8_t*>(base, object + 4), 0, sizeof(uint32_t));

@@ -7,13 +7,11 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 
+#include "guest_map.h"
 #include "settings.h"
 
 namespace mua {
 namespace {
-
-// The present callback's interval, in bits 8-11 of its argument.
-constexpr uint32_t kPresentIntervalMask = 0xF00;
 
 FrameLimiter g_limiter;
 std::mutex g_limiter_mutex;
@@ -37,16 +35,16 @@ void PaceGuestFrame() {
 }
 
 uint32_t PresentArgument(uint32_t argument) {
-  return PresentModeFor(ConfiguredFrameRate()) == PresentMode::kImmediate ? argument & ~kPresentIntervalMask
+  return PresentModeFor(ConfiguredFrameRate()) == PresentMode::kImmediate ? guest::ImmediatePresentArgument(argument)
                                                                           : argument;
 }
 
 }  // namespace mua
 
-// The D3D present callback: zero in the interval bits flips at once instead of at the next guest vblank, so rates
-// above 60 do not need a faster vblank.
-REX_EXTERN(__imp__sub_82497D00);
-REX_HOOK_RAW(sub_82497D00) {
+// The D3D present callback: dropping its interval flips at once instead of at the next guest vblank, so rates above 60
+// do not need a faster vblank.
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_PRESENT_CALLBACK));
+REX_HOOK_RAW(MUA_GUEST_PRESENT_CALLBACK) {
   ctx.r3.u32 = mua::PresentArgument(ctx.r3.u32);
-  __imp__sub_82497D00(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_PRESENT_CALLBACK)(ctx, base);
 }

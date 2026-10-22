@@ -1,4 +1,4 @@
-// Blocks the guest's busy-wait for the GPU fence word (BlockOnFence, sub_8248AF28) on the word's address instead of
+// Blocks the guest's busy-wait for the GPU fence word (BlockOnFence) on the word's address instead of
 // spinning. Only the begin/poll calls made from that function are touched; the other callers wait on other words.
 // The command processor wakes the waiters when it stores a guest word (patch 0089).
 
@@ -21,14 +21,13 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "guest_map.h"
+
 #if defined(_WIN32)
 
 namespace {
 
-constexpr uint32_t kBeginSite = 0x8248AFAC;
-constexpr uint32_t kPollSite = 0x8248AFB8;
 constexpr uint32_t kDeviceFenceOffset = 10768;
-constexpr uint32_t kDeviceFlagsOffset = 10813;
 constexpr uint8_t kDeviceStoppedFlag = 2;
 // Upper bound on one block, for fence writers that do not wake the waiter.
 constexpr uint32_t kBlockTimeoutMs = 2;
@@ -70,7 +69,7 @@ inline uint32_t LoadWord(const uint32_t* word) {
 }
 
 bool DeviceStopped(const uint8_t* base, uint32_t device) {
-  const uint32_t address = device + kDeviceFlagsOffset;
+  const uint32_t address = device + mua::guest::kDeviceFlagsOffset;
   return LoadBE<uint8_t>(base, address + HostOffset(address)) & kDeviceStoppedFlag;
 }
 
@@ -138,15 +137,15 @@ void BlockUntilFenceWritten(WaitState& wait) {
 
 }  // namespace
 
-REX_EXTERN(__imp__sub_824844C0);
-REX_HOOK_RAW(sub_824844C0) {
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_FENCE_BEGIN));
+REX_HOOK_RAW(MUA_GUEST_FENCE_BEGIN) {
   const uint32_t object = ctx.r3.u32;
   const uint32_t device = ctx.r4.u32;
   const uint32_t caller = uint32_t(ctx.lr);
-  __imp__sub_824844C0(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_FENCE_BEGIN)(ctx, base);
   WaitState& wait = t_wait;
   wait = {};
-  if (caller != kBeginSite || !g_blocking_enabled.load(std::memory_order_relaxed)) {
+  if (caller != mua::guest::kFenceBeginSite || !g_blocking_enabled.load(std::memory_order_relaxed)) {
     return;
   }
   if (ResolveFenceWord(base, device, wait)) {
@@ -157,12 +156,12 @@ REX_HOOK_RAW(sub_824844C0) {
   }
 }
 
-REX_EXTERN(__imp__sub_82484670);
-REX_HOOK_RAW(sub_82484670) {
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_FENCE_POLL));
+REX_HOOK_RAW(MUA_GUEST_FENCE_POLL) {
   const uint32_t object = ctx.r3.u32;
   const uint32_t caller = uint32_t(ctx.lr);
-  __imp__sub_82484670(ctx, base);
-  if (caller != kPollSite || !ctx.r3.u32) {
+  MUA_GUEST_ORIGINAL(MUA_GUEST_FENCE_POLL)(ctx, base);
+  if (caller != mua::guest::kFencePollSite || !ctx.r3.u32) {
     return;
   }
   WaitState& wait = t_wait;

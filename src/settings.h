@@ -50,7 +50,7 @@ inline std::filesystem::path PlayerSettingsPath(const std::filesystem::path& use
 // A game's own settings: only the values that differ from settings.toml.
 inline std::filesystem::path GameSettingsPath(const std::filesystem::path& user_data_root,
                                               const GameDefinition& game) {
-  return user_data_root / "games" / (std::string(game.key) + ".toml");
+  return user_data_root / std::string(game.data_folder) / "game_settings.toml";
 }
 void LoadPlayerSettings(const std::filesystem::path& path);
 

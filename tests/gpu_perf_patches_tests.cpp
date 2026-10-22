@@ -187,12 +187,25 @@ void TestCurrentReferencePatches() {
   CHECK(Has(wake, "EVENT_WRITE_SHD"));
 
   const std::string game = ReadFile(std::string(MUA_SRC_DIR) + "/gpu_fence_wait.cpp");
-  CHECK(Has(game, "constexpr uint32_t kBeginSite = 0x8248AFAC;"));
-  CHECK(Has(game, "constexpr uint32_t kPollSite = 0x8248AFB8;"));
+  CHECK(Has(game, "mua::guest::kFenceBeginSite"));
+  CHECK(Has(game, "mua::guest::kFencePollSite"));
   CHECK(Has(game, "constexpr uint32_t kDeviceFenceOffset = 10768;"));
-  CHECK(Has(game, "constexpr uint32_t kDeviceFlagsOffset = 10813;"));
-  CHECK(Has(game, "REX_HOOK_RAW(sub_824844C0)"));
-  CHECK(Has(game, "REX_HOOK_RAW(sub_82484670)"));
+  CHECK(Has(game, "mua::guest::kDeviceFlagsOffset"));
+  CHECK(Has(game, "REX_HOOK_RAW(MUA_GUEST_FENCE_BEGIN)"));
+  CHECK(Has(game, "REX_HOOK_RAW(MUA_GUEST_FENCE_POLL)"));
+
+  const std::string gold = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua1_gold.h");
+  CHECK(Has(gold, "#define MUA_GUEST_FENCE_BEGIN sub_824844C0"));
+  CHECK(Has(gold, "#define MUA_GUEST_FENCE_POLL sub_82484670"));
+  CHECK(Has(gold, "kFenceBeginSite = 0x8248AFAC;"));
+  CHECK(Has(gold, "kFencePollSite = 0x8248AFB8;"));
+  CHECK(Has(gold, "kDeviceFlagsOffset = 10813;"));
+  const std::string mua1 = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua1.h");
+  CHECK(Has(mua1, "#define MUA_GUEST_FENCE_BEGIN sub_8246C090"));
+  CHECK(Has(mua1, "#define MUA_GUEST_FENCE_POLL sub_8246C240"));
+  CHECK(Has(mua1, "kFenceBeginSite = 0x824728E0;"));
+  CHECK(Has(mua1, "kFencePollSite = 0x824728EC;"));
+  CHECK(Has(mua1, "kDeviceFlagsOffset = 10809;"));
 }
 
 void TestSubmissionDiagnostics() {
@@ -271,13 +284,13 @@ void TestPortedReferenceFixes() {
   // The mechanically matched memcpy/memset addresses (compiled-body inspection, not an existing reference file:
   // no reference repo's own crt_native hook is license-compatible to copy, see crt_native.cpp's header comment).
   const std::string crt = ReadFile(std::string(MUA_SRC_DIR) + "/crt_native.cpp");
-  CHECK(Has(crt, "REX_HOOK_RAW(sub_828564E0)"));
-  CHECK(Has(crt, "REX_HOOK_RAW(sub_82857020)"));
+  CHECK(Has(crt, "REX_HOOK_RAW(MUA_GUEST_MEMCPY)"));
+  CHECK(Has(crt, "REX_HOOK_RAW(MUA_GUEST_MEMSET)"));
   CHECK(Has(crt, "CopyOrderIsForwardSafe"));
   CHECK(Has(crt, "IsFlatHostRange"));
 
   const std::string mixer = ReadFile(std::string(MUA_SRC_DIR) + "/audio_mixer_priority.cpp");
-  CHECK(Has(mixer, "REX_HOOK_RAW(sub_824AF110)"));
+  CHECK(Has(mixer, "REX_HOOK_RAW(MUA_GUEST_AUDIO_RENDER)"));
   CHECK(Has(mixer, "rex::audio::RaiseAudioThreadPriority()"));
 
   const std::string pipeline_stats = ReadFile(dir + "0118-d3d12-pipeline-creation-stats.windows.patch");

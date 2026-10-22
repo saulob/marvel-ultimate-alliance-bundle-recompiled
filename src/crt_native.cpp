@@ -1,4 +1,4 @@
-// The C runtime's memcpy (sub_828564E0) and memset (sub_82857020). Found by compiled-body inspection (both have
+// The C runtime's memcpy and memset. Found by compiled-body inspection (both have
 // the standard PPC memcpy/memset calling convention: r3 destination, r4 source or fill byte, r5 size, with the
 // prologue stashing the original r3 at r1-8 for the epilogue to reload as the return value) with no existing hook
 // or patch covering either address. Interpreting them one PPC instruction at a time through the dispatcher is
@@ -15,6 +15,8 @@
 #include <rex/hook.h>
 #include <rex/system/mmio_handler.h>
 #include <rex/system/xmemory.h>
+
+#include "guest_map.h"
 
 namespace {
 
@@ -56,14 +58,14 @@ bool IsFlatHostRange(uint32_t address, uint32_t size) {
 }  // namespace
 
 // r3 destination, r4 source, r5 size; returns the destination, which the prologue also leaves at r1 - 8.
-REX_EXTERN(__imp__sub_828564E0);
-REX_HOOK_RAW(sub_828564E0) {
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_MEMCPY));
+REX_HOOK_RAW(MUA_GUEST_MEMCPY) {
   const uint32_t dest = ctx.r3.u32;
   const uint32_t source = ctx.r4.u32;
   const uint32_t size = ctx.r5.u32;
   if (!CopyOrderIsForwardSafe(dest, source, size) || !IsFlatHostRange(dest, size) ||
       !IsFlatHostRange(source, size)) {
-    __imp__sub_828564E0(ctx, base);
+    MUA_GUEST_ORIGINAL(MUA_GUEST_MEMCPY)(ctx, base);
     return;
   }
   *rex::memory::GuestPtr<uint64_t*>(base, ctx.r1.u32 - 8) = std::byteswap(ctx.r3.u64);
@@ -71,12 +73,12 @@ REX_HOOK_RAW(sub_828564E0) {
 }
 
 // r3 destination, r4 fill byte, r5 size; returns the destination.
-REX_EXTERN(__imp__sub_82857020);
-REX_HOOK_RAW(sub_82857020) {
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_MEMSET));
+REX_HOOK_RAW(MUA_GUEST_MEMSET) {
   const uint32_t dest = ctx.r3.u32;
   const uint32_t size = ctx.r5.u32;
   if (!IsFlatHostRange(dest, size)) {
-    __imp__sub_82857020(ctx, base);
+    MUA_GUEST_ORIGINAL(MUA_GUEST_MEMSET)(ctx, base);
     return;
   }
   std::memset(rex::memory::GuestPtr(base, dest), int(ctx.r4.u32 & 0xFF), size);

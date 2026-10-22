@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
@@ -30,6 +31,8 @@ struct GameDefinition {
   std::string_view legacy_folder;  // earlier folder of an install that is still recognized
   bool runtime_supported;
   PageMask pages;
+  std::string_view executable;  // the program holding this game's recompiled module; empty without a runtime
+  std::string_view data_folder;  // the game's folder under the user data root
 
   bool HasPage(LauncherPage page) const { return (pages & PageBit(page)) != 0; }
 };
@@ -46,6 +49,10 @@ const GameProfile& ProfileOf(const GameDefinition& game);
 const GameDefinition* GameForProfile(const GameProfile& profile);
 
 std::string GameWindowTitle(const GameDefinition& game);
+
+// Where the game keeps saves, profiles, achievement progress and its own settings. MUA 1 and Gold Edition share a
+// title ID, so each game has its own folder.
+std::filesystem::path GameUserDataRoot(const GameDefinition& game, const std::filesystem::path& user_data_root);
 
 // The game the runtime was started for; window titles follow it. Null until a verified game is started.
 void SetActiveGame(GameId id);

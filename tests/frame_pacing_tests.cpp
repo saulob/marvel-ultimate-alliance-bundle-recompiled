@@ -158,13 +158,19 @@ void TestReport() {
 void TestWiring() {
   std::printf("hooks\n");
   const std::string pacing = ReadSource("frame_pacing.cpp");
-  CHECK(Has(pacing, "REX_HOOK_RAW(sub_821BAE40)"));
+  CHECK(Has(pacing, "REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE)"));
   CHECK(Has(pacing, "kWorldDeltaOffset = 1000"));
   CHECK(Has(pacing, "DEBUG_SAULO frame pacing"));
-  CHECK(Has(pacing, "REX_HOOK_RAW(sub_821212A8)"));
+  CHECK(Has(pacing, "REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT)"));
   CHECK(Has(pacing, "kMaxReports = 12"));
   const std::string limiter = ReadSource("frame_limiter.cpp");
-  CHECK(Has(limiter, "REX_HOOK_RAW(sub_82497D00)"));
+  CHECK(Has(limiter, "REX_HOOK_RAW(MUA_GUEST_PRESENT_CALLBACK)"));
+  const std::string gold = ReadSource("guest_map_mua1_gold.h");
+  CHECK(Has(gold, "#define MUA_GUEST_WORLD_UPDATE sub_821BAE40"));
+  CHECK(Has(gold, "#define MUA_GUEST_OPTIONS_INIT sub_821212A8"));
+  const std::string mua1 = ReadSource("guest_map_mua1.h");
+  CHECK(Has(mua1, "#define MUA_GUEST_WORLD_UPDATE sub_821AA278"));
+  CHECK(Has(mua1, "#define MUA_GUEST_OPTIONS_INIT sub_82111298"));
   CHECK(!Has(limiter, "interpolat"));
   CHECK(!Has(limiter, "vsync"));
 }

@@ -254,9 +254,12 @@ void TestHotkeyWiring() {
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
   CHECK(Has(app, "mua::CreateFrameCounter(imgui_drawer())"));
 
-  CHECK(Has(host, "REX_HOOK_RAW(__imp__VdSwap)"));
-  CHECK(Has(host, "HostToGuestFunction<rex::kernel::xboxkrnl::VdSwap_entry>"));
+  const std::string swaps = ReadSource("swap_hooks.cpp");
+  CHECK(Has(swaps, "REX_HOOK_RAW(__imp__VdSwap)"));
+  CHECK(Has(swaps, "HostToGuestFunction<rex::kernel::xboxkrnl::VdSwap_entry>"));
+  CHECK(Has(swaps, "NoteGuestPresent();"));
   CHECK(Has(host, "CountGuestFrame();"));
+  CHECK(!Has(host, "guest_map.h"));
   CHECK(Has(host, "REXCVAR_GET(mua_show_fps)"));
 }
 

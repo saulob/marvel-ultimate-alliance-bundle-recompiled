@@ -303,7 +303,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     library_.RefreshFiles(selected_);
     LogGameFiles(Selected());
     if (!GameReady()) {
-      launcher_->SetStatus(PlayBlockedReason(Selected(), paths_.runtime_blocker), 6.0);
+      launcher_->SetStatus(PlayBlockedReason(Selected(), RuntimeBlocker()), 6.0);
       return;
     }
     if (!launcher_->Save()) {
@@ -318,6 +318,15 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     // The game builds its own runtime next; the one that read the achievements must be gone.
     achievements_.reset();
     achievements_tried_ = false;
+    if (cb_.other_executable && cb_.other_executable(*Selected().game)) {
+      if (cb_.start_other_executable && cb_.start_other_executable(Selected())) {
+        Finish(nullptr);
+        return;
+      }
+      starting_ = false;
+      launcher_->SetStatus("Could not start the game's program. Press Play to try again.", 8);
+      return;
+    }
     if (cb_.window_changed && cb_.window_changed()) {
       if (cb_.restart && cb_.restart()) {
         Finish(nullptr);
@@ -470,7 +479,11 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   const GameState& Selected() const { return library_.State(selected_); }
 
-  bool GameReady() const { return CanPlay(Selected(), paths_.runtime_blocker); }
+  std::string RuntimeBlocker() const {
+    return paths_.runtime_blocker ? paths_.runtime_blocker(*Selected().game) : std::string();
+  }
+
+  bool GameReady() const { return CanPlay(Selected(), RuntimeBlocker()); }
 
   void SelectGame(GameId game) {
     if (game == selected_) {
@@ -488,7 +501,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     achievements_tried_ = false;
     library_.RefreshFiles(game);
     library_.RescanPackages();
-    REXLOG_INFO("{}", SelectedGameLogText(Selected(), paths_.runtime_blocker));
+    REXLOG_INFO("{}", SelectedGameLogText(Selected(), RuntimeBlocker()));
     LogGameFiles(Selected());
   }
 
@@ -551,7 +564,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       if (GameReady()) {
         return trg::PlayCheck{};
       }
-      return trg::PlayCheck{false, PlayBlockedReason(Selected(), paths_.runtime_blocker), 0};
+      return trg::PlayCheck{false, PlayBlockedReason(Selected(), RuntimeBlocker()), 0};
     };
     return c;
   }
@@ -561,7 +574,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     if (install_.running()) {
       ui.StatusCard(trg::Status::kBusy, "Installing game files", nullptr, std::max(0.0f, install_.fraction()));
     } else {
-      const StatusText text = Describe(state, paths_.runtime_blocker);
+      const StatusText text = Describe(state, RuntimeBlocker());
       ui.StatusCard(text.status, text.title.c_str(), text.detail.c_str());
     }
     if (!install_failure_.empty()) {
@@ -847,7 +860,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     if (!achievements_ && !achievements_tried_) {
       achievements_tried_ = true;
       achievements_ =
-          std::make_unique<LauncherAchievements>(Selected().data_dir, paths_.user_dir, paths_.immediate_drawer);
+          std::make_unique<LauncherAchievements>(Selected().data_dir, GameUserDataRoot(*Selected().game, paths_.user_dir),
+                                                 paths_.immediate_drawer);
     }
     if (!achievements_ || !achievements_->ok()) {
       ui.Paragraph("The achievements could not be read from the game files.");

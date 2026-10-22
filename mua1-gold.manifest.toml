@@ -5,7 +5,7 @@ game_root = "game/extracted"
 
 [entrypoint]
 file_path = "game/extracted/default.xex"
-out_directory_path = "generated/default"
-includes = ["config/overrides.toml", "config/discovered-functions.toml"]
+out_directory_path = "generated/mua1-gold"
+includes = ["config/mua1-gold/overrides.toml", "config/mua1-gold/discovered-functions.toml"]
 setjmp_address = 0x8285E7F0
 longjmp_address = 0x8285E6D0

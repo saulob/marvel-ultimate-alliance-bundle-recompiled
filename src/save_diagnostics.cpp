@@ -7,14 +7,15 @@
 #include <rex/logging.h>
 #include <rex/ppc.h>
 
+#include "guest_map.h"
 #include "save_diagnostics.h"
 
-REX_EXTERN(__imp__sub_824CB818);
-REX_EXTERN(__imp__sub_824CB880);
-REX_EXTERN(__imp__sub_8247EDF0);
-REX_EXTERN(__imp__sub_8247EE58);
-REX_EXTERN(__imp__sub_8247EE60);
-REX_EXTERN(__imp__sub_8247F6C8);
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_PROFILE_READ));
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_PROFILE_WRITE));
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_CREATE));
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_CLOSE));
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_ENUMERATE));
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_DEVICE_SELECTOR));
 
 namespace {
 
@@ -55,11 +56,11 @@ void LogProfileRead(const uint8_t* memory, uint32_t user, uint32_t count, uint32
 
 }  // namespace
 
-REX_HOOK_RAW(sub_824CB818) {
+REX_HOOK_RAW(MUA_GUEST_PROFILE_READ) {
   const uint32_t user = ctx.r4.u32;
   const uint32_t count = ctx.r5.u32;
   const uint32_t buffer = ctx.r8.u32;
-  __imp__sub_824CB818(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_PROFILE_READ)(ctx, base);
   uint32_t status = ctx.r3.u32;
   if (status != kErrorInsufficientBuffer && status != kErrorSuccess && status != kErrorIoPending) {
     REXLOG_INFO("[DEBUG_SAULO][Profile] read failed: status={}", status);
@@ -68,7 +69,7 @@ REX_HOOK_RAW(sub_824CB818) {
   LogProfileRead(Memory(base), user, count, buffer, status);
 }
 
-REX_HOOK_RAW(sub_824CB880) {
+REX_HOOK_RAW(MUA_GUEST_PROFILE_WRITE) {
   static std::atomic<int> used{0};
   const uint32_t user = ctx.r3.u32;
   const uint32_t count = ctx.r4.u32;
@@ -79,11 +80,11 @@ REX_HOOK_RAW(sub_824CB880) {
     REXLOG_INFO("[DEBUG_SAULO][Profile] write: user={} setting={:08X} size={}", user,
                 mua::LoadBE32(memory, settings + 16), mua::LoadBE32(memory, settings + 32));
   }
-  __imp__sub_824CB880(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_PROFILE_WRITE)(ctx, base);
   if (log) REXLOG_INFO("[DEBUG_SAULO][Profile] write status={}", ctx.r3.u32);
 }
 
-REX_HOOK_RAW(sub_8247EDF0) {
+REX_HOOK_RAW(MUA_GUEST_CONTENT_CREATE) {
   static std::atomic<int> used{0};
   const uint32_t user = ctx.r3.u32;
   const uint32_t root = ctx.r4.u32;
@@ -97,43 +98,43 @@ REX_HOOK_RAW(sub_8247EDF0) {
                 GuestString(memory, root), mua::LoadBE32(memory, data), mua::LoadBE32(memory, data + 4),
                 mua::ContentFileName(memory, data), flags & 0xF);
   }
-  __imp__sub_8247EDF0(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_CREATE)(ctx, base);
   if (log) {
     REXLOG_INFO("[DEBUG_SAULO][Content] create status={} disposition={}", ctx.r3.u32,
                 disposition ? mua::LoadBE32(memory, disposition) : 0u);
   }
 }
 
-REX_HOOK_RAW(sub_8247EE58) {
+REX_HOOK_RAW(MUA_GUEST_CONTENT_CLOSE) {
   static std::atomic<int> used{0};
   const uint32_t root = ctx.r3.u32;
   const bool log = Budget(used, 24);
-  __imp__sub_8247EE58(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_CLOSE)(ctx, base);
   if (log) {
     REXLOG_INFO("[DEBUG_SAULO][Content] close: root={} status={}", GuestString(Memory(base), root), ctx.r3.u32);
   }
 }
 
-REX_HOOK_RAW(sub_8247EE60) {
+REX_HOOK_RAW(MUA_GUEST_CONTENT_ENUMERATE) {
   static std::atomic<int> used{0};
   const uint32_t user = ctx.r3.u32;
   const uint32_t device = ctx.r4.u32;
   const uint32_t type = ctx.r5.u32;
   const bool log = Budget(used, 12);
-  __imp__sub_8247EE60(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_ENUMERATE)(ctx, base);
   if (log) {
     REXLOG_INFO("[DEBUG_SAULO][Content] enumerate: user={} device={} type={} status={}", user, device, type,
                 ctx.r3.u32);
   }
 }
 
-REX_HOOK_RAW(sub_8247F6C8) {
+REX_HOOK_RAW(MUA_GUEST_DEVICE_SELECTOR) {
   static std::atomic<int> used{0};
   const uint32_t user = ctx.r3.u32;
   const uint32_t type = ctx.r4.u32;
   const uint32_t device = ctx.r7.u32;
   const bool log = Budget(used, 12);
-  __imp__sub_8247F6C8(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_DEVICE_SELECTOR)(ctx, base);
   if (log) {
     REXLOG_INFO("[DEBUG_SAULO][Content] device selector: user={} type={} status={} device={}", user, type, ctx.r3.u32,
                 device ? mua::LoadBE32(Memory(base), device) : 0u);

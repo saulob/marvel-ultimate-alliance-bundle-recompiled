@@ -4,7 +4,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
-// Codegen midasm hook before the XAudioSubmitRenderDriverFrame call in sub_824AF110 (config/overrides.toml).
+// Codegen midasm hook before the XAudioSubmitRenderDriverFrame call in the render-driver callback (overrides.toml).
 void mua_audio_pcm_firewall(PPCRegister& samples) {
   uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
   uint8_t* frame = rex::memory::GuestPtr<uint8_t*>(base, samples.u32);

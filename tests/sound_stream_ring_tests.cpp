@@ -80,6 +80,22 @@ int Run() {
   CHECK(Has(reset, "REX_STORE_U32(ctx.r3.u32 + 4, ctx.r11.u32)"));
   CHECK(!Has(reset, "__imp__"));
 
+  const fs::path mua1 = MUA_GENERATED_DIR_MUA1;
+  if (fs::exists(mua1 / "marvel_ultimate_alliance_recomp.33.cpp")) {
+    std::printf("the MUA 1 consumer has the same layout and its own reset function\n");
+    const std::string consumer1 = Function(mua1, "sub_823A8E58");
+    CHECK(!consumer1.empty());
+    CHECK(Has(consumer1, "REX_LOAD_U16(ctx.r31.u32 + 2094)"));
+    CHECK(Has(consumer1, "REX_LOAD_U16(ctx.r31.u32 + 2092)"));
+    CHECK(Has(consumer1, "REX_LOAD_U32(ctx.r11.u32 + 72)"));
+    CHECK(Has(consumer1, "REX_LOAD_U32(ctx.r11.u32 + 260)"));
+    CHECK(Has(consumer1, "REX_LOAD_U32(ctx.r31.u32 + 2116)"));
+    CHECK(Has(consumer1, "sub_8248C688(ctx, base);"));
+    const std::string reset1 = Function(mua1, "sub_8248C688");
+    CHECK(Has(reset1, "REX_STORE_U32(ctx.r3.u32 + 4, ctx.r11.u32)"));
+    CHECK(!Has(reset1, "__imp__"));
+  }
+
   std::printf("a guest-side reset must clear the host event\n");
   HostEvent event;
   event.Set();

@@ -1,6 +1,7 @@
 // DEBUG_SAULO: samples the delta the game's World::Update used, bounded to one log line per 10 seconds and at most
 // 12 lines, to check the frame model (variable delta from the wall clock) in a real run at each frame rate.
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -13,6 +14,7 @@
 
 #include "frame_limiter.h"
 #include "frame_pacing.h"
+#include "guest_map.h"
 #include "save_diagnostics.h"
 
 namespace {
@@ -29,6 +31,8 @@ int g_reports = 0;
 std::mutex g_present_mutex;
 mua::CallRateReport g_present_report;
 int g_present_reports = 0;
+double g_fastest_present_seconds = 1e9;
+thread_local double t_last_present_seconds = 0.0;
 
 double NowSeconds() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -36,10 +40,10 @@ double NowSeconds() {
 
 }  // namespace
 
-REX_EXTERN(__imp__sub_821BAE40);
-REX_HOOK_RAW(sub_821BAE40) {
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE));
+REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
   const uint32_t world = ctx.r3.u32;
-  __imp__sub_821BAE40(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
   if (g_reports >= kMaxReports) {
     return;
   }
@@ -55,10 +59,10 @@ REX_HOOK_RAW(sub_821BAE40) {
 }
 
 // DEBUG_SAULO: the game's max_fps option follows the launcher rate; the interval is stored at options + 24.
-REX_EXTERN(__imp__sub_821212A8);
-REX_HOOK_RAW(sub_821212A8) {
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_OPTIONS_INIT));
+REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT) {
   const uint32_t options = ctx.r3.u32;
-  __imp__sub_821212A8(ctx, base);
+  MUA_GUEST_ORIGINAL(MUA_GUEST_OPTIONS_INIT)(ctx, base);
   const int launcher = mua::ConfiguredFrameRate();
   const int effective = mua::GameMaxFpsFor(launcher);
   const float interval = mua::GameFrameInterval(effective);
@@ -75,9 +79,16 @@ void CountPresentForDiagnostics() {
   if (g_present_reports >= kMaxReports) {
     return;
   }
-  if (const auto rate = g_present_report.Add(NowSeconds())) {
+  const double now = NowSeconds();
+  if (t_last_present_seconds > 0.0) {
+    g_fastest_present_seconds = std::min(g_fastest_present_seconds, now - t_last_present_seconds);
+  }
+  t_last_present_seconds = now;
+  if (const auto rate = g_present_report.Add(now)) {
     ++g_present_reports;
-    REXLOG_INFO("DEBUG_SAULO frame pacing: presents/s={:.1f}", *rate);
+    REXLOG_INFO("DEBUG_SAULO frame pacing: presents/s={:.1f} | fastest present interval={:.1f} ms", *rate,
+                1000.0 * g_fastest_present_seconds);
+    g_fastest_present_seconds = 1e9;
   }
 }
 

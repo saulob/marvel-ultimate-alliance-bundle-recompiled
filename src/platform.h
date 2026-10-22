@@ -70,7 +70,10 @@ void InstallPreShowPlacement(const PreShowPlan& plan, const WindowPlacement& sav
 // Set once the window has been shown; empty when no window was placed.
 std::optional<PreShowResult> TakePreShowResult();
 
-// Starts a new instance with this run's command line plus `extra_args`.
-bool RelaunchSelf(std::wstring_view extra_args);
+// Starts `executable` with this run's command line plus `extra_args`.
+bool RelaunchExecutable(const std::filesystem::path& executable, std::wstring_view extra_args);
+
+// Hides the window at once, so nothing is left on screen while a started program prepares its own.
+void HideNativeWindow(void* native_handle);
 
 }  // namespace mua

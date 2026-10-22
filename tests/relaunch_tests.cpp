@@ -1,4 +1,4 @@
-// Relaunch tests: the launcher starts the same program again with the saved settings. Source checks; the restart
+// Relaunch tests: the launcher starts the game's own program with the saved settings. Source checks; the restart
 // itself needs a running game.
 // Run: mua_relaunch_tests
 
@@ -44,8 +44,10 @@ void TestWiring() {
   CHECK(!Has(platform, "popen("));
 
   const std::string app = ReadFile(std::string(MUA_SRC_DIR) + "/marvel_ultimate_alliance_app.h");
-  CHECK(Has(app, "mua::RelaunchSelf(L\"--mua_skip_launcher=true\")"));
-  CHECK(Has(app, "std::_Exit(0);"));  // the old process leaves once the new one is started
+  CHECK(!Has(app, "RelaunchSelf"));
+  CHECK(Has(app, "mua::RelaunchExecutable(executable, L\"--mua_skip_launcher=true\")"));
+  CHECK(Has(app, "mua::HideNativeWindow(window()->GetNativeWindowHandle())"));
+  CHECK(Has(app, "std::_Exit(0);"));  // the launcher leaves once the game's program is started
 }
 
 void TestSkipLauncherFlag() {
