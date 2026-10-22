@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "frame_limiter.h"
 #include "game_profile.h"
 
 namespace mua {
@@ -33,6 +34,7 @@ struct GameDefinition {
   PageMask pages;
   std::string_view executable;  // the program holding this game's recompiled module; empty without a runtime
   std::string_view data_folder;  // the game's folder under the user data root
+  FramePolicy frame_policy;      // how the launcher's frame rates meet the game's own timing
 
   bool HasPage(LauncherPage page) const { return (pages & PageBit(page)) != 0; }
 };

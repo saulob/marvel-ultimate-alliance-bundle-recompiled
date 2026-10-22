@@ -27,7 +27,6 @@
 
 namespace {
 
-constexpr uint32_t kDeviceFenceOffset = 10768;
 constexpr uint8_t kDeviceStoppedFlag = 2;
 // Upper bound on one block, for fence writers that do not wake the waiter.
 constexpr uint32_t kBlockTimeoutMs = 2;
@@ -86,7 +85,7 @@ bool ResolveFenceWord(const uint8_t* base, uint32_t device, WaitState& wait) {
   if (!device || DeviceStopped(base, device)) {
     return false;
   }
-  const uint32_t fence = LoadGuest32(base, device + kDeviceFenceOffset);
+  const uint32_t fence = LoadGuest32(base, device + mua::guest::kDeviceFenceOffset);
   if (!fence || (fence & 3)) {
     return false;
   }
@@ -167,7 +166,7 @@ REX_HOOK_RAW(MUA_GUEST_FENCE_POLL) {
   WaitState& wait = t_wait;
   if (!wait.word || wait.object != object || !g_blocking_enabled.load(std::memory_order_relaxed) ||
       DeviceStopped(base, wait.device) ||
-      LoadGuest32(base, wait.device + kDeviceFenceOffset) != wait.fence_address) {
+      LoadGuest32(base, wait.device + mua::guest::kDeviceFenceOffset) != wait.fence_address) {
     wait = {};
     return;
   }

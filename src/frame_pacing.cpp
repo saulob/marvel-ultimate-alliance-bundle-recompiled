@@ -19,8 +19,6 @@
 
 namespace {
 
-// World singleton fields: the delta in seconds of the last update.
-constexpr uint32_t kWorldDeltaOffset = 1000;
 constexpr int kMaxReports = 12;
 constexpr uint32_t kGameFrameIntervalOffset = 24;
 
@@ -47,28 +45,37 @@ REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
   if (g_reports >= kMaxReports) {
     return;
   }
-  const double delta = std::bit_cast<float>(mua::LoadBE32(base, world + kWorldDeltaOffset));
+  const double delta = std::bit_cast<float>(mua::LoadBE32(base, world + mua::guest::kWorldDeltaOffset));
   const double now =
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   std::lock_guard lock(g_report_mutex);
   if (const auto line = g_report.Add(delta, now)) {
     ++g_reports;
-    REXLOG_INFO("DEBUG_SAULO frame pacing: frame rate={} | {}", mua::FrameRateLabel(mua::ConfiguredFrameRate()),
-                *line);
+    REXLOG_INFO("DEBUG_SAULO frame pacing: frame rate={} | {}",
+                mua::FrameRateLabel(mua::ConfiguredFrameRate(), mua::RuntimeFramePolicy()), *line);
   }
 }
 
-// DEBUG_SAULO: the game's max_fps option follows the launcher rate; the interval is stored at options + 24.
+// DEBUG_SAULO: the game's max_fps option follows the launcher rate; the interval is stored at options + 24. A game
+// paced by the host limiter keeps its own interval.
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_OPTIONS_INIT));
 REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT) {
   const uint32_t options = ctx.r3.u32;
   MUA_GUEST_ORIGINAL(MUA_GUEST_OPTIONS_INIT)(ctx, base);
+  const mua::FramePolicy& policy = mua::RuntimeFramePolicy();
   const int launcher = mua::ConfiguredFrameRate();
-  const int effective = mua::GameMaxFpsFor(launcher);
+  if (policy.host_limiter) {
+    REXLOG_INFO("DEBUG_SAULO game max_fps: launcher={} game interval={:.6f} s (host limiter at {})",
+                mua::FrameRateLabel(launcher, policy),
+                std::bit_cast<float>(mua::LoadBE32(base, options + kGameFrameIntervalOffset)),
+                mua::ProjectLimiterRate(launcher, policy));
+    return;
+  }
+  const int effective = mua::GameMaxFpsFor(launcher, policy);
   const float interval = mua::GameFrameInterval(effective);
   mua::StoreBE32(base, options + kGameFrameIntervalOffset, std::bit_cast<uint32_t>(interval));
   REXLOG_INFO("DEBUG_SAULO game max_fps: launcher={} native={} effective={} interval={:.6f} s",
-              mua::FrameRateLabel(launcher), mua::kGameNativeMaxFps,
+              mua::FrameRateLabel(launcher, policy), policy.native_max_fps,
               effective > 0 ? std::to_string(effective) : std::string("Unlimited"), interval);
 }
 

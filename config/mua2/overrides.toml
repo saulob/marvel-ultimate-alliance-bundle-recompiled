@@ -1,0 +1,41 @@
+# Manual analysis fixes for Marvel Ultimate Alliance 2 (default.xex, title 4156082F)
+
+[functions]
+# Leaf bodies with no .pdata entry that follow a this-adjusting thunk (addi r3, r3, 12; b) and are reached only by its tail call.
+0x8258E118 = { end = 0x8258E1B4 }
+0x8258E1C0 = { end = 0x8258E25C }
+0x825C7308 = { end = 0x825C73B4 }
+0x8266FCF8 = { end = 0x8266FD94 }
+0x82693BB8 = { end = 0x82693C54 }
+0x82693EA0 = { end = 0x82693F3C }
+0x82693F48 = { end = 0x82693FF4 }
+0x826FECF8 = { end = 0x826FED94 }
+0x826FEDA0 = { end = 0x826FEE3C }
+0x82775F28 = { end = 0x82775FC4 }
+0x8279C578 = { end = 0x8279C614 }
+0x827F2F38 = { end = 0x827F2FD4 }
+0x827F2FE0 = { end = 0x827F307C }
+0x827F3088 = { end = 0x827F3124 }
+0x8289D558 = { end = 0x8289D5F4 }
+0x8289D600 = { end = 0x8289D69C }
+0x8289D810 = { end = 0x8289D8A8 }
+0x82941AA8 = { end = 0x82941B44 }
+
+# Vtable-slot thunks (lwz r11, 0(r3); lwz r10, slot(r11); mtctr r10; bctr) and a flag setter, reached by tail calls.
+0x82783A58 = { end = 0x82783A68 }
+0x82783A68 = { end = 0x82783A78 }
+0x82783A78 = { end = 0x82783A88 }
+0x82783A88 = { end = 0x82783AA4 }
+
+# Thunk (addi r3, r3, 8; b) reached by a tail call from the adjacent thunk.
+0x82A08CE0 = { end = 0x82A08CE8 }
+
+# Setter reached by a tail call from between two functions.
+0x82A22410 = { end = 0x82A22438 }
+
+# Sanitizes the mixed frame before XAudioSubmitRenderDriverFrame in sub_82A25E50; r4 is the frame address.
+[[midasm_hook]]
+address = 0x82A25F14
+name = "mua_audio_pcm_firewall"
+registers = ["r4"]
+after_instruction = false

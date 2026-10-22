@@ -111,18 +111,28 @@ void TestDefinitions() {
   CHECK(mua::GameWindowTitle(Gold()) == "Marvel Ultimate Alliance Gold Edition Recompiled");
   CHECK(mua::GameWindowTitle(Mua2()) == "Marvel Ultimate Alliance 2 Recompiled");
 
-  CHECK(Mua1().runtime_supported && Gold().runtime_supported && !Mua2().runtime_supported);
-  for (const mua::GameDefinition* game : {&Mua1(), &Gold()}) {
+  CHECK(Mua1().runtime_supported && Gold().runtime_supported && Mua2().runtime_supported);
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(game->HasPage(mua::LauncherPage::kDisplay) && game->HasPage(mua::LauncherPage::kGraphics) &&
           game->HasPage(mua::LauncherPage::kGameplay) && game->HasPage(mua::LauncherPage::kAchievements) &&
           game->HasPage(mua::LauncherPage::kControls));
   }
-  CHECK(!Mua2().HasPage(mua::LauncherPage::kDisplay) && !Mua2().HasPage(mua::LauncherPage::kGraphics) &&
-        !Mua2().HasPage(mua::LauncherPage::kGameplay) && !Mua2().HasPage(mua::LauncherPage::kAchievements) &&
-        !Mua2().HasPage(mua::LauncherPage::kControls));
   CHECK(Gold().executable == "marvel_ultimate_alliance_mua1_gold.exe" &&
-        Mua1().executable == "marvel_ultimate_alliance_mua1.exe");
-  CHECK(Mua2().executable.empty());
+        Mua1().executable == "marvel_ultimate_alliance_mua1.exe" &&
+        Mua2().executable == "marvel_ultimate_alliance_mua2.exe");
+  CHECK(Mua2().executable != Mua1().executable && Mua2().executable != Gold().executable);
+  CHECK(mua::ProfileOf(Mua2()).id == "mua2-x360" && mua::ProfileOf(Mua2()).title_id == 0x4156082F);
+}
+
+void TestFramePolicies() {
+  std::printf("each game's frame rate policy\n");
+  CHECK(Mua1().frame_policy.native == 30 && Gold().frame_policy.native == 30);
+  CHECK(!Mua1().frame_policy.host_limiter && !Gold().frame_policy.host_limiter);
+  CHECK(Mua2().frame_policy.native == 30 && Mua2().frame_policy.host_limiter);
+  CHECK(mua::FrameRateChoices(Mua2().frame_policy)[0] ==
+        std::make_pair(std::string("30"), std::string("30 - Original")));
+  CHECK(mua::FrameRateChoices(Mua1().frame_policy)[0] ==
+        std::make_pair(std::string("30"), std::string("30 - Original")));
 }
 
 void TestSaveRoots() {
@@ -254,8 +264,8 @@ void TestGoldLegacyFolder() {
   CHECK(!mua::CanPlay(library.State(mua::GameId::kMua1Gold), ""));
 }
 
-void TestOnlyGoldCanPlay() {
-  std::printf("installed MUA1 and Gold are playable; MUA2 has no runtime\n");
+void TestInstalledGamesCanPlay() {
+  std::printf("every installed game is playable by its own program\n");
   const fake::Scratch scratch("mua_library_play");
   fake::Install(scratch.games / "mua1", Mua1());
   fake::Install(scratch.games / "mua1-gold", Gold());
@@ -265,9 +275,9 @@ void TestOnlyGoldCanPlay() {
   const mua::GameState& mua2 = library.State(mua::GameId::kMua2);
   CHECK(mua1.check.state == mua::GameFileState::kValid && mua2.check.state == mua::GameFileState::kValid);
   CHECK(mua::AvailabilityOf(mua1, "") == mua::GameAvailability::kReady);
-  CHECK(mua::AvailabilityOf(mua2, "") == mua::GameAvailability::kRuntimeUnavailable);
-  CHECK(mua::CanPlay(mua1, "") && !mua::CanPlay(mua2, ""));
-  CHECK(!mua::CanPlay(mua1, "its program is missing"));
+  CHECK(mua::AvailabilityOf(mua2, "") == mua::GameAvailability::kReady);
+  CHECK(mua::CanPlay(mua1, "") && mua::CanPlay(mua2, ""));
+  CHECK(!mua::CanPlay(mua1, "its program is missing") && !mua::CanPlay(mua2, "its program is missing"));
   CHECK(mua::CanPlay(library.State(mua::GameId::kMua1Gold), ""));
   CHECK(!mua::CanPlay(library.State(mua::GameId::kMua1Gold), "recompiled code is missing"));
 }
@@ -277,6 +287,7 @@ void TestBootRouting() {
   const fake::Scratch scratch("mua_library_boot");
   fake::Install(scratch.games / "extracted", Gold());
   fake::Install(scratch.games / "mua1", Mua1());
+  fake::Install(scratch.games / "mua2", Mua2());
   const mua::GameLibrary library = FakeLibrary(scratch);
 
   const mua::GameState* gold = mua::BootableGame(library, mua::GameId::kMua1Gold, "");
@@ -285,10 +296,13 @@ void TestBootRouting() {
   const mua::GameState* mua1 = mua::BootableGame(library, mua::GameId::kMua1, "");
   CHECK(mua1 != nullptr && mua1->game == &Mua1() && mua1->data_dir == scratch.games / "mua1");
   CHECK(mua::BootableGame(library, mua::GameId::kMua1, "runs in its own program") == nullptr);
-  CHECK(mua::BootableGame(library, mua::GameId::kMua2, "") == nullptr);
+  const mua::GameState* mua2 = mua::BootableGame(library, mua::GameId::kMua2, "");
+  CHECK(mua2 != nullptr && mua2->game == &Mua2() && mua2->data_dir == scratch.games / "mua2");
+  CHECK(mua2->check.profile == &mua::ProfileOf(Mua2()));
+  CHECK(mua::BootableGame(library, mua::GameId::kMua2, "runs in its own program") == nullptr);
   CHECK(mua::BootableGame(library, mua::GameId::kMua1Gold, "recompiled code is missing") == nullptr);
 
-  CHECK(mua::LauncherWanted(mua::BootableGame(library, mua::GameId::kMua2, "") != nullptr, false, false, false));
+  CHECK(!mua::LauncherWanted(mua2 != nullptr, false, false, false));
   CHECK(!mua::LauncherWanted(gold != nullptr, false, false, false));
   CHECK(mua::LauncherWanted(gold != nullptr, false, true, false));
   CHECK(!mua::LauncherWanted(gold != nullptr, true, false, true));
@@ -323,6 +337,11 @@ void TestAvailabilityText() {
   missing.source_package = "game/mua2.iso";
   CHECK(mua::SelectedGameLogText(missing, "") ==
         "Selected game: Marvel Ultimate Alliance 2 | profile=none | installed=no | source=yes | supported=no");
+  mua::GameState mua2 = gold;
+  mua2.game = &Mua2();
+  mua2.check.profile = &mua::ProfileOf(Mua2());
+  CHECK(mua::SelectedGameLogText(mua2, "") ==
+        "Selected game: Marvel Ultimate Alliance 2 | profile=mua2-x360 | installed=yes | source=no | supported=yes");
 }
 
 void TestExplicitRoot() {
@@ -345,6 +364,7 @@ void TestExplicitRoot() {
 
 int main() {
   TestDefinitions();
+  TestFramePolicies();
   TestProfiles();
   TestSaveRoots();
   TestActiveGame();
@@ -354,7 +374,7 @@ int main() {
   TestSourcePackages();
   TestForeignFilesAreNotAnotherGame();
   TestGoldLegacyFolder();
-  TestOnlyGoldCanPlay();
+  TestInstalledGamesCanPlay();
   TestBootRouting();
   TestExplicitRoot();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);

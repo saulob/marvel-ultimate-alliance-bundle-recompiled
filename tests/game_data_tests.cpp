@@ -121,10 +121,12 @@ void TestDispatch() {
   std::printf("each game starts its own program, and only that one\n");
   CHECK(Mua1().executable == "marvel_ultimate_alliance_mua1.exe");
   CHECK(Gold().executable == "marvel_ultimate_alliance_mua1_gold.exe");
-  CHECK(Mua2().executable.empty() && !Mua2().runtime_supported);
+  CHECK(Mua2().executable == "marvel_ultimate_alliance_mua2.exe" && Mua2().runtime_supported);
   CHECK(Mua1().executable != Gold().executable);
+  CHECK(Mua2().executable != Mua1().executable && Mua2().executable != Gold().executable);
+  CHECK(mua::FindGame("mua2") == &Mua2() && Mua2().data_folder == "mua2");
   for (const mua::GameDefinition& game : mua::AllGames()) {
-    CHECK(game.executable != "marvel_ultimate_alliance.exe");
+    CHECK(game.executable != "marvel_ultimate_alliance.exe" && !game.executable.empty() && game.runtime_supported);
   }
 
   CHECK(mua::LauncherWanted(false, false, false, false));
@@ -141,6 +143,10 @@ void TestWiring() {
   CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance \"\")"));
   CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1)"));
   CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold)"));
+  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2)"));
+  const std::string modules = ReadSource("../cmake/rexglue.cmake");
+  CHECK(Has(modules, "mua_declare_module(mua2 marvel_ultimate_alliance_mua2_codegen)"));
+  CHECK(Has(ReadSource("../mua2.manifest.toml"), "out_directory_path = \"generated/mua2\""));
   CHECK(Has(cmake, "if(NOT \"${module_key}\" STREQUAL \"\")\n        target_sources(${target} PRIVATE ${MUA_RUNTIME_SOURCES})") ||
         Has(cmake, "if(NOT \"${module_key}\" STREQUAL \"\")\r\n        target_sources(${target} PRIVATE ${MUA_RUNTIME_SOURCES})"));
   const std::string rexglue = ReadSource("../cmake/rexglue.cmake");
@@ -152,7 +158,8 @@ void TestWiring() {
   const std::string host_sources = cmake.substr(host_list, runtime_list - host_list);
   for (const char* hook_file : {"frame_limiter.cpp", "frame_pacing.cpp", "gpu_fence_wait.cpp", "save_diagnostics.cpp",
                                 "swap_hooks.cpp", "audio_mixer_priority.cpp", "xaudio_worker_barrier.cpp",
-                                "sound_stream_ring.cpp", "crt_native.cpp", "indirect_tail_calls.cpp"}) {
+                                "sound_stream_ring.cpp", "crt_native.cpp", "indirect_tail_calls.cpp",
+                                "guest_hook_report.cpp"}) {
     CHECK(!Has(host_sources, hook_file));
   }
 
@@ -163,6 +170,13 @@ void TestWiring() {
   CHECK(Has(app, "std::string(game.game->executable)"));
   CHECK(!Has(app, "RelaunchSelf"));
   CHECK(!Has(app, "REX_DEV_FRAME_LOG"));
+
+  CHECK(Has(app, "paths.game_data_root = game.data_dir;"));
+  CHECK(Has(app, "paths.user_data_root = mua::GameUserDataRoot(*game.game, defaults.user_data_root);"));
+  CHECK(Has(app, "mua::SetActiveGame(verified->id);"));
+  CHECK(Has(app, "window()->SetTitle(mua::GameWindowTitle(*verified));"));
+  const std::string launcher = ReadSource("launcher.cpp");
+  CHECK(Has(launcher, "std::make_unique<LauncherAchievements>(Selected().data_dir, GameUserDataRoot(*Selected().game,"));
 
   const std::string image = ReadSource("recomp_image.h");
   CHECK(Has(image, "std::optional<GameId> game;"));

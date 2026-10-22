@@ -1,6 +1,8 @@
+#include <atomic>
 #include <cstdint>
 
 #include <rex/hook.h>
+#include <rex/logging.h>
 #include <rex/ppc.h>
 
 #include "frame_limiter.h"
@@ -41,6 +43,10 @@ REX_HOOK_RAW(__imp__VdSwap) {
   }
   rex::ppc::HostToGuestFunction<rex::kernel::xboxkrnl::VdSwap_entry>(ctx, base);
   if (!repeat) {
+    static std::atomic<bool> first_present{true};
+    if (first_present.exchange(false)) {
+      REXLOG_INFO("DEBUG_SAULO first guest present");
+    }
     mua::NoteGuestFrame();
     mua::CountPresentForDiagnostics();
     NoteGuestPresent();

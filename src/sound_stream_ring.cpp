@@ -8,6 +8,8 @@
 
 #include "guest_map.h"
 
+#if MUA_GUEST_HAS_RESET_EVENT
+
 REX_EXTERN(__imp__KeResetEvent);
 
 namespace {
@@ -38,3 +40,5 @@ REX_HOOK_RAW(MUA_GUEST_RESET_EVENT) {
   ctx.r3.u64 = object;
   ctx.r11.s64 = 0;
 }
+
+#endif  // MUA_GUEST_HAS_RESET_EVENT

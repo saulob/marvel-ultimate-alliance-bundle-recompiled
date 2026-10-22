@@ -19,6 +19,17 @@ inline constexpr int kGameNativeMaxFps = 31;
 inline constexpr int kGameMaxFpsCeiling = 60;
 inline constexpr int kFrameRates[] = {kNativeFrameRate, 60, 90, 120, 144, 165, 240, kFrameRateUnlimited};
 
+// How a game's own timing meets the launcher's rates. native is the rate labelled Original; with host_limiter the
+// host paces frames below and above it, otherwise the game's own max_fps interval does.
+struct FramePolicy {
+  int native;
+  int native_max_fps;
+  bool host_limiter;
+};
+
+inline constexpr FramePolicy kMua1FramePolicy{kNativeFrameRate, kGameNativeMaxFps, false};
+inline constexpr FramePolicy kMua2FramePolicy{kNativeFrameRate, 61, true};
+
 inline bool IsFrameRateChoice(int fps) {
   return std::find(std::begin(kFrameRates), std::end(kFrameRates), fps) != std::end(kFrameRates);
 }
@@ -37,21 +48,21 @@ inline int FrameRateFromText(const std::string& text) {
              : kFrameRateDefault;
 }
 
-inline bool IsHighFrameRate(int fps) {
-  return fps == kFrameRateUnlimited || fps > kNativeFrameRate;
+inline bool IsHighFrameRate(int fps, const FramePolicy& policy = kMua1FramePolicy) {
+  return fps == kFrameRateUnlimited || fps > policy.native;
 }
 
 // Original: the game flips at its guest vblank. Immediate: the game's present callback flips at once, clearing
 // the present-interval bits so a render loop faster than the guest vblank is not held back by it.
 enum class PresentMode { kOriginal, kImmediate };
 
-inline PresentMode PresentModeFor(int fps) {
-  return IsHighFrameRate(fps) ? PresentMode::kImmediate : PresentMode::kOriginal;
+inline PresentMode PresentModeFor(int fps, const FramePolicy& policy = kMua1FramePolicy) {
+  return IsHighFrameRate(fps, policy) ? PresentMode::kImmediate : PresentMode::kOriginal;
 }
 
 // The game's max_fps for a launcher rate; 0 is uncapped.
-inline int GameMaxFpsFor(int fps) {
-  return fps == kNativeFrameRate ? kGameNativeMaxFps : fps;
+inline int GameMaxFpsFor(int fps, const FramePolicy& policy = kMua1FramePolicy) {
+  return fps == policy.native ? policy.native_max_fps : fps;
 }
 
 // The game's frame interval, written over the one it derives itself, which drops to none above 60.
@@ -59,9 +70,10 @@ inline float GameFrameInterval(int max_fps) {
   return max_fps <= 0 ? 0.0f : 1.0f / float(max_fps);
 }
 
-// The game's own interval paces every rate, so the host limiter never waits.
-inline int ProjectLimiterRate(int) {
-  return kFrameRateUnlimited;
+// The rate the host limiter paces at. The native rate is left to the guest vblank; a game whose own interval paces
+// every rate needs no host wait.
+inline int ProjectLimiterRate(int fps, const FramePolicy& policy = kMua1FramePolicy) {
+  return policy.host_limiter && fps != policy.native ? fps : kFrameRateUnlimited;
 }
 
 // Half a frame at the cap, from 16 ms at 30 FPS down to 4 ms: the wait for pipelines prepared in the background
@@ -70,18 +82,18 @@ inline int ShaderWaitMsFor(int fps) {
   return fps > 0 ? std::clamp(500 / fps, 4, 16) : 4;
 }
 
-inline std::string FrameRateLabel(int fps) {
+inline std::string FrameRateLabel(int fps, const FramePolicy& policy = kMua1FramePolicy) {
   if (fps == kFrameRateUnlimited) {
     return "Unlimited";
   }
-  return fps == kNativeFrameRate ? "30 - Original" : std::to_string(fps);
+  return fps == policy.native ? std::to_string(fps) + " - Original" : std::to_string(fps);
 }
 
 // The launcher's choices: the stored value and its label.
-inline std::vector<std::pair<std::string, std::string>> FrameRateChoices() {
+inline std::vector<std::pair<std::string, std::string>> FrameRateChoices(const FramePolicy& policy = kMua1FramePolicy) {
   std::vector<std::pair<std::string, std::string>> choices;
   for (const int fps : kFrameRates) {
-    choices.emplace_back(std::to_string(fps), FrameRateLabel(fps));
+    choices.emplace_back(std::to_string(fps), FrameRateLabel(fps, policy));
   }
   return choices;
 }
@@ -129,6 +141,9 @@ void WaitUntil(LimiterClock::time_point deadline);
 
 // The selected frame rate, or the default when the cvar holds something else.
 int ConfiguredFrameRate();
+
+// The timing policy of the game this program carries.
+const FramePolicy& RuntimeFramePolicy();
 
 // Called by the swap hook before the game's swap: waits for the next frame time.
 void PaceGuestFrame();

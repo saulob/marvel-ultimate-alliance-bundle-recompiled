@@ -4,6 +4,8 @@
 
 // Codegen emits a dynamic call for the runtime-filled table that Gold Edition has to hook.
 #define MUA_GUEST_HAS_INDIRECT_TAIL_CALLS 0
+#define MUA_GUEST_HAS_AUDIO_BARRIER 1
+#define MUA_GUEST_HAS_RESET_EVENT 1
 
 #define MUA_GUEST_PRESENT_CALLBACK sub_8248A0A0
 #define MUA_GUEST_SWAP sub_8248A2B8
@@ -27,8 +29,10 @@ namespace mua::guest {
 
 inline constexpr uint32_t kFenceBeginSite = 0x824728E0;
 inline constexpr uint32_t kFencePollSite = 0x824728EC;
+inline constexpr uint32_t kDeviceFenceOffset = 10768;
 inline constexpr uint32_t kDeviceFlagsOffset = 10809;
 inline constexpr uint32_t kRepeatPresentSite = 0x82484914;
+inline constexpr uint32_t kWorldDeltaOffset = 1000;
 
 // The callback's argument: swap interval in the high half, scanline threshold in percent in the low half. No
 // interval and a threshold the scanline never passes release the swap at once.

@@ -27,6 +27,7 @@ constexpr std::array kGames = {
         .pages = kPlayablePages,
         .executable = "marvel_ultimate_alliance_mua1.exe",
         .data_folder = "mua1",
+        .frame_policy = kMua1FramePolicy,
     },
     GameDefinition{
         .id = GameId::kMua1Gold,
@@ -41,6 +42,7 @@ constexpr std::array kGames = {
         .pages = kPlayablePages,
         .executable = "marvel_ultimate_alliance_mua1_gold.exe",
         .data_folder = "mua1_gold",
+        .frame_policy = kMua1FramePolicy,
     },
     GameDefinition{
         .id = GameId::kMua2,
@@ -51,10 +53,11 @@ constexpr std::array kGames = {
         .package_label = "Xbox 360 disc",
         .profile_id = "mua2-x360",
         .legacy_folder = "",
-        .runtime_supported = false,
-        .pages = kInstallPages,
-        .executable = "",
+        .runtime_supported = true,
+        .pages = kPlayablePages,
+        .executable = "marvel_ultimate_alliance_mua2.exe",
         .data_folder = "mua2",
+        .frame_policy = kMua2FramePolicy,
     },
 };
 

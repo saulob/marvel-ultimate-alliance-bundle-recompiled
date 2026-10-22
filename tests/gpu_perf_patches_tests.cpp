@@ -189,7 +189,7 @@ void TestCurrentReferencePatches() {
   const std::string game = ReadFile(std::string(MUA_SRC_DIR) + "/gpu_fence_wait.cpp");
   CHECK(Has(game, "mua::guest::kFenceBeginSite"));
   CHECK(Has(game, "mua::guest::kFencePollSite"));
-  CHECK(Has(game, "constexpr uint32_t kDeviceFenceOffset = 10768;"));
+  CHECK(Has(game, "mua::guest::kDeviceFenceOffset"));
   CHECK(Has(game, "mua::guest::kDeviceFlagsOffset"));
   CHECK(Has(game, "REX_HOOK_RAW(MUA_GUEST_FENCE_BEGIN)"));
   CHECK(Has(game, "REX_HOOK_RAW(MUA_GUEST_FENCE_POLL)"));
@@ -206,6 +206,14 @@ void TestCurrentReferencePatches() {
   CHECK(Has(mua1, "kFenceBeginSite = 0x824728E0;"));
   CHECK(Has(mua1, "kFencePollSite = 0x824728EC;"));
   CHECK(Has(mua1, "kDeviceFlagsOffset = 10809;"));
+  CHECK(Has(mua1, "kDeviceFenceOffset = 10768;") && Has(gold, "kDeviceFenceOffset = 10768;"));
+  const std::string mua2 = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua2.h");
+  CHECK(Has(mua2, "#define MUA_GUEST_FENCE_BEGIN sub_829BB820"));
+  CHECK(Has(mua2, "#define MUA_GUEST_FENCE_POLL sub_829BB918"));
+  CHECK(Has(mua2, "kFenceBeginSite = 0x829C2CCC;"));
+  CHECK(Has(mua2, "kFencePollSite = 0x829C2CD8;"));
+  CHECK(Has(mua2, "kDeviceFenceOffset = 10896;"));
+  CHECK(Has(mua2, "kDeviceFlagsOffset = 10941;"));
 }
 
 void TestSubmissionDiagnostics() {

@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
   Builds build\marvel_ultimate_alliance.exe (the launcher), build\marvel_ultimate_alliance_mua1.exe (Marvel Ultimate
-  Alliance) and build\marvel_ultimate_alliance_mua1_gold.exe (Gold Edition) with Visual Studio's clang++, lld-link,
-  CMake and Ninja. Only -Run launches the launcher.
+  Alliance), build\marvel_ultimate_alliance_mua1_gold.exe (Gold Edition) and build\marvel_ultimate_alliance_mua2.exe
+  (Marvel Ultimate Alliance 2) with Visual Studio's clang++, lld-link, CMake and Ninja. Only -Run launches the
+  launcher.
 
 .DESCRIPTION
   One invocation does the whole incremental workflow: it sets up the ReXGlue SDK when it is missing, makes sure the
@@ -10,7 +11,7 @@
   build-patched-rexruntime.ps1 when they do not), generates the
   recompiled code of each game when its default.xex, manifest, an include or the rexglue tool changed (the build's
   codegen step decides), reconfigures CMake when the build settings or a generated\<game>\sources.cmake changed, and
-  builds the three programs.
+  builds the four programs.
 
 .EXAMPLE
   .\tools\build.ps1              # incremental build only
@@ -36,7 +37,8 @@ $SdkRoot = Join-Path $Root 'tools\rexglue\win-amd64'
 $GameData = Join-Path $Root 'game\extracted'
 $UserData = Join-Path $BuildDir 'user_data'
 $Exe = Join-Path $BuildDir 'marvel_ultimate_alliance.exe'
-$Programs = @('marvel_ultimate_alliance.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe')
+$Programs = @('marvel_ultimate_alliance.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
+    'marvel_ultimate_alliance_mua2.exe')
 # One recompiled module per game: the XEX it is generated from, that XEX's SHA-256 and the cache entry CMake records.
 $Modules = @(
     @{ Name = 'mua1-gold'; Xex = (Join-Path $Root 'game\extracted\default.xex')
@@ -44,7 +46,10 @@ $Modules = @(
        Cache = 'MUA_GENERATED_SOURCES_SHA256_MUA1_GOLD'; Sources = (Join-Path $Root 'generated\mua1-gold\sources.cmake') },
     @{ Name = 'mua1'; Xex = (Join-Path $Root 'game\mua1\default.xex')
        Sha256 = '44E5EEC135073224F2ABE09DEAEF765A6D130C81AA575D5C376338F470BEF92A'
-       Cache = 'MUA_GENERATED_SOURCES_SHA256_MUA1'; Sources = (Join-Path $Root 'generated\mua1\sources.cmake') }
+       Cache = 'MUA_GENERATED_SOURCES_SHA256_MUA1'; Sources = (Join-Path $Root 'generated\mua1\sources.cmake') },
+    @{ Name = 'mua2'; Xex = (Join-Path $Root 'game\mua2\default.xex')
+       Sha256 = '2613DC17AF39CEFACB7226855F62281D83B6E991C9D467D9E8EBB0A681AB0440'
+       Cache = 'MUA_GENERATED_SOURCES_SHA256_MUA2'; Sources = (Join-Path $Root 'generated\mua2\sources.cmake') }
 )
 $GameFolders = @('movies', 'sounds', 'z')
 
@@ -162,7 +167,7 @@ try {
     if (-not (Test-Configured)) { Invoke-Configure }
 
     Write-Host 'Generating recompiled code if needed...'
-    & $CMake --build $BuildDir --target marvel_ultimate_alliance_mua1_gold_codegen marvel_ultimate_alliance_mua1_codegen
+    & $CMake --build $BuildDir --target marvel_ultimate_alliance_mua1_gold_codegen marvel_ultimate_alliance_mua1_codegen marvel_ultimate_alliance_mua2_codegen
     if ($LASTEXITCODE) { throw "Codegen failed ($LASTEXITCODE); see generated\codegen.log or run tools\codegen.ps1" }
     if (-not (Test-Configured)) { Invoke-Configure }
 

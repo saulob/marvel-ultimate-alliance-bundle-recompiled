@@ -7,10 +7,11 @@ writes the HIGH-confidence ones to config/<game>/discovered-functions.toml.
   python tools/find-missing-functions.py --game mua1 --verify           check generated output
   python tools/find-missing-functions.py --game mua1 --self-test        check the decoder and the known manual cases
 
---game picks mua1 or mua1-gold (default). It needs a codegen run (generated/<game>) and the decompressed image
+--game picks mua1, mua1-gold (default) or mua2. It needs a codegen run (generated/<game>) and the decompressed image
 (build/dump_image.exe game/<folder> default.xex game/analysis/<image>):
   mua1-gold  game/extracted    default.image.bin
   mua1       game/mua1         mua1.image.bin
+  mua2       game/mua2         mua2.image.bin
 Method ported from the Hard Corps: Uprising recompilation project.
 """
 import bisect
@@ -39,6 +40,12 @@ GAMES = {
         sha256='b82fcd8cf3fbc879d35aae8ab312385b39ca65e2b2d47da706b92f34b3c08c75',
         rdata=(0x82000400, 0x820D9F60), pdata=(0x820DA000, 0x82108A98),
         code=((0x82110000, 0x8284AF70), (0x8284BC00, 0x828518CC)), data=(0x82860000, 0x82C0E89C),
+        manual_only=set()),
+    'mua2': dict(
+        image='mua2.image.bin', size=0x1420000,
+        sha256='769d4ee9ba1c9b97af01bd324823b0ded12dc02377395583b62e43bf70be60af',
+        rdata=(0x82000400, 0x8219E7B8), pdata=(0x8219E800, 0x821DD728),
+        code=((0x821F0000, 0x82AD209C), (0x82AD3000, 0x82AE2B70)), data=(0x82AF0400, 0x8337421C),
         manual_only=set()),
 }
 

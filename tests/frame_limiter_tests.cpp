@@ -72,6 +72,27 @@ void TestChoices() {
   CHECK(choices[7] == std::make_pair(std::string("0"), std::string("Unlimited")));
 }
 
+void TestMua2Choices() {
+  std::printf("MUA 2 frame rate choices\n");
+  const auto choices = FrameRateChoices(kMua2FramePolicy);
+  CHECK(choices.size() == std::size(kFrameRates));
+  CHECK(choices[0] == std::make_pair(std::string("30"), std::string("30 - Original")));
+  CHECK(choices[1] == std::make_pair(std::string("60"), std::string("60")));
+  CHECK(choices[2] == std::make_pair(std::string("90"), std::string("90")));
+  CHECK(choices[7] == std::make_pair(std::string("0"), std::string("Unlimited")));
+  CHECK(FrameRateLabel(30, kMua2FramePolicy) == "30 - Original" && FrameRateLabel(60, kMua2FramePolicy) == "60");
+  CHECK(kMua2FramePolicy.native == 30 && kMua1FramePolicy.native == 30);
+  CHECK(kMua2FramePolicy.native_max_fps == 61 && kMua2FramePolicy.host_limiter && !kMua1FramePolicy.host_limiter);
+  CHECK(!IsHighFrameRate(30, kMua2FramePolicy));
+  for (const int rate : {60, 90, 120, 240, kFrameRateUnlimited}) {
+    CHECK(IsHighFrameRate(rate, kMua2FramePolicy));
+  }
+  CHECK(ProjectLimiterRate(30, kMua2FramePolicy) == kFrameRateUnlimited && ProjectLimiterRate(60, kMua2FramePolicy) == 60);
+  CHECK(ProjectLimiterRate(kFrameRateUnlimited, kMua2FramePolicy) == kFrameRateUnlimited);
+  CHECK(kMua1FramePolicy.native_max_fps == 31 && !kMua1FramePolicy.host_limiter);
+  CHECK(GameMaxFpsFor(30, kMua2FramePolicy) == 61 && GameMaxFpsFor(60, kMua2FramePolicy) == 60);
+}
+
 void TestStoredText() {
   std::printf("stored frame rate text\n");
   CHECK(FrameRateFromText("60") == 60);
@@ -207,7 +228,9 @@ void TestWiring() {
   CHECK(!Has(limiter, "#if MUA_GUEST_HAS_PRESENT_CALLBACK"));
   CHECK(Has(limiter, "mua::PresentArgument(ctx.r3.u32)"));
   CHECK(Has(limiter, "guest::ImmediatePresentArgument(argument)"));
-  CHECK(Has(limiter, "PresentModeFor(ConfiguredFrameRate())"));
+  CHECK(Has(limiter, "PresentModeFor(ConfiguredFrameRate(), RuntimeFramePolicy())"));
+  CHECK(Has(limiter, "ProjectLimiterRate(ConfiguredFrameRate(), RuntimeFramePolicy())"));
+  CHECK(Has(limiter, "Game(*game).frame_policy"));
   CHECK(Has(limiter, "REXCVAR_GET(mua_frame_rate)"));
 
   const std::string host = ReadSource("swap_hooks.cpp");
@@ -231,8 +254,13 @@ void TestWiring() {
   CHECK(Has(settings, "FrameRateFromText(frame_rate)"));
 
   const std::string launcher = ReadSource("launcher.cpp");
-  CHECK(Has(launcher, "ui.Choice(\"Frame rate\", kFrameRateHelp, \"mua_frame_rate\", \"60\""));
-  CHECK(Has(launcher, "30 FPS is the original game rate."));
+  CHECK(Has(launcher, "ui.Choice(\"Frame rate\", frame_rate_help.c_str(), \"mua_frame_rate\", \"60\""));
+  CHECK(Has(launcher, "FrameRateChoices(policy)"));
+  CHECK(Has(launcher, " FPS is the original game rate."));
+  const std::string mua2 = ReadSource("guest_map_mua2.h");
+  CHECK(Has(mua2, "#define MUA_GUEST_PRESENT_CALLBACK sub_829C6410"));
+  CHECK(Has(mua2, "#define MUA_GUEST_SWAP sub_829C6A98"));
+  CHECK(Has(mua2, "kRepeatPresentSite = 0x829D81E0"));
 
 }
 
@@ -240,6 +268,7 @@ void TestWiring() {
 
 int main() {
   TestChoices();
+  TestMua2Choices();
   TestStoredText();
   TestPolicy();
   TestGameMaxFps();

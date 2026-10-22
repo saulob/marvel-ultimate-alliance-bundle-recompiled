@@ -18,6 +18,8 @@
 #include "guest_map.h"
 #include "xaudio_barrier.h"
 
+#if MUA_GUEST_HAS_AUDIO_BARRIER
+
 bool mua_audio_barrier_escape();
 
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_AUDIO_BARRIER));
@@ -119,3 +121,5 @@ REX_HOOK_RAW(MUA_GUEST_AUDIO_BARRIER) {
     WaitForRelease(*barrier, arrival.round);
   }
 }
+
+#endif  // MUA_GUEST_HAS_AUDIO_BARRIER

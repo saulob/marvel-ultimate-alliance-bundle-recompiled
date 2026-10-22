@@ -6,8 +6,10 @@
 #include "guest_map_mua1_gold.h"
 #elif defined(MUA_RUNTIME_MUA1)
 #include "guest_map_mua1.h"
+#elif defined(MUA_RUNTIME_MUA2)
+#include "guest_map_mua2.h"
 #else
-#error "No recompiled module is selected: define MUA_RUNTIME_MUA1 or MUA_RUNTIME_MUA1_GOLD"
+#error "No recompiled module is selected: define MUA_RUNTIME_MUA1, MUA_RUNTIME_MUA1_GOLD or MUA_RUNTIME_MUA2"
 #endif
 
 // The recompiled original of a hooked guest function.

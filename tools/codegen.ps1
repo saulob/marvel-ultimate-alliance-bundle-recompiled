@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
   Checks a game's default.xex against the supported build and generates its recompiled C++ sources into
-  generated\<game>. Without -Game it generates both games.
+  generated\<game>. Without -Game it generates every game.
 #>
 param(
-    [ValidateSet('all', 'mua1', 'mua1-gold')]
+    [ValidateSet('all', 'mua1', 'mua1-gold', 'mua2')]
     [string]$Game = 'all'
 )
 $ErrorActionPreference = 'Stop'
@@ -14,7 +14,9 @@ $games = @(
     @{ Name = 'mua1-gold'; Xex = 'game\extracted\default.xex'
        Sha256 = '06D1D7811E1668A5C16AFEF5102CA59B00684DC1EA6184849418F59F022B86B7' },
     @{ Name = 'mua1'; Xex = 'game\mua1\default.xex'
-       Sha256 = '44E5EEC135073224F2ABE09DEAEF765A6D130C81AA575D5C376338F470BEF92A' }
+       Sha256 = '44E5EEC135073224F2ABE09DEAEF765A6D130C81AA575D5C376338F470BEF92A' },
+    @{ Name = 'mua2'; Xex = 'game\mua2\default.xex'
+       Sha256 = '2613DC17AF39CEFACB7226855F62281D83B6E991C9D467D9E8EBB0A681AB0440' }
 )
 
 $rexglue = Join-Path $root 'tools\rexglue\win-amd64\bin\rexglue.exe'

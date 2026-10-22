@@ -64,9 +64,11 @@ constexpr ImGuiConfigFlags kNavFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGu
 // Marvel red over the Midnight background.
 const ImVec4 kAccent = ImVec4(0.93f, 0.15f, 0.17f, 1.0f);
 
-constexpr const char* kFrameRateHelp =
-    "30 FPS is the original game rate. Higher rates speed up gameplay and rendering together, not just "
-    "presentation; VSync still applies.";
+std::string FrameRateHelp(const FramePolicy& policy) {
+  return std::to_string(policy.native) +
+         " FPS is the original game rate. Higher rates speed up gameplay and rendering together, not just "
+         "presentation; VSync still applies.";
+}
 
 constexpr const char* kAuthorUrl = "https://github.com/saulob";
 
@@ -683,10 +685,12 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   void PageGameplay(trg::Ui& ui) {
     std::vector<trg::Option> frame_rates;
-    for (auto& [value, label] : FrameRateChoices()) {
+    const FramePolicy& policy = Selected().game->frame_policy;
+    for (auto& [value, label] : FrameRateChoices(policy)) {
       frame_rates.push_back({std::move(value), std::move(label)});
     }
-    ui.Choice("Frame rate", kFrameRateHelp, "mua_frame_rate", "60", frame_rates, 4);
+    const std::string frame_rate_help = FrameRateHelp(policy);
+    ui.Choice("Frame rate", frame_rate_help.c_str(), "mua_frame_rate", "60", frame_rates, 4);
     const std::string fps_help =
         "Shows the game's frame rate in the window title: " + GameWindowTitle(*Selected().game) + " | FPS: 60.00";
     ui.Toggle("Frame rate in title", fps_help.c_str(), "mua_show_fps", true, "Off", "On");

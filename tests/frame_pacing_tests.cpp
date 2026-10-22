@@ -86,6 +86,42 @@ void TestGameSpeedAtEveryRate() {
   CHECK(std::fabs(GameSecondsPlayed(0.1, 10.0) - 10.0) < 1e-9);
 }
 
+// Marvel Ultimate Alliance 2 runs at every second vblank on the native rate and on the host limiter's schedule elsewhere.
+void TestMua2GameSpeedAtEveryRate() {
+  std::printf("MUA 2 game speed at every frame rate\n");
+  const FramePolicy& policy = kMua2FramePolicy;
+  CHECK(kMua2WorldDeltaMin == 1e-5 && WorldDelta(0.0, kMua2WorldDeltaMin) == kMua2WorldDeltaMin);
+  CHECK(WorldDelta(0.5, kMua2WorldDeltaMin) == kWorldDeltaMax);
+  for (const int rate : kFrameRates) {
+    const int limiter_rate = ProjectLimiterRate(rate, policy);
+    // The native rate presents at the guest vblank; an unlimited rate is bound by the render loop alone.
+    const int presented = rate == policy.native ? 30 : rate == kFrameRateUnlimited ? 1000 : rate;
+    FrameLimiter limiter;
+    double now = 100.0;
+    double game_seconds = 0.0;
+    double previous = now;
+    for (int frame = 0; frame < 3000; ++frame) {
+      now += (frame % 97 == 0 ? 0.004 : 0.0005);
+      if (const auto deadline = limiter.Next(limiter_rate == 0 ? presented : limiter_rate, At(now))) {
+        now = Seconds(deadline->time_since_epoch());
+      }
+      game_seconds += WorldDelta(now - previous, kMua2WorldDeltaMin);
+      previous = now;
+    }
+    CHECK(std::fabs(game_seconds - (now - 100.0)) < 1e-6);
+    CHECK(std::fabs(GameSecondsPlayed(1.0 / presented, 10.0, kMua2WorldDeltaMin) - 10.0) < 1e-9);
+  }
+  CHECK(ProjectLimiterRate(30, policy) == kFrameRateUnlimited);
+  for (const int rate : {60, 90, 120, 144, 165, 240}) {
+    CHECK(ProjectLimiterRate(rate, policy) == rate);
+  }
+  CHECK(ProjectLimiterRate(kFrameRateUnlimited, policy) == kFrameRateUnlimited);
+  CHECK(PresentModeFor(30, policy) == PresentMode::kOriginal);
+  for (const int rate : {60, 90, 120, 144, 165, 240, kFrameRateUnlimited}) {
+    CHECK(PresentModeFor(rate, policy) == PresentMode::kImmediate);
+  }
+}
+
 void TestLimiterCadence() {
   std::printf("limiter cadence at the fixed rates\n");
   for (const int rate : {30, 60, 90, 120, 144, 165, 240}) {
@@ -159,7 +195,7 @@ void TestWiring() {
   std::printf("hooks\n");
   const std::string pacing = ReadSource("frame_pacing.cpp");
   CHECK(Has(pacing, "REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE)"));
-  CHECK(Has(pacing, "kWorldDeltaOffset = 1000"));
+  CHECK(Has(pacing, "mua::guest::kWorldDeltaOffset"));
   CHECK(Has(pacing, "DEBUG_SAULO frame pacing"));
   CHECK(Has(pacing, "REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT)"));
   CHECK(Has(pacing, "kMaxReports = 12"));
@@ -168,9 +204,16 @@ void TestWiring() {
   const std::string gold = ReadSource("guest_map_mua1_gold.h");
   CHECK(Has(gold, "#define MUA_GUEST_WORLD_UPDATE sub_821BAE40"));
   CHECK(Has(gold, "#define MUA_GUEST_OPTIONS_INIT sub_821212A8"));
+  CHECK(Has(gold, "kWorldDeltaOffset = 1000"));
   const std::string mua1 = ReadSource("guest_map_mua1.h");
   CHECK(Has(mua1, "#define MUA_GUEST_WORLD_UPDATE sub_821AA278"));
   CHECK(Has(mua1, "#define MUA_GUEST_OPTIONS_INIT sub_82111298"));
+  CHECK(Has(mua1, "kWorldDeltaOffset = 1000"));
+  const std::string mua2 = ReadSource("guest_map_mua2.h");
+  CHECK(Has(mua2, "#define MUA_GUEST_WORLD_UPDATE sub_826011D8"));
+  CHECK(Has(mua2, "#define MUA_GUEST_OPTIONS_INIT sub_82533548"));
+  CHECK(Has(mua2, "kWorldDeltaOffset = 1676"));
+  CHECK(Has(pacing, "policy.host_limiter"));
   CHECK(!Has(limiter, "interpolat"));
   CHECK(!Has(limiter, "vsync"));
 }
@@ -180,6 +223,7 @@ void TestWiring() {
 int main() {
   TestWorldDelta();
   TestGameSpeedAtEveryRate();
+  TestMua2GameSpeedAtEveryRate();
   TestLimiterCadence();
   TestReport();
   TestWiring();

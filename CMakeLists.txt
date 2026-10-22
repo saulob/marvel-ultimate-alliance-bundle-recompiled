@@ -208,6 +208,7 @@ set(MUA_RUNTIME_SOURCES
     src/frame_limiter.cpp
     src/frame_pacing.cpp
     src/gpu_fence_wait.cpp
+    src/guest_hook_report.cpp
     src/indirect_tail_calls.cpp
     src/save_diagnostics.cpp
     src/sound_stream_ring.cpp
@@ -288,6 +289,7 @@ endfunction()
 mua_add_game_executable(marvel_ultimate_alliance "")
 mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1)
 mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold)
+mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2)
 
 add_custom_target(mua_rexglue_staging ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE:rex::gpu-xenos>"
@@ -296,7 +298,7 @@ add_custom_target(mua_rexglue_staging ALL
     VERBATIM
 )
 add_dependencies(mua_rexglue_staging marvel_ultimate_alliance marvel_ultimate_alliance_mua1
-                 marvel_ultimate_alliance_mua1_gold)
+                 marvel_ultimate_alliance_mua1_gold marvel_ultimate_alliance_mua2)
 
 # Extracts an Xbox 360 disc image: tools/extract-disc.ps1
 add_executable(extract_disc tools/extract_disc/main.cpp)

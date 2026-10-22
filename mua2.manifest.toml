@@ -1,0 +1,11 @@
+[project]
+name = "marvel_ultimate_alliance"
+sdk_version = "0.10.0"
+game_root = "game/mua2"
+
+[entrypoint]
+file_path = "game/mua2/default.xex"
+out_directory_path = "generated/mua2"
+includes = ["config/mua2/overrides.toml", "config/mua2/discovered-functions.toml"]
+setjmp_address = 0x82A6CB60
+longjmp_address = 0x82A69B20

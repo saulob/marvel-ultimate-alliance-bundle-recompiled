@@ -13,17 +13,19 @@ namespace mua {
 // is followed by one render and a faster presentation changes how often the game steps, not how fast it runs.
 inline constexpr double kWorldDeltaMin = 1e-6;
 inline constexpr double kWorldDeltaMax = 0.1;
+// Marvel Ultimate Alliance 2 floors the same delta at 10 microseconds.
+inline constexpr double kMua2WorldDeltaMin = 1e-5;
 // Outside a map the game spins until 1/max_fps has passed; max_fps defaults to 31.
 inline constexpr double kMenuFrameInterval = 1.0 / 31.0;
 
-inline double WorldDelta(double wall_clock_interval) {
-  return std::clamp(wall_clock_interval, kWorldDeltaMin, kWorldDeltaMax);
+inline double WorldDelta(double wall_clock_interval, double minimum = kWorldDeltaMin) {
+  return std::clamp(wall_clock_interval, minimum, kWorldDeltaMax);
 }
 
 // Game time that passes while frames of the given wall-clock length are played.
-inline double GameSecondsPlayed(double frame_interval, double real_seconds) {
+inline double GameSecondsPlayed(double frame_interval, double real_seconds, double minimum = kWorldDeltaMin) {
   const double frames = real_seconds / frame_interval;
-  return frames * WorldDelta(frame_interval);
+  return frames * WorldDelta(frame_interval, minimum);
 }
 
 // DEBUG_SAULO: a line about the world updates every kReportSeconds, to check the frame model against a real run.

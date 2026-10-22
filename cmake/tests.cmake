@@ -32,7 +32,8 @@ mua_add_test(window_placement_tests headless)
 mua_add_test(launcher_quit_tests headless)
 mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
-mua_add_test(guest_map_tests headless)
+mua_add_test(guest_map_tests headless
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(gpu_perf_patches_tests headless)
 mua_add_test(d3d12_async_submission_tests headless)
 mua_add_test(d3d12_sampler_memo_tests headless)
@@ -61,10 +62,12 @@ mua_add_test(audio_pcm_firewall_tests headless)
 mua_add_test(xaudio_barrier_tests headless)
 mua_add_test(sound_stream_ring_tests headless
     DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
-            MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1")
+            MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1"
+            MUA_GENERATED_DIR_MUA2="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua2")
 mua_add_test(save_diagnostics_tests headless
     DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
-            MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1")
+            MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1"
+            MUA_GENERATED_DIR_MUA2="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua2")
 mua_add_test(sdk_fix_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(runtime_config_tests headless
     DEFINES MUA_STAGED_CONFIG="$<TARGET_FILE_DIR:marvel_ultimate_alliance>/marvel_ultimate_alliance.toml"

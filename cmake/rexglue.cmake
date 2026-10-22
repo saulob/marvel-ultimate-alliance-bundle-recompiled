@@ -51,6 +51,7 @@ endfunction()
 
 mua_declare_module(mua1-gold marvel_ultimate_alliance_mua1_gold_codegen)
 mua_declare_module(mua1 marvel_ultimate_alliance_mua1_codegen)
+mua_declare_module(mua2 marvel_ultimate_alliance_mua2_codegen)
 
 function(mua_setup_target target_name module_key)
     string(TOUPPER "${module_key}" _id)

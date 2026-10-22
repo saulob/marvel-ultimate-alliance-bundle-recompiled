@@ -128,6 +128,22 @@ void TestGeneratedStorageMua1(const fs::path& generated) {
   CHECK(Has(Function(generated, "sub_82467240"), "__imp__XamShowDeviceSelectorUI(ctx, base);"));
 }
 
+void TestGeneratedStorageMua2(const fs::path& generated) {
+  std::printf("the MUA 2 wrappers are the same XAM imports at their own addresses\n");
+  CHECK(Has(Function(generated, "sub_82A4EF08"), "__imp__XamUserReadProfileSettings(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_82A4EF70"), "__imp__XamUserWriteProfileSettings(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_829AC488"), "__imp__XamContentCreateEx(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_829AC518"), "__imp__XamContentClose(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_829AC528"), "__imp__XamContentCreateEnumerator(ctx, base);"));
+  CHECK(Has(Function(generated, "sub_829ACA80"), "__imp__XamShowDeviceSelectorUI(ctx, base);"));
+
+  std::printf("the MUA 2 profile read asks for the same title-specific settings\n");
+  const std::string reader = Function(generated, "sub_8293EF70");
+  CHECK(Has(reader, "ctx.r22.u64 = ctx.r9.u64 | 16381;") || Has(reader, "| 16381;"));
+  CHECK(Has(reader, "ctx.r9.s64 = 1676148736;") || Has(reader, "1676148736"));
+  CHECK(Has(reader, "sub_82A4EF08(ctx, base);"));
+}
+
 }  // namespace
 
 int Run() {
@@ -141,6 +157,10 @@ int Run() {
   const fs::path mua1 = MUA_GENERATED_DIR_MUA1;
   if (fs::exists(mua1 / "marvel_ultimate_alliance_recomp.33.cpp")) {
     TestGeneratedStorageMua1(mua1);
+  }
+  const fs::path mua2 = MUA_GENERATED_DIR_MUA2;
+  if (fs::exists(mua2 / "marvel_ultimate_alliance_recomp.33.cpp")) {
+    TestGeneratedStorageMua2(mua2);
   }
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

@@ -93,6 +93,32 @@ void TestCheck(const std::filesystem::path& scratch) {
   Expect(mua::CheckGameFiles(dir, profiles).state == mua::GameFileState::kUnrecognized, "garbage is unrecognized");
 }
 
+void TestMua2Profile(const std::filesystem::path& scratch) {
+  const mua::GameProfile* profile = mua::ProfileById("mua2-x360");
+  Expect(profile != nullptr, "MUA2 profile is known");
+  if (!profile) {
+    return;
+  }
+  Expect(profile->title_id == 0x4156082F && profile->media_id == 0x39B3E2C9, "MUA2 title and media ids");
+  Expect(profile->pe_name == "Alliance-xenon-fin.pe" && profile->xex_size == 12664832, "MUA2 pe name and size");
+  Expect(profile->xex_sha256 == "2613DC17AF39CEFACB7226855F62281D83B6E991C9D467D9E8EBB0A681AB0440",
+         "MUA2 XEX fingerprint");
+  Expect(profile->companion_files.size() == 2, "MUA2 companion files");
+
+  const std::filesystem::path dir = scratch / "mua2";
+  std::filesystem::create_directories(dir);
+  const std::span<const mua::GameProfile> profiles(profile, 1);
+  Write(dir / "default.xex", MakeXex(0x4156082F, 0x39B3E2C9, "Alliance-xenon-fin.pe"));
+  Expect(mua::CheckGameFiles(dir, profiles).state == mua::GameFileState::kDifferentVersion,
+         "MUA2 identity without the fingerprint is not enough");
+  Write(dir / "default.xex", MakeXex(0x4156082F, 0x5A20A6D4, "Alliance-xenon-fin.pe"));
+  Expect(mua::CheckGameFiles(dir, profiles).state == mua::GameFileState::kDifferentVersion,
+         "MUA2 title with another disc's media id is a different version");
+  Write(dir / "default.xex", MakeXex(0x415607DA, 0x39B3E2C9, "Marvel_Xenon_fnl.pe"));
+  Expect(mua::CheckGameFiles(dir, profiles).state == mua::GameFileState::kUnrecognized,
+         "MUA1 title is not MUA2");
+}
+
 void TestSha256() {
   const std::filesystem::path file = std::filesystem::temp_directory_path() / "mua_sha256_test.bin";
   Write(file, {'a', 'b', 'c'});
@@ -108,6 +134,7 @@ int main(int argc, char** argv) {
   TestIdentity();
   TestSha256();
   TestCheck(scratch);
+  TestMua2Profile(scratch);
   std::filesystem::remove_all(scratch);
   if (argc > 1) {
     const mua::GameCheck check = mua::CheckGameFiles(argv[1]);

@@ -48,6 +48,13 @@ bool Has(const std::string& text, const char* needle) {
   return text.find(needle) != std::string::npos;
 }
 
+std::string ReadFile(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream text;
+  text << in.rdbuf();
+  return text.str();
+}
+
 struct HostEvent {
   bool guest_signal = false;
   bool host_signal = false;
@@ -94,6 +101,25 @@ int Run() {
     const std::string reset1 = Function(mua1, "sub_8248C688");
     CHECK(Has(reset1, "REX_STORE_U32(ctx.r3.u32 + 4, ctx.r11.u32)"));
     CHECK(!Has(reset1, "__imp__"));
+  }
+
+  const fs::path mua2 = MUA_GENERATED_DIR_MUA2;
+  if (fs::exists(mua2 / "marvel_ultimate_alliance_recomp.33.cpp")) {
+    std::printf("MUA 2 has no inline event reset and no mix worker rendezvous to hook\n");
+    const std::string render = Function(mua2, "sub_82A25E50");
+    CHECK(!render.empty());
+    CHECK(Has(render, "__imp__KeWaitForMultipleObjects(ctx, base);"));
+    CHECK(Has(render, "__imp__XAudioSubmitRenderDriverFrame(ctx, base);"));
+    CHECK(Has(render, "mua_audio_pcm_firewall(ctx.r4);\n\tctx.lr = 0x82A25F18;"));
+    CHECK(Has(render, "REX_LOAD_U32(ctx.r31.u32 + 32)"));
+    const std::string map = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua2.h");
+    CHECK(Has(map, "#define MUA_GUEST_HAS_RESET_EVENT 0"));
+    CHECK(Has(map, "#define MUA_GUEST_HAS_AUDIO_BARRIER 0"));
+    CHECK(Has(map, "#define MUA_GUEST_AUDIO_RENDER sub_82A25E50"));
+    const std::string overrides = ReadFile(std::string(MUA_SRC_DIR) + "/../config/mua2/overrides.toml");
+    CHECK(Has(overrides, "address = 0x82A25F14"));
+    CHECK(Has(overrides, "name = \"mua_audio_pcm_firewall\""));
+    CHECK(!Has(overrides, "mua_audio_barrier_escape"));
   }
 
   std::printf("a guest-side reset must clear the host event\n");

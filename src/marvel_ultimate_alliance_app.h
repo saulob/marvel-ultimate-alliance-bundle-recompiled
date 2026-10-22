@@ -114,6 +114,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     REXLOG_INFO("DEBUG_SAULO xex loaded: module={} image base={:08X} size={:X} code={:08X}+{:X} entry={:08X}",
                 ImageKey(image), image.info.image_base, image.info.image_size, image.info.code_base,
                 image.info.code_size, module ? module->entry_point() : 0u);
+#if MUA_HAS_RECOMPILED_CODE
+    mua::LogGuestHooks(image.info.func_mappings);
+#endif
   }
 
   void OnConfigureFonts(ImFontAtlas* atlas) override {
