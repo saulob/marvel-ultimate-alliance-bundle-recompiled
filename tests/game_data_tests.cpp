@@ -123,6 +123,23 @@ void TestGoldLegacyAchievementsMove() {
   CHECK(Read(kept.root / "achievements" / "415607DA.toml") == "legacy unlocks");
 }
 
+void TestRootsAreIsolated() {
+  std::printf("profile, save and achievement roots never overlap or escape\n");
+  const fs::path root = "user_data";
+  const mua::GameDefinition* games[] = {&Mua1(), &Gold(), &Mua2()};
+  for (const mua::GameDefinition* a : games) {
+    const fs::path a_root = mua::GameUserDataRoot(*a, root);
+    CHECK(a_root.parent_path() == root);
+    CHECK(a->data_folder.find_first_of("/\\.") == std::string_view::npos);
+    for (const mua::GameDefinition* b : games) {
+      if (a == b) continue;
+      const fs::path b_root = mua::GameUserDataRoot(*b, root);
+      CHECK(a_root != b_root);
+      CHECK((a_root / "415607DA" / "profile") != (b_root / "415607DA" / "profile"));
+    }
+  }
+}
+
 void TestNothingIsOverwritten() {
   std::printf("a target that exists is kept, and the earlier data stays\n");
   Scratch scratch;
@@ -219,6 +236,7 @@ int main() {
   TestMua1FolderAndSettingsMove();
   TestAchievementStoresAreSeparate();
   TestGoldLegacyAchievementsMove();
+  TestRootsAreIsolated();
   TestNothingIsOverwritten();
   TestNothingIsCreatedWithoutData();
   TestDispatch();

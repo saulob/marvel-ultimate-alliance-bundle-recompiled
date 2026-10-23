@@ -314,12 +314,12 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     auto& achievements = runtime()->kernel_state()->achievements();
     const auto listed = achievements.ListAchievements();
     const auto unlocked = std::ranges::count_if(listed, [&](const auto& info) { return achievements.IsUnlocked(info.id); });
-    REXLOG_INFO("DEBUG_SAULO achievements: module={} listed={} unlocked={} store={}", ImageKey(image), listed.size(),
+    REXLOG_INFO("[DEBUG_SAULO][Achievement] store: module={} listed={} unlocked={} store={}", ImageKey(image), listed.size(),
                 unlocked, mua::Utf8(mua::AchievementStoreFile(mua::Game(*image.game), user_data_.root)));
     static std::atomic<int> logged{0};
     achievements.RegisterUnlockCallback([key = std::string(ImageKey(image))](const rex::system::AchievementEvent& event) {
       if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
-        REXLOG_INFO("DEBUG_SAULO achievement unlocked: module={} id={} label={}", key, event.achievement.id,
+        REXLOG_INFO("[DEBUG_SAULO][Achievement] unlocked: module={} id={} label={}", key, event.achievement.id,
                     event.achievement.label);
       }
     });
