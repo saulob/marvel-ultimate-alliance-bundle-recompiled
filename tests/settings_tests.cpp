@@ -268,6 +268,95 @@ void TestGuestVideoModePin() {
   CHECK(rex::cvar::GetFlagByName("video_mode_height") == "720");
 }
 
+void TestAspectRatioPerGame(const Scratch& scratch) {
+  std::printf("each game keeps its own aspect ratio\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  rex::cvar::SetFlagByName("mua_aspect_ratio", "16:9");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Get("mua_aspect_ratio") == "16:9");
+  settings.Set("mua_aspect_ratio", "21:9");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_aspect_ratio") == "16:9");
+  settings.Set("mua_aspect_ratio", "32:9");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_aspect_ratio") == "16:9");
+  settings.Set("mua_aspect_ratio", "4:3");
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Get("mua_aspect_ratio") == "21:9");
+  CHECK(!settings.WindowChanged());
+
+  CHECK(settings.Save());
+  CHECK(toml::parse_file((root / "mua1" / "game_settings.toml").string())["mua_aspect_ratio"].value<std::string>() ==
+        "21:9");
+  CHECK(toml::parse_file((root / "mua1_gold" / "game_settings.toml").string())["mua_aspect_ratio"]
+            .value<std::string>() == "32:9");
+  CHECK(toml::parse_file((root / "mua2" / "game_settings.toml").string())["mua_aspect_ratio"].value<std::string>() ==
+        "4:3");
+  CHECK(!toml::parse_file(scratch.player.string()).contains("mua_aspect_ratio"));
+
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  reopened.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(reopened.Get("mua_aspect_ratio") == "32:9");
+  reopened.SelectGame(mua::GameId::kMua2);
+  CHECK(reopened.Get("mua_aspect_ratio") == "4:3");
+  reopened.SelectGame(mua::GameId::kMua1);
+  CHECK(reopened.Get("mua_aspect_ratio") == "21:9");
+
+  reopened.SelectGame(mua::GameId::kMua2);
+  reopened.Apply();
+  CHECK(rex::cvar::GetFlagByName("mua_aspect_ratio") == "4:3");
+  reopened.SelectGame(mua::GameId::kMua1Gold);
+  reopened.Apply();
+  CHECK(rex::cvar::GetFlagByName("mua_aspect_ratio") == "32:9");
+
+  reopened.ResetToDefaults();
+  for (const mua::GameId game : {mua::GameId::kMua1, mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
+    reopened.SelectGame(game);
+    CHECK(reopened.Get("mua_aspect_ratio") == "16:9");
+  }
+
+  std::ofstream(root / "mua2" / "game_settings.toml", std::ios::trunc) << "mua_aspect_ratio = \"garbage\"\n";
+  mua::GameSettings invalid;
+  invalid.Capture(scratch.player, scratch.shipped);
+  invalid.SelectGame(mua::GameId::kMua2);
+  CHECK(invalid.Get("mua_aspect_ratio") == "16:9");
+
+  rex::cvar::SetFlagByName("mua_aspect_ratio", "16:9");
+  fs::remove_all(root / "mua1");
+  fs::remove_all(root / "mua1_gold");
+  fs::remove_all(root / "mua2");
+  fs::remove(scratch.player);
+}
+
+void TestAspectRatioVideoMode() {
+  std::printf("the guest video mode takes the aspect ratio's shape after the pin\n");
+  struct Row {
+    const char* aspect;
+    const char* width;
+    const char* height;
+  };
+  const Row rows[] = {{"16:9", "1280", "720"}, {"16:10", "1152", "720"}, {"21:9", "1680", "720"},
+                      {"32:9", "2560", "720"}, {"4:3", "960", "720"},    {"5:4", "896", "720"},
+                      {"garbage", "1280", "720"}};
+  for (const Row& row : rows) {
+    rex::cvar::SetFlagByName("window_width", "1920");
+    rex::cvar::SetFlagByName("window_height", "1080");
+    rex::cvar::SetFlagByName("mua_aspect_ratio", row.aspect);
+    mua::PinGuestVideoMode();
+    mua::ApplyAspectRatio();
+    CHECK(rex::cvar::GetFlagByName("video_mode_width") == row.width);
+    CHECK(rex::cvar::GetFlagByName("video_mode_height") == row.height);
+    CHECK(rex::cvar::GetFlagByName("window_width") == "0");
+  }
+  rex::cvar::SetFlagByName("mua_aspect_ratio", "16:9");
+  mua::PinGuestVideoMode();
+}
+
 }  // namespace
 
 int main() {
@@ -282,6 +371,8 @@ int main() {
   TestSelectedGamePersists(scratch);
   TestGameSettings(scratch);
   TestGuestVideoModePin();
+  TestAspectRatioPerGame(scratch);
+  TestAspectRatioVideoMode();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

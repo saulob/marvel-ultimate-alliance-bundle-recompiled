@@ -168,6 +168,11 @@ void TestRenderResolution() {
   CHECK(RenderResolutionText(2, AspectRatio::k16x9) == "2560x1440");
   CHECK(RenderResolutionText(3, AspectRatio::k16x9) == "3840x2160");
   CHECK(RenderResolutionText(4, AspectRatio::k16x9) == "5120x2880");
+  CHECK(RenderResolutionText(1, AspectRatio::k16x10) == "1152x720");
+  CHECK(RenderResolutionText(2, AspectRatio::k21x9) == "3360x1440");
+  CHECK(RenderResolutionText(4, AspectRatio::k32x9) == "10240x2880");
+  CHECK(RenderResolutionText(3, AspectRatio::k4x3) == "2880x2160");
+  CHECK(RenderResolutionText(1, AspectRatio::k5x4) == "896x720");
 }
 
 void TestWindowModes() {

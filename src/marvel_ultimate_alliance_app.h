@@ -175,6 +175,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       mua::ApplyShaderWait();
       mua::ApplyMultisampling();
       mua::PinGuestVideoMode();
+      mua::ApplyAspectRatio();
       const rex::PathConfig routed = RoutedPaths(defaults, selected);
       for (const mua::ShaderStorageRepair& repair : mua::RepairShaderStorage(routed.cache_root)) {
         REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);

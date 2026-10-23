@@ -26,7 +26,8 @@ endfunction()
 
 set(MUA_TEST_BUILD_DEFINES MUA_PORT_VERSION="${PROJECT_VERSION}${MUA_VERSION_SUFFIX}" MUA_BUILD_CONFIG="$<CONFIG>")
 
-mua_add_test(aspect_ratio_tests headless)
+mua_add_test(aspect_ratio_tests headless
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(dpi_tests headless)
 mua_add_test(window_placement_tests headless)
 mua_add_test(launcher_quit_tests headless)

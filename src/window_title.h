@@ -12,8 +12,8 @@ namespace mua {
 
 // The launcher's Render resolution: 3360x1440 at 2x in 21:9. The internal render scale is not part of it.
 inline std::string RenderResolutionText(int resolution_scale, AspectRatio aspect) {
-  return std::to_string(GuestWidth(aspect) * resolution_scale) + "x" +
-         std::to_string(kGuestHeight * resolution_scale);
+  const WindowSize size = RenderSize(aspect, resolution_scale);
+  return std::to_string(size.width) + "x" + std::to_string(size.height);
 }
 
 // The game title, then the render resolution and the frame rate when they are shown, separated by " | ".

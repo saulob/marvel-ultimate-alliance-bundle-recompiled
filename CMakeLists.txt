@@ -203,6 +203,7 @@ set(MUA_HOST_SOURCES
 
 # The hooks bound to one game's guest addresses; only the programs that carry a recompiled module have them.
 set(MUA_RUNTIME_SOURCES
+    src/aspect_render.cpp
     src/audio_mixer_priority.cpp
     src/audio_pcm_firewall.cpp
     src/crt_native.cpp

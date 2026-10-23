@@ -61,9 +61,13 @@ void ApplyMultisampling();
 // Sets async_shader_wait_ms for the Frame rate choice. Call with ApplyMultisampling.
 void ApplyShaderWait();
 
-// Keeps the guest video mode at the title's native size; ReXGlue otherwise reports the window size. Call once the
-// window exists and before the guest starts.
+// Keeps the guest video mode off the window size, which ReXGlue otherwise reports. Call once the window exists and
+// before the guest starts.
 void PinGuestVideoMode();
+
+// Sets the guest video mode, which the presenter takes its display aspect from, to the Aspect Ratio choice. Call after
+// PinGuestVideoMode.
+void ApplyAspectRatio();
 
 // Sets d3d12_adapter from the launcher's Graphics card choice. Call once the player settings are loaded and
 // before the graphics device is created; Automatic leaves the SDK's own preference alone.

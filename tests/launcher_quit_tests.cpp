@@ -76,8 +76,7 @@ void TestWindowClose() {
 }
 
 void TestSaveShortcut() {
-  std::printf("Ctrl+S runs the Save button's action, and only then
-");
+  std::printf("Ctrl+S runs the Save button's action, and only then\n");
   mua::SaveShortcutState state;
   state.ctrl_down = true;
   state.s_pressed = true;

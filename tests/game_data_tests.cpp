@@ -68,8 +68,7 @@ void TestFolders() {
 }
 
 void TestCacheFolders() {
-  std::printf("each game builds its shader and pipeline storage in its own folder
-");
+  std::printf("each game builds its shader and pipeline storage in its own folder\n");
   const fs::path root = "cache";
   CHECK(mua::GameCacheRoot(Mua1(), root) == root / "mua1");
   CHECK(mua::GameCacheRoot(Gold(), root) == root / "mua1_gold");
@@ -198,10 +197,10 @@ void TestDispatch() {
 void TestWiring() {
   std::printf("the launcher program carries no game, and the programs are wired that way\n");
   const std::string cmake = ReadSource("../CMakeLists.txt");
-  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance \"\")"));
-  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1)"));
-  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold)"));
-  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2)"));
+  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance \"\" launcher)"));
+  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)"));
+  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold mua1-gold)"));
+  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2 mua2)"));
   const std::string modules = ReadSource("../cmake/rexglue.cmake");
   CHECK(Has(modules, "mua_declare_module(mua2 marvel_ultimate_alliance_mua2_codegen)"));
   CHECK(Has(ReadSource("../mua2.manifest.toml"), "out_directory_path = \"generated/mua2\""));

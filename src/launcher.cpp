@@ -220,9 +220,10 @@ std::string Size(int width, int height) {
 std::vector<trg::Option> RenderResolutionOptions(AspectRatio aspect) {
   std::vector<trg::Option> options;
   for (int scale = kMinRenderScale; scale <= kMaxRenderScale; ++scale) {
+    const WindowSize size = RenderSize(aspect, scale);
     std::string label = scale == 1 ? "Original" : std::to_string(scale) + "x";
-    label += " \xE2\x80\x94 " + std::to_string(GuestWidth(aspect) * scale) + "x" + std::to_string(kGuestHeight * scale);
-    if (scale == 2) {
+    label += " \xE2\x80\x94 " + std::to_string(size.width) + "x" + std::to_string(size.height);
+    if (scale == 2 && aspect == AspectRatio::k16x9) {
       label += " \xE2\x80\x94 Recommended for 1440p";
     }
     options.push_back({std::to_string(scale), label});
@@ -233,9 +234,7 @@ std::vector<trg::Option> RenderResolutionOptions(AspectRatio aspect) {
 std::vector<trg::Option> AspectRatioOptions() {
   std::vector<trg::Option> options;
   for (const AspectRatioInfo& info : kAspectRatios) {
-    if (IsSupportedAspectRatio(info.aspect)) {
-      options.push_back({info.key, info.label});
-    }
+    options.push_back({info.key, info.label});
   }
   return options;
 }
@@ -253,6 +252,9 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         monitors_(ListMonitors()),
         graphics_adapters_(ListGraphicsAdapters()) {
     header_art_ = LoadHeaderArt(paths_.immediate_drawer);
+    if (SelectedAspectRatio() != AspectRatio::k16x9) {
+      SelectWindowSizeForAspect();
+    }
     launcher_ = std::make_unique<trg::Launcher>(MakeConfig());
     if (WindowFullscreen()) {
       restore_when_windowed_ = true;
@@ -531,6 +533,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     selected_ = game;
     launcher_->config().theme = LauncherTheme(game);
     settings_.SelectGame(game);
+    SelectWindowSizeForAspect();
     achievements_.reset();
     achievements_tried_ = false;
     library_.RefreshFiles(game);
@@ -700,10 +703,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     WindowSizeCombo();
     ui.Row("Monitor", "The display the game opens on.");
     MonitorCombo();
-    const std::vector<trg::Option> aspects = AspectRatioOptions();
-    if (aspects.size() > 1 &&
-        ui.Combo("Aspect Ratio", "Sets the game's target rendering format and the Window size choices.",
-                 "mua_aspect_ratio", "16:9", aspects)) {
+    if (ui.Combo("Aspect Ratio", "Sets the game's target rendering format and the Window size choices.",
+                 "mua_aspect_ratio", "16:9", AspectRatioOptions())) {
       SelectWindowSizeForAspect();
     }
     ui.Row("VSync", "On prevents tearing. Off allows it, for the lowest latency and G-Sync/FreeSync.");
@@ -749,38 +750,19 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     return ParseAspectRatio(settings_.Get("mua_aspect_ratio", "16:9"));
   }
 
-  static bool WindowSizeFits(int width, int height, const MonitorInfo* monitor) {
-    return !monitor || (width * monitor->scale < monitor->width && height * monitor->scale < monitor->height);
+  static bool WindowSizeFits(WindowSize size, const MonitorInfo* monitor) {
+    return !monitor || (size.width * monitor->scale < monitor->width && size.height * monitor->scale < monitor->height);
   }
 
-  // Moves Window size to the new aspect ratio's default, unless the current size already belongs to it.
   void SelectWindowSizeForAspect() {
-    const AspectRatio aspect = SelectedAspectRatio();
-    const int width = settings_.GetInt("window_width", 0);
-    const int height = settings_.GetInt("window_height", 0);
-    for (const WindowSize& size : kWindowSizes) {
-      if (size.aspect == aspect && size.width == width && size.height == height) {
-        return;
-      }
-    }
-    const AspectRatioInfo& info = InfoFor(aspect);
+    const WindowSize current{settings_.GetInt("window_width", 0), settings_.GetInt("window_height", 0)};
     const MonitorInfo* monitor = SelectedMonitor();
-    const WindowSize* chosen = nullptr;
-    for (const WindowSize& size : kWindowSizes) {
-      if (size.aspect != aspect || !WindowSizeFits(size.width, size.height, monitor)) {
-        continue;
-      }
-      if (size.width == info.default_width && size.height == info.default_height) {
-        chosen = &size;
-        break;
-      }
-      if (!chosen || size.width > chosen->width) {
-        chosen = &size;
-      }
-    }
-    if (chosen) {
-      settings_.SetInt("window_width", chosen->width);
-      settings_.SetInt("window_height", chosen->height);
+    const WindowSize chosen = WindowSizeForAspect(SelectedAspectRatio(), current, [monitor](WindowSize size) {
+      return WindowSizeFits(size, monitor);
+    });
+    if (chosen.width != current.width || chosen.height != current.height) {
+      settings_.SetInt("window_width", chosen.width);
+      settings_.SetInt("window_height", chosen.height);
     }
   }
 
@@ -802,12 +784,9 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       return text;
     };
     if (ImGui::BeginCombo("##window_size", label(width, height).c_str())) {
-      for (const WindowSize& size : kWindowSizes) {
-        if (size.aspect != aspect) {
-          continue;
-        }
+      for (const AspectWindowSize& size : kWindowSizes) {
         const bool current = size.width == width && size.height == height;
-        if (!current && !WindowSizeFits(size.width, size.height, monitor)) {
+        if (size.aspect != aspect || (!current && !WindowSizeFits({size.width, size.height}, monitor))) {
           continue;
         }
         if (ImGui::Selectable(label(size.width, size.height).c_str(), current) && !current) {

@@ -59,6 +59,26 @@ void TestScaledExtents() {
   CHECK(!FitsHostTexture({8192u * 4, 8192u * 4}));
 }
 
+void TestScaledExtentsPerAspect() {
+  std::printf("scaled extents follow the aspect ratio\n");
+  for (const AspectRatioInfo& info : kAspectRatios) {
+    for (int scale = kMinRenderScale; scale <= kMaxRenderScale; ++scale) {
+      const Extent extent = ScaledGuestExtent(info.aspect, scale);
+      CHECK(extent.width == uint32_t(CanvasWidth(info.aspect) * scale));
+      CHECK(extent.height == uint32_t(kCanvasHeight * scale));
+      CHECK(FitsHostTexture(extent));
+      CHECK(PixelCount(extent) <= UINT32_MAX);
+      CHECK(CanvasWidth(info.aspect) <= int(kGuestMaxSurfaceDimension));
+      const Extent groups = PostEffectGroups(extent);
+      CHECK(groups.width <= kMaxDispatchGroups && groups.height <= kMaxDispatchGroups);
+      CHECK(UnclippedViewportExtent(scale) <= kMaxViewportCoordinate);
+    }
+  }
+  CHECK(ScaledGuestExtent(AspectRatio::k32x9, 4) == (Extent{10240, 2880}));
+  CHECK(ScaledGuestExtent(AspectRatio::k21x9, 2) == (Extent{3360, 1440}));
+  CHECK(ScaledGuestExtent(AspectRatio::k4x3, 3) == (Extent{2880, 2160}));
+}
+
 void TestEdramAndScaledResolve() {
   std::printf("EDRAM, scaled resolve and typed views\n");
   const uint64_t edram[] = {10485760, 41943040, 94371840, 167772160};
@@ -242,6 +262,7 @@ void TestPatchesAndLauncher() {
 
 int main() {
   TestScaledExtents();
+  TestScaledExtentsPerAspect();
   TestEdramAndScaledResolve();
   TestPostEffects();
   TestVolumeWrapper();

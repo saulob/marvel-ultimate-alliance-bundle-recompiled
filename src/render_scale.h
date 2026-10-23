@@ -7,7 +7,7 @@
 
 namespace mua {
 
-// The launcher's Render resolution choices: 1x to 4x of the guest's 1280x720.
+// The launcher's Render resolution choices: 1x to 4x of the guest's canvas.
 inline constexpr int kMinRenderScale = 1;
 inline constexpr int kMaxRenderScale = 4;
 
@@ -37,7 +37,7 @@ inline int ClampRenderScale(int scale) {
 
 inline Extent ScaledGuestExtent(AspectRatio aspect, int scale) {
   const uint32_t s = uint32_t(ClampRenderScale(scale));
-  return {uint32_t(GuestWidth(aspect)) * s, uint32_t(kGuestHeight) * s};
+  return {uint32_t(CanvasWidth(aspect)) * s, uint32_t(kCanvasHeight) * s};
 }
 
 inline uint64_t PixelCount(Extent extent) {

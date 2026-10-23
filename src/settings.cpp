@@ -48,7 +48,7 @@ REXCVAR_DEFINE_BOOL(mua_msaa_compatibility, false, "Marvel Ultimate Alliance",
                     "Draw the game's 2x MSAA render targets with 4x MSAA, for GPUs or drivers whose "
                     "native 2x MSAA misrenders (sets native_2x_msaa)");
 REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
-                      "Aspect ratio chosen in the launcher; 16:9 is the only format the game renders");
+                      "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
                       "Graphics card: auto, or the index d3d12_adapter takes (applied at start)");
 REXCVAR_DEFINE_INT32(mua_launcher_x, 0, "Marvel Ultimate Alliance",
@@ -99,7 +99,7 @@ std::vector<std::string> GameSettingKeys() {
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
-constexpr std::string_view kGameScopedKeys[] = {"mua_frame_rate"};
+constexpr std::string_view kGameScopedKeys[] = {"mua_frame_rate", "mua_aspect_ratio"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
@@ -184,6 +184,10 @@ std::vector<std::pair<std::string, std::string>> ChangedValues(const std::map<st
   return changes;
 }
 
+std::string AspectRatioKey(std::string_view value) {
+  return InfoFor(ParseAspectRatio(value)).key;
+}
+
 std::map<std::string, std::string> ReadGameValues(const std::filesystem::path& file) {
   std::map<std::string, std::string> values;
   std::error_code ec;
@@ -194,7 +198,9 @@ std::map<std::string, std::string> ReadGameValues(const std::filesystem::path& f
     const toml::table table = toml::parse_file(Utf8(file));
     for (const std::string_view key : kGameScopedKeys) {
       if (const auto value = ConfigValue(table, key)) {
-        values[std::string(key)] = key == "mua_frame_rate" ? std::to_string(FrameRateFromText(*value)) : *value;
+        values[std::string(key)] = key == "mua_frame_rate"    ? std::to_string(FrameRateFromText(*value))
+                                   : key == "mua_aspect_ratio" ? AspectRatioKey(*value)
+                                                               : *value;
       }
     }
   } catch (const toml::parse_error& e) {
@@ -318,6 +324,8 @@ void GameSettings::Capture(const std::filesystem::path& player_file, const std::
   pending_ = saved_;
   std::string& frame_rate = pending_["mua_frame_rate"];
   frame_rate = std::to_string(FrameRateFromText(frame_rate));
+  std::string& aspect = pending_["mua_aspect_ratio"];
+  aspect = AspectRatioKey(aspect);
   game_saved_.clear();
   for (const GameDefinition& game : AllGames()) {
     game_saved_[game.id] = ReadGameValues(GameFile(game.id));
@@ -498,6 +506,14 @@ void PinGuestVideoMode() {
   }
 }
 
+void ApplyAspectRatio() {
+  const AspectRatioInfo& info = InfoFor(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)));
+  const WindowSize mode = VideoModeSize(info.aspect);
+  rex::cvar::SetFlagByName("video_mode_width", std::to_string(mode.width));
+  rex::cvar::SetFlagByName("video_mode_height", std::to_string(mode.height));
+  REXLOG_INFO("Aspect ratio: {} ({}x{})", info.key, CanvasWidth(info.aspect), kCanvasHeight);
+}
+
 void ApplyGraphicsAdapter() {
   const std::string setting = REXCVAR_GET(mua_graphics_adapter);
   if (!ParseGraphicsAdapter(setting)) {
@@ -522,6 +538,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
                            const std::filesystem::path& game_dir, const StartupWindowInfo& window) {
   const AspectRatio aspect = ParseAspectRatio(settings.Get("mua_aspect_ratio", "16:9"));
   const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
+  const WindowSize render = RenderSize(aspect, scale);
   const std::string selected_card = SelectedGraphicsCardLabel(settings);
   const bool selected_fullscreen = settings.GetBool("fullscreen", false);
   const bool selected_tearing = settings.GetBool(kTearingSetting, true);
@@ -545,7 +562,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.launcher_graphics.graphics_card = selected_card;
   diagnostics.launcher_graphics.render_resolution =
       (scale == 1 ? std::string("Original") : std::to_string(scale) + "x") + " (" +
-      std::to_string(GuestWidth(aspect) * scale) + "x" + std::to_string(kGuestHeight * scale) + ")";
+      std::to_string(render.width) + "x" + std::to_string(render.height) + ")";
   diagnostics.launcher_graphics.anti_aliasing =
       ChoiceLabel({{"none", "Off"}, {"fxaa", "FXAA"}, {"fxaa_extreme", "FXAA Extreme"}},
                   settings.Get("swap_post_effect", "none"), "Off");
@@ -591,10 +608,10 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.gameplay.frame_rate = FrameRateText(diagnostic_fps);
   diagnostics.gameplay.present = PresentationText(runtime_tearing);
 
-  diagnostics.graphics.render_width = GuestWidth(aspect) * scale;
-  diagnostics.graphics.render_height = kGuestHeight * scale;
-  diagnostics.graphics.guest_width = GuestWidth(aspect);
-  diagnostics.graphics.guest_height = kGuestHeight;
+  diagnostics.graphics.render_width = render.width;
+  diagnostics.graphics.render_height = render.height;
+  diagnostics.graphics.guest_width = CanvasWidth(aspect);
+  diagnostics.graphics.guest_height = kCanvasHeight;
   const bool host_render_targets = HostRenderTargetsUsed(
       CvarText("render_target_path_d3d12", ""),
       RasterizerOrderedViewsSupported(std::atoi(CvarText("d3d12_adapter", "-1").c_str())));

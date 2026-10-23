@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "aspect_ratio.h"
 #include "diagnostics.h"
 
 namespace {
@@ -148,6 +149,26 @@ void TestSelectedWindowResolution() {
                   "window=1600x900 | output=1600x900 | aspect=16:9"));
 }
 
+void TestSelectedAspect() {
+  std::printf("the selected aspect ratio, the guest size and the render size\n");
+  for (const mua::AspectRatioInfo& info : mua::kAspectRatios) {
+    mua::StartupDiagnostics diagnostics = Sample();
+    const mua::WindowSize render = mua::RenderSize(info.aspect, 2);
+    diagnostics.launcher_display.aspect_ratio = info.label;
+    diagnostics.display.aspect = info.key;
+    diagnostics.graphics.render_width = render.width;
+    diagnostics.graphics.render_height = render.height;
+    diagnostics.graphics.guest_width = mua::CanvasWidth(info.aspect);
+    diagnostics.graphics.guest_height = mua::kCanvasHeight;
+    const std::string text = Join(mua::FormatStartupDiagnostics(diagnostics));
+    CHECK(Has(text, (std::string("Aspect Ratio=") + info.label + " | VSync=Off").c_str()));
+    CHECK(Has(text, (std::string("| aspect=") + info.key + "\n").c_str()));
+    CHECK(Has(text, ("Runtime renderer: render=" + std::to_string(render.width) + "x" + std::to_string(render.height) +
+                     " | guest=" + std::to_string(mua::CanvasWidth(info.aspect)) + "x720")
+                        .c_str()));
+  }
+}
+
 void TestSelectedAndResolvedDiffer() {
   std::printf("selected and resolved GPU stay distinguishable\n");
   mua::StartupDiagnostics diagnostics = Sample();
@@ -203,6 +224,7 @@ int main() {
   TestIdentity();
   TestStartupBlock();
   TestSelectedWindowResolution();
+  TestSelectedAspect();
   TestSelectedAndResolvedDiffer();
   TestPresentationWording();
   TestCleanExit();
