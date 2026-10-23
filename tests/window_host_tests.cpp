@@ -172,6 +172,11 @@ void TestRenderResolution() {
   CHECK(RenderResolutionText(2, AspectRatio::k21x9) == "3360x1440");
   CHECK(RenderResolutionText(4, AspectRatio::k32x9) == "10240x2880");
   CHECK(RenderResolutionText(3, AspectRatio::k4x3) == "2880x2160");
+  CHECK(RenderResolutionText(1, AspectRatio::k21x9, Upscaler::kFsr1, UpscaleQuality::kQuality) ==
+        "1120x480 (AMD FSR 1 Quality)");
+  CHECK(RenderResolutionText(2, AspectRatio::k16x9, Upscaler::kFsr1, UpscaleQuality::kPerformance) ==
+        "1280x720 (AMD FSR 1 Performance)");
+  CHECK(RenderResolutionText(2, AspectRatio::k16x9, Upscaler::kOff, UpscaleQuality::kPerformance) == "2560x1440");
   CHECK(RenderResolutionText(1, AspectRatio::k5x4) == "896x720");
 }
 

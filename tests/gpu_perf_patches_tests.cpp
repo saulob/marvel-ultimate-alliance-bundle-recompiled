@@ -323,6 +323,56 @@ void TestPortedReferenceFixes() {
   const std::string admitted_vfetch = ReadFile(dir + "0124-d3d12-admitted-invalid-vfetch-log.patch");
   CHECK(Has(admitted_vfetch, "allowed_invalid_vfetch_count.fetch_add(1, std::memory_order_relaxed) + 1;"));
   CHECK(Has(admitted_vfetch, "occurrence <= 256 || (occurrence & 255) == 0"));
+
+  const std::string memmove = ReadFile(std::string(MUA_SRC_DIR) + "/crt_native.cpp");
+  CHECK(Has(memmove, "REX_HOOK_RAW(MUA_GUEST_MEMMOVE)"));
+  CHECK(Has(memmove, "if (ctx.r3.s32 < ctx.r4.s32) {"));
+  CHECK(Has(memmove, "REXCVAR_DEFINE_BOOL(mua_native_memmove, true"));
+}
+
+void TestPerformancePass() {
+  std::printf("performance pass patches\n");
+  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
+
+  const std::string index = ReadFile(dir + "0125-texture-cache-resolve-target-index.windows.patch");
+  CHECK(Has(index, "+  std::unordered_multimap<uint32_t, Texture*> textures_by_base_page_;"));
+  CHECK(Has(index, "+  auto [page_first, page_last] = textures_by_base_page_.equal_range(dest_page);"));
+  CHECK(Has(index, "+  textures_by_base_page_.clear();"));
+  CHECK(Has(index, "+    textures_by_base_page_.emplace(uint32_t(key.base_page), texture);"));
+
+  const std::string pgo = ReadFile(dir + "0126-gpu-plugin-pgo.windows.patch");
+  CHECK(Has(pgo, "set(REXGPU_PGO_USE \"\" CACHE FILEPATH"));
+  CHECK(Has(pgo, "$<$<CONFIG:Release>:-fprofile-use=${REXGPU_PGO_USE}>"));
+  const std::string tools = ReadFile(std::string(MUA_SRC_DIR) + "/../tools/rexruntime-patch.ps1");
+  CHECK(Has(tools, "patches\\rexglue-sdk-pgo\\rexgpu-xenos.profdata"));
+  CHECK(Has(tools, "\"build_pgo=$((Get-RuntimePgo).Mode)\""));
+  const std::string builder = ReadFile(std::string(MUA_SRC_DIR) + "/../tools/build-patched-rexruntime.ps1");
+  CHECK(Has(builder, "\"-DREXGPU_PGO_USE=$pgoProfile\""));
+
+  // FSR 1 and CAS no longer need the FidelityFX SDK; the temporal FSR 2/3 path still does.
+  const std::string fsr = ReadFile(dir + "0127-presenter-spatial-upscalers.windows.patch");
+  CHECK(Has(fsr, "+    .allowed({\"bilinear\", \"cas\", \"fsr\"})"));
+  CHECK(Has(fsr, "-    .allowed({\"bilinear\"})"));
+  CHECK(Has(fsr, "+bool IsFsrEffect(GuestOutputPaintConfig::Effect effect) {"));
+  CHECK(Has(fsr, "+      kRTVCount = kRTVIndexGuestOutputIntermediate0 + kMaxGuestOutputPaintEffects - 1,"));
+  CHECK(Has(fsr, "-  static constexpr size_t kMaxGuestOutputPaintEffects = 1;"));
+  CHECK(!Has(fsr, "-      kFsr2,"));
+
+  const std::string summary = ReadFile(dir + "0128-d3d12-gpu-work-summary.windows.patch");
+  CHECK(Has(summary, "+REXCVAR_DEFINE_BOOL(gpu_work_summary, true"));
+  CHECK(Has(summary, "+  NoteGpuWorkSwap(submission_current_, texture_cache_->draw_resolution_scale_x(),"));
+  CHECK(Has(summary, "+  ++g_gpu_work_summary.draws;"));
+  CHECK(Has(summary, "+  ++g_gpu_work_summary.copies;"));
+  CHECK(Has(summary, "+  g_gpu_work_summary.submission_thread_wait += std::chrono::steady_clock::now() - wait_start;"));
+  CHECK(Has(summary, "+  if (edram_mode == xenos::EdramMode::kColorDepth || edram_mode == xenos::EdramMode::kDepthOnly) {"));
+  CHECK(Has(summary, "+    NoteGpuWorkDraw(regs, edram_mode);"));
+  CHECK(Has(summary, "+  NoteGpuWorkResolve(*register_file_);"));
+  CHECK(Has(summary, "+  g_gpu_work_summary.swap_texture_width = frontbuffer_width_unscaled;"));
+  CHECK(Has(summary, "+  g_gpu_work_summary.presenter_input_width = guest_output_width;"));
+  CHECK(Has(summary, "+    REXGPU_INFO(\"GPU targets ({}, scale {}x{}): {}\""));
+  CHECK(Has(summary, "+    LogGuestOutputPaintFlow(guest_output_flow, paint_context_.swap_chain_width,"));
+  CHECK(Has(summary, "Presenter: input {}x{} | output {}x{} | swap chain {}x{} | effects: {}"));
+  CHECK(!Has(summary, "widest color target"));
 }
 
 void TestShutdownOrder() {
@@ -351,6 +401,7 @@ int main() {
   TestSubmissionDiagnostics();
   TestPortedReferenceFixes();
   TestShutdownOrder();
+  TestPerformancePass();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

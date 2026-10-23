@@ -1,0 +1,65 @@
+Adapted from patches/rexglue-sdk/0051-texture-cache-resolve-target-index.windows.patch in
+geometry-wars-retro-evolved-2-recompiled (originally Crackdown Recompiled PR #13). The texture cache indexes its textures
+by base page, so FindResolveCopyTargets looks at the textures on the resolve's page instead of scanning all of them.
+Only the host render target path copies resolves into textures (0123), so the ROV path is unaffected.
+
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -651,6 +651,8 @@
+   uint64_t current_submission_time_ = 0;
+ 
+   std::unordered_map<TextureKey, std::unique_ptr<Texture>, TextureKey::Hasher> textures_;
++  // textures_ by the page of their base level, for FindResolveCopyTargets (each resolve used to scan every texture).
++  std::unordered_multimap<uint32_t, Texture*> textures_by_base_page_;
+ 
+   uint64_t textures_total_host_memory_usage_ = 0;
+ 
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -328,6 +328,13 @@
+     assert_true(found_texture_it != textures_.end());
+     if (found_texture_it != textures_.end()) {
+       assert_true(found_texture_it->second.get() == texture);
++      auto [page_first, page_last] = textures_by_base_page_.equal_range(texture->key().base_page);
++      for (auto page_it = page_first; page_it != page_last; ++page_it) {
++        if (page_it->second == texture) {
++          textures_by_base_page_.erase(page_it);
++          break;
++        }
++      }
+       textures_.erase(found_texture_it);
+       // `texture` is invalid now.
+     }
+@@ -675,10 +682,13 @@
+   }
+   bool scaled = IsDrawResolutionScaled();
+   uint32_t count = 0;
+-  for (const auto& [key, texture_ptr] : textures_) {
++  auto [page_first, page_last] = textures_by_base_page_.equal_range(dest_page);
++  for (auto page_it = page_first; page_it != page_last; ++page_it) {
+     if (count >= max_targets) {
+       break;
+     }
++    Texture* texture_ptr = page_it->second;
++    const TextureKey& key = texture_ptr->key();
+     if (key.base_page != dest_page || key.format != copy.format ||
+         key.endianness != copy.endian || !key.tiled ||
+         key.dimension != xenos::DataDimension::k2DOrStacked || key.depth_or_array_size_minus_1 ||
+@@ -871,6 +881,7 @@
+ 
+ void TextureCache::DestroyAllTextures(bool from_destructor) {
+   ResetTextureBindings(from_destructor);
++  textures_by_base_page_.clear();
+   textures_.clear();
+   COUNT_profile_set("gpu/texture_cache/textures", 0);
+ }
+@@ -988,6 +999,7 @@
+     }
+     assert_true(new_texture->key() == key);
+     texture = textures_.emplace(key, std::move(new_texture)).first->second.get();
++    textures_by_base_page_.emplace(uint32_t(key.base_page), texture);
+   }
+   COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
+   texture->LogAction("Created");

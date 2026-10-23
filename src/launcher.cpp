@@ -48,6 +48,7 @@
 #include "platform.h"
 #include "render_scale.h"
 #include "settings.h"
+#include "upscaling.h"
 
 namespace mua {
 namespace {
@@ -227,6 +228,20 @@ std::vector<trg::Option> RenderResolutionOptions(AspectRatio aspect) {
       label += " \xE2\x80\x94 Recommended for 1440p";
     }
     options.push_back({std::to_string(scale), label});
+  }
+  return options;
+}
+
+// Each quality with the size the game draws at and the Render resolution FSR 1 brings it to.
+std::vector<trg::Option> UpscaleQualityOptions(AspectRatio aspect, int render_scale) {
+  std::vector<trg::Option> options;
+  for (const UpscaleQualityInfo& info : kUpscaleQualities) {
+    const RenderSizes sizes = RenderSizesFor(aspect, render_scale, Upscaler::kFsr1, info.quality);
+    std::string label = std::string(info.label) + " \xE2\x80\x94 " + SizeText(sizes.internal);
+    if (info.quality != UpscaleQuality::kNative) {
+      label += " (game " + SizeText(sizes.guest) + ")";
+    }
+    options.push_back({info.key, label});
   }
   return options;
 }
@@ -836,6 +851,20 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
              "Draws the game at a multiple of its own picture, then scales it to the window. Higher is sharper and "
              "costs more GPU time. Window size is separate.",
              "resolution_scale", "1", RenderResolutionOptions(SelectedAspectRatio()));
+    if (UpscalingApplies()) {
+      ui.Choice("Upscaling",
+                "AMD FSR 1 scales the game's picture to the window with sharper edges than plain scaling. Quality, "
+                "Balanced and Performance draw the game at a lower resolution than the Render resolution, which "
+                "costs less GPU time, and FSR 1 scales it up to the window.",
+                "mua_upscaler", kUpscalerOff, {{kUpscalerOff, "Off"}, {kUpscalerFsr1, "AMD FSR 1"}});
+      if (ParseUpscaler(settings_.Get("mua_upscaler", kUpscalerOff)) == Upscaler::kFsr1) {
+        ui.Combo("Upscaling quality",
+                 "How far below the Render resolution the game draws before FSR 1 scales it to the window. Lower "
+                 "is faster and softer, including the menus and HUD.",
+                 "mua_upscale_quality", "native",
+                 UpscaleQualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
+      }
+    }
     ui.Choice("Anti-aliasing", "Smooths jagged edges after the frame is drawn. Extreme is softer but cleaner.",
               "swap_post_effect", "none", {{"none", "Off"}, {"fxaa", "FXAA"}, {"fxaa_extreme", "FXAA Extreme"}});
     if (MultisamplingApplies()) {
@@ -853,6 +882,9 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
                {"5", "16\xC3\x97"}},
               6);
   }
+
+  // Marvel Ultimate Alliance only for now; the other games keep their Upscaling setting off.
+  bool UpscalingApplies() const { return Selected().game && Selected().game->id == GameId::kMua1; }
 
   // The choice only matters when the GPU cannot run the rasterizer-ordered views EDRAM path.
   bool MultisamplingApplies() {

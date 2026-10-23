@@ -158,6 +158,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
         StartRuntimeAndExit(library_->State(selected));
       }
       mua::PrepareLauncherWindow();
+    } else {
+      mua::ApplyUpscaler(game_settings_);
     }
     game_settings_.MarkWindowCreated();
   }
@@ -174,6 +176,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       game_settings_.ApplyGameSettings();
       mua::ApplyShaderWait();
       mua::ApplyMultisampling();
+      mua::LogUpscaling();
       mua::PinGuestVideoMode();
       mua::ApplyAspectRatio();
       const rex::PathConfig routed = RoutedPaths(defaults, selected);

@@ -1,0 +1,25 @@
+Adapted from patches/rexglue-sdk/0053-gpu-plugin-pgo.windows.patch in geometry-wars-retro-evolved-2-recompiled
+(originally Crackdown Recompiled PR #13). Profile-guided optimization of the Release GPU plugin: REXGPU_PGO_USE names a
+merged profile; tools\rexruntime-patch.ps1 sets it to patches\rexglue-sdk-pgo\rexgpu-xenos.profdata when that file exists.
+
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -120,6 +120,17 @@
+     target_link_options(rexgpu-xenos PRIVATE $<$<CONFIG:Release>:-flto=thin> $<$<CONFIG:Release>:LINKER:/opt:lldlto=3>)
+ endif()
+ 
++# Functions changed since the profile was made are optimized without it.
++set(REXGPU_PGO_USE "" CACHE FILEPATH "Merged profile to optimize the GPU plugin with (Release)")
++if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND REXGPU_PGO_USE)
++    target_compile_options(rexgpu-xenos PRIVATE
++        $<$<CONFIG:Release>:-fprofile-use=${REXGPU_PGO_USE}>
++        $<$<CONFIG:Release>:-Wno-profile-instr-unprofiled>
++        $<$<CONFIG:Release>:-Wno-profile-instr-out-of-date>
++        $<$<CONFIG:Release>:-Wno-profile-instr-missing>)
++    target_link_options(rexgpu-xenos PRIVATE $<$<CONFIG:Release>:-fprofile-use=${REXGPU_PGO_USE}>)
++endif()
++
+ rex_target_pch(rexgpu-xenos
+     <mutex>
+     <unordered_map>

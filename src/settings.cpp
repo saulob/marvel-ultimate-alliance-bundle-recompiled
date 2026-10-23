@@ -28,6 +28,7 @@
 #include "multisampling.h"
 #include "platform.h"
 #include "system_info.h"
+#include "upscaling.h"
 
 REXCVAR_DEFINE_BOOL(mua_launcher, true, "Marvel Ultimate Alliance",
                     "Show the launcher before the game starts (hold Shift at start to force it)");
@@ -49,6 +50,10 @@ REXCVAR_DEFINE_BOOL(mua_msaa_compatibility, false, "Marvel Ultimate Alliance",
                     "native 2x MSAA misrenders (sets native_2x_msaa)");
 REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
                       "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
+REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance",
+                      "Upscaler from the game's picture to the window: off or fsr (AMD FSR 1, applied at start)");
+REXCVAR_DEFINE_STRING(mua_upscale_quality, "native", "Marvel Ultimate Alliance",
+                      "With an upscaler, draw below the Render resolution: native, quality, balanced or performance");
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
                       "Graphics card: auto, or the index d3d12_adapter takes (applied at start)");
 REXCVAR_DEFINE_INT32(mua_launcher_x, 0, "Marvel Ultimate Alliance",
@@ -81,6 +86,8 @@ std::vector<std::string> GameSettingKeys() {
       "mua_graphics_adapter",
       "mua_aspect_ratio",
       "resolution_scale",
+      "mua_upscaler",
+      "mua_upscale_quality",
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
@@ -99,7 +106,8 @@ std::vector<std::string> GameSettingKeys() {
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
-constexpr std::string_view kGameScopedKeys[] = {"mua_frame_rate", "mua_aspect_ratio"};
+constexpr std::string_view kGameScopedKeys[] = {"mua_frame_rate", "mua_aspect_ratio", "mua_upscaler",
+                                                 "mua_upscale_quality"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
@@ -500,6 +508,27 @@ void ApplyMultisampling() {
                            Native2xMsaaFor(REXCVAR_GET(mua_msaa_compatibility)) ? "true" : "false");
 }
 
+void ApplyUpscaler(const GameSettings& settings) {
+  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff));
+  if (const auto effect = PresentEffectFor(upscaler); effect && rex::cvar::GetFlagByName("present_effect") != *effect) {
+    rex::cvar::SetFlagByName("present_effect", *effect);
+  }
+}
+
+void LogUpscaling() {
+  const Upscaler upscaler = ParseUpscaler(REXCVAR_GET(mua_upscaler));
+  const UpscaleQuality quality = EffectiveQuality(upscaler, ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
+  const RenderSizes sizes =
+      RenderSizesFor(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)),
+                     std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()), upscaler, quality);
+  const bool fsr = upscaler == Upscaler::kFsr1;
+  REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | FSR input: {} | FSR output: {} | Render "
+              "resolution: {} | present_effect={}",
+              UpscalingText(upscaler, quality), SizeText(sizes.guest), SizeText(sizes.internal),
+              fsr ? SizeText(sizes.internal) : "none", fsr ? "presenter output (Presenter line)" : "none",
+              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"));
+}
+
 void PinGuestVideoMode() {
   for (const char* name : {"window_width", "window_height", "video_mode_width", "video_mode_height"}) {
     rex::cvar::ResetToDefault(name);
@@ -539,6 +568,10 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   const AspectRatio aspect = ParseAspectRatio(settings.Get("mua_aspect_ratio", "16:9"));
   const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
   const WindowSize render = RenderSize(aspect, scale);
+  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff));
+  const UpscaleQuality quality =
+      EffectiveQuality(upscaler, ParseUpscaleQuality(settings.Get("mua_upscale_quality", "native")));
+  const RenderSizes sizes = RenderSizesFor(aspect, scale, upscaler, quality);
   const std::string selected_card = SelectedGraphicsCardLabel(settings);
   const bool selected_fullscreen = settings.GetBool("fullscreen", false);
   const bool selected_tearing = settings.GetBool(kTearingSetting, true);
@@ -570,6 +603,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
       settings.GetBool("mua_msaa_compatibility", false) ? "4x MSAA (Compatibility)" : "2x MSAA";
   diagnostics.launcher_graphics.texture_filtering =
       TextureFilteringName(settings.Get("anisotropic_override", "3"));
+  diagnostics.launcher_graphics.upscaling = UpscalingText(upscaler, quality);
 
   diagnostics.system.os = OsDescription();
   diagnostics.system.cpu = CpuDescription();
@@ -610,8 +644,16 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
 
   diagnostics.graphics.render_width = render.width;
   diagnostics.graphics.render_height = render.height;
-  diagnostics.graphics.guest_width = CanvasWidth(aspect);
-  diagnostics.graphics.guest_height = kCanvasHeight;
+  diagnostics.graphics.internal_width = sizes.internal.width;
+  diagnostics.graphics.internal_height = sizes.internal.height;
+  if (upscaler == Upscaler::kFsr1) {
+    diagnostics.graphics.fsr_input_width = sizes.internal.width;
+    diagnostics.graphics.fsr_input_height = sizes.internal.height;
+  }
+  diagnostics.graphics.present_effect = CvarText("present_effect", "bilinear");
+  diagnostics.graphics.upscaling = UpscalingText(upscaler, quality);
+  diagnostics.graphics.guest_width = sizes.guest.width;
+  diagnostics.graphics.guest_height = sizes.guest.height;
   const bool host_render_targets = HostRenderTargetsUsed(
       CvarText("render_target_path_d3d12", ""),
       RasterizerOrderedViewsSupported(std::atoi(CvarText("d3d12_adapter", "-1").c_str())));

@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdint>
 
 #include <rex/logging.h>
@@ -5,6 +6,7 @@
 
 #include "aspect_ratio.h"
 #include "settings.h"
+#include "upscaling.h"
 
 namespace {
 
@@ -13,20 +15,54 @@ mua::AspectRatio ConfiguredAspect() {
   return aspect;
 }
 
+mua::WindowSize UpscaledBackBufferFor(mua::WindowSize canvas) {
+  return mua::UpscaledBackBuffer(canvas, mua::ParseUpscaler(REXCVAR_GET(mua_upscaler)),
+                                 mua::ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
+}
+
+std::atomic<bool> g_back_buffer_upscaled{false};
+
 }  // namespace
 
 // Codegen midasm hooks (overrides.toml) in the device creation, where the title sets up an HD video mode: the back
 // buffer size is in r11 and r10, and the display aspect in f13.
 void mua_aspect_back_buffer(PPCRegister& width, PPCRegister& height) {
   const mua::AspectRatio aspect = ConfiguredAspect();
-  const int back_buffer_width = mua::BackBufferWidthFor(aspect, width.s32, height.s32);
-  if (back_buffer_width != width.s32) {
-    width.s64 = back_buffer_width;
-    REXLOG_INFO("Guest back buffer: {}x{} ({})", back_buffer_width, height.s32, mua::InfoFor(aspect).key);
-  } else if (aspect != mua::AspectRatio::k16x9) {
-    REXLOG_WARN("Guest back buffer is {}x{}, not the expected {}x{}; keeping it", width.s32, height.s32,
-                mua::kHdBackBufferWidth, mua::kHdBackBufferHeight);
+  if (width.s32 != mua::kHdBackBufferWidth || height.s32 != mua::kHdBackBufferHeight) {
+    if (aspect != mua::AspectRatio::k16x9 || mua::ParseUpscaler(REXCVAR_GET(mua_upscaler)) != mua::Upscaler::kOff) {
+      REXLOG_WARN("Guest back buffer is {}x{}, not the expected {}x{}; keeping it", width.s32, height.s32,
+                  mua::kHdBackBufferWidth, mua::kHdBackBufferHeight);
+    }
+    return;
   }
+  const mua::WindowSize canvas{mua::BackBufferWidthFor(aspect, width.s32, height.s32), height.s32};
+  const mua::WindowSize back_buffer = UpscaledBackBufferFor(canvas);
+  if (back_buffer.width != width.s32 || back_buffer.height != height.s32) {
+    width.s64 = back_buffer.width;
+    height.s64 = back_buffer.height;
+    g_back_buffer_upscaled = back_buffer.width != canvas.width || back_buffer.height != canvas.height;
+    REXLOG_INFO("Guest back buffer: {}x{} ({}, canvas {}x{})", back_buffer.width, back_buffer.height,
+                mua::InfoFor(aspect).key, canvas.width, canvas.height);
+  }
+}
+
+// Codegen midasm hook (overrides.toml) in sub_824FE4C8, where a fullscreen back buffer that is no display mode falls
+// back to the video mode in r8 and r9.
+void mua_upscale_device_back_buffer(PPCRegister& width, PPCRegister& height) {
+  if (!g_back_buffer_upscaled) {
+    return;
+  }
+  const mua::WindowSize canvas = mua::VideoModeSize(ConfiguredAspect());
+  if (width.s32 != canvas.width || height.s32 != canvas.height) {
+    REXLOG_WARN("Device back buffer falls back to {}x{}, not the expected {}x{}; keeping it", width.s32, height.s32,
+                canvas.width, canvas.height);
+    return;
+  }
+  const mua::WindowSize back_buffer = UpscaledBackBufferFor(canvas);
+  width.s64 = back_buffer.width;
+  height.s64 = back_buffer.height;
+  REXLOG_INFO("Guest back buffer: device {}x{} instead of display mode {}x{}", back_buffer.width, back_buffer.height,
+              canvas.width, canvas.height);
 }
 
 void mua_aspect_display_aspect(PPCRegister& game_aspect) {

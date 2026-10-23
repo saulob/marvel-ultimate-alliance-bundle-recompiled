@@ -38,6 +38,10 @@ loaded after the shipped `marvel_ultimate_alliance.toml`; settings that belong t
 `user_data\<game>\game_settings.toml` and fall back to `settings.toml`. F11 switches between windowed and borderless fullscreen in
 the launcher and in the game. Hold Shift while starting to open the launcher when it is turned off.
 
+For Marvel Ultimate Alliance the Graphics page also has Upscaling: AMD FSR 1 scales the game's picture to the window, and
+its Quality, Balanced and Performance choices make the game draw a smaller back buffer, 1.5, 1.7 and 2 times smaller
+along each axis than the Render resolution, which costs less GPU time. Off, the default, keeps the plain scaling.
+
 While playing, F2 shows or hides the frame counter, and the window title shows the frame rate (Gameplay page). F10 and F12
 are reserved and do nothing yet; F9 is unassigned.
 

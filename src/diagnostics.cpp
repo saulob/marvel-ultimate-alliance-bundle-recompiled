@@ -35,9 +35,22 @@ std::string DisplayText(const DisplayIdentity& display) {
 }
 
 std::string GraphicsText(const GraphicsIdentity& graphics) {
-  std::string text = "render=" + std::to_string(graphics.render_width) + "x" +
-                     std::to_string(graphics.render_height) + " | guest=" + std::to_string(graphics.guest_width) +
-                     "x" + std::to_string(graphics.guest_height);
+  std::string text = "guest=" + std::to_string(graphics.guest_width) + "x" + std::to_string(graphics.guest_height);
+  if (graphics.internal_width) {
+    text += " | internal=" + std::to_string(graphics.internal_width) + "x" + std::to_string(graphics.internal_height);
+  }
+  if (graphics.fsr_input_width) {
+    text += " | fsr input=" + std::to_string(graphics.fsr_input_width) + "x" +
+            std::to_string(graphics.fsr_input_height);
+  }
+  text += " | render resolution=" + std::to_string(graphics.render_width) + "x" +
+          std::to_string(graphics.render_height);
+  if (!graphics.present_effect.empty()) {
+    text += " | presenter=" + graphics.present_effect;
+  }
+  if (!graphics.upscaling.empty()) {
+    text += " | upscaling=" + graphics.upscaling;
+  }
   if (!graphics.msaa.empty()) {
     text += " | msaa=" + graphics.msaa;
   }
@@ -80,7 +93,10 @@ std::vector<std::string> FormatStartupDiagnostics(const StartupDiagnostics& diag
                   " | Render resolution=" + diagnostics.launcher_graphics.render_resolution +
                   " | Anti-aliasing=" + diagnostics.launcher_graphics.anti_aliasing +
                   " | Multisampling=" + diagnostics.launcher_graphics.multisampling +
-                  " | Texture filtering=" + diagnostics.launcher_graphics.texture_filtering);
+                  " | Texture filtering=" + diagnostics.launcher_graphics.texture_filtering +
+                  (diagnostics.launcher_graphics.upscaling.empty()
+                       ? std::string()
+                       : " | Upscaling=" + diagnostics.launcher_graphics.upscaling));
   lines.push_back("Runtime OS: " + diagnostics.system.os);
   lines.push_back("Runtime CPU: " + diagnostics.system.cpu +
                   " | logical processors=" + std::to_string(diagnostics.system.logical_processors));

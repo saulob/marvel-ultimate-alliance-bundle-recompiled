@@ -23,6 +23,8 @@ REXCVAR_DECLARE(bool, mua_show_render_resolution);
 REXCVAR_DECLARE(bool, mua_show_frame_counter);
 REXCVAR_DECLARE(bool, mua_msaa_compatibility);
 REXCVAR_DECLARE(std::string, mua_aspect_ratio);
+REXCVAR_DECLARE(std::string, mua_upscaler);
+REXCVAR_DECLARE(std::string, mua_upscale_quality);
 REXCVAR_DECLARE(bool, detailed_logging);
 REXCVAR_DECLARE(std::string, mua_graphics_adapter);
 REXCVAR_DECLARE(int32_t, mua_launcher_x);
@@ -60,6 +62,12 @@ void ApplyMultisampling();
 
 // Sets async_shader_wait_ms for the Frame rate choice. Call with ApplyMultisampling.
 void ApplyShaderWait();
+
+// Sets present_effect for the game's Upscaling choice. Call before the presenter is created (OnPreSetup).
+void ApplyUpscaler(const GameSettings& settings);
+
+// Logs the internal and output render sizes of the Upscaling choice. Call after ApplyGameSettings.
+void LogUpscaling();
 
 // Keeps the guest video mode off the window size, which ReXGlue otherwise reports. Call once the window exists and
 // before the guest starts.

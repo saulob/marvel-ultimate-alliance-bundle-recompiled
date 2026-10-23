@@ -49,3 +49,10 @@ address = 0x8243E02C
 name = "mua_aspect_display_aspect"
 registers = ["f13"]
 after_instruction = false
+
+# Keeps the Upscaling back buffer for the D3D device where sub_824FE4C8 falls back to the video mode in r8 and r9.
+[[midasm_hook]]
+address = 0x824FE714
+name = "mua_upscale_device_back_buffer"
+registers = ["r8", "r9"]
+after_instruction = false

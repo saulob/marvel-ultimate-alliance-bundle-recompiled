@@ -70,7 +70,7 @@ const MapFile kMaps[] = {
 
 // The hooks a game's code can lack because its codegen output or its audio engine does not need them.
 const std::set<std::string> kOptionalHooks = {"MUA_GUEST_INDIRECT_TAIL_CALL", "MUA_GUEST_AUDIO_BARRIER",
-                                              "MUA_GUEST_RESET_EVENT"};
+                                              "MUA_GUEST_RESET_EVENT", "MUA_GUEST_MEMMOVE"};
 const std::set<std::string> kOptionalConstants = {"kIndirectTailTable"};
 
 // sub_8248A0A0 holds the swap for another vblank while the interval in the high half of its argument has not passed
@@ -177,6 +177,12 @@ void TestMapsCarryTheSameHooks() {
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_RESET_EVENT) 0").size() == 1);
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_AUDIO_BARRIER) ").empty());
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_RESET_EVENT) ").empty());
+  CHECK(Matches(mua1_map, "#define (MUA_GUEST_HAS_MEMMOVE) 1").size() == 1);
+  CHECK(Matches(mua1_map, "#define (MUA_GUEST_MEMMOVE) sub_8282A150").size() == 1);
+  for (const std::string& text : {gold_map, mua2_map}) {
+    CHECK(Matches(text, "#define (MUA_GUEST_HAS_MEMMOVE) 0").size() == 1);
+    CHECK(Matches(text, "#define (MUA_GUEST_MEMMOVE) ").empty());
+  }
 }
 
 void TestEveryUsedHookIsMapped() {
@@ -211,9 +217,13 @@ void TestOptionalHooksFollowTheirFlags() {
   const std::string ring = ReadSource(kSources / "sound_stream_ring.cpp");
   const std::string barrier = ReadSource(kSources / "xaudio_worker_barrier.cpp");
   const std::string tail = ReadSource(kSources / "indirect_tail_calls.cpp");
+  const std::string crt = ReadSource(kSources / "crt_native.cpp");
+  const std::string report = ReadSource(kSources / "guest_hook_report.cpp");
   CHECK(ring.find("#if MUA_GUEST_HAS_RESET_EVENT") != std::string::npos);
   CHECK(barrier.find("#if MUA_GUEST_HAS_AUDIO_BARRIER") != std::string::npos);
   CHECK(tail.find("#if MUA_GUEST_HAS_INDIRECT_TAIL_CALLS") != std::string::npos);
+  CHECK(crt.find("#if MUA_GUEST_HAS_MEMMOVE") != std::string::npos);
+  CHECK(report.find("#if MUA_GUEST_HAS_MEMMOVE") != std::string::npos);
 }
 
 void TestSelection() {

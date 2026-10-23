@@ -357,6 +357,52 @@ void TestAspectRatioVideoMode() {
   mua::PinGuestVideoMode();
 }
 
+void TestUpscalingPerGame(const Scratch& scratch) {
+  std::printf("the upscaler is the game's own and sets the presenter effect only when on\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.SelectedGame() == mua::GameId::kMua1);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "native");
+  settings.Set("mua_upscaler", "fsr");
+  settings.Set("mua_upscale_quality", "balanced");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "native");
+
+  const std::string effect = rex::cvar::GetFlagByName("present_effect");
+  const std::string window_width = rex::cvar::GetFlagByName("window_width");
+  mua::ApplyUpscaler(settings);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == effect);
+
+  CHECK(settings.Save());
+  const toml::table mua1 = toml::parse_file((root / "mua1" / "game_settings.toml").string());
+  CHECK(mua1["mua_upscaler"].value<std::string>() == "fsr");
+  CHECK(mua1["mua_upscale_quality"].value<std::string>() == "balanced");
+  CHECK(!fs::exists(root / "mua1_gold" / "game_settings.toml"));
+  CHECK(!toml::parse_file(scratch.player.string()).contains("mua_upscaler"));
+
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  reopened.SelectGame(mua::GameId::kMua1);
+  CHECK(reopened.Get("mua_upscale_quality") == "balanced");
+  mua::ApplyUpscaler(reopened);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == "fsr");
+  reopened.ApplyGameSettings();
+  mua::LogUpscaling();
+  CHECK(rex::cvar::GetFlagByName("window_width") == window_width);
+  CHECK(rex::cvar::GetFlagByName("mua_upscale_quality") == "balanced");
+
+  rex::cvar::SetFlagByName("present_effect", effect);
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  fs::remove_all(root / "mua1");
+  fs::remove(scratch.player);
+}
+
 }  // namespace
 
 int main() {
@@ -373,6 +419,7 @@ int main() {
   TestGuestVideoModePin();
   TestAspectRatioPerGame(scratch);
   TestAspectRatioVideoMode();
+  TestUpscalingPerGame(scratch);
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

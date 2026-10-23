@@ -125,8 +125,8 @@ void TestStartupBlock() {
                   "fingerprint=profile:mua-gold-x360 | status=verified"));
   CHECK(Has(text, "Runtime game sha256: ABCDEF"));
   CHECK(Has(text, "Runtime timing: frame_rate=60 | present=guest 60Hz | host VBlank (VSync On)"));
-  CHECK(Has(text, "Runtime renderer: render=1280x720 | guest=1280x720 | msaa=2x native | anti-aliasing=Off | "
-                  "texture filtering=4x | allow_invalid_fetch_constants=true | target=rov"));
+  CHECK(Has(text, "Runtime renderer: guest=1280x720 | render resolution=1280x720 | msaa=2x native | "
+                  "anti-aliasing=Off | texture filtering=4x | allow_invalid_fetch_constants=true | target=rov"));
   CHECK(Has(text, "Runtime input: keyboard_mode=On | controller=Xbox One S Controller"));
 }
 
@@ -163,8 +163,9 @@ void TestSelectedAspect() {
     const std::string text = Join(mua::FormatStartupDiagnostics(diagnostics));
     CHECK(Has(text, (std::string("Aspect Ratio=") + info.label + " | VSync=Off").c_str()));
     CHECK(Has(text, (std::string("| aspect=") + info.key + "\n").c_str()));
-    CHECK(Has(text, ("Runtime renderer: render=" + std::to_string(render.width) + "x" + std::to_string(render.height) +
-                     " | guest=" + std::to_string(mua::CanvasWidth(info.aspect)) + "x720")
+    CHECK(Has(text, ("Runtime renderer: guest=" + std::to_string(mua::CanvasWidth(info.aspect)) +
+                     "x720 | render resolution=" +
+                     std::to_string(render.width) + "x" + std::to_string(render.height))
                         .c_str()));
   }
 }
@@ -220,6 +221,39 @@ void TestPrivacy() {
 
 }  // namespace
 
+void TestUpscaling() {
+  std::printf("upscaling names the resolution the game draws at and the presenter effect\n");
+  mua::StartupDiagnostics diagnostics = Sample();
+  diagnostics.launcher_graphics.upscaling = "AMD FSR 1 Balanced";
+  diagnostics.graphics.render_width = 2560;
+  diagnostics.graphics.render_height = 1440;
+  diagnostics.graphics.guest_width = 752;
+  diagnostics.graphics.guest_height = 424;
+  diagnostics.graphics.internal_width = 1504;
+  diagnostics.graphics.internal_height = 848;
+  diagnostics.graphics.fsr_input_width = 1504;
+  diagnostics.graphics.fsr_input_height = 848;
+  diagnostics.graphics.present_effect = "fsr";
+  diagnostics.graphics.upscaling = "AMD FSR 1 Balanced";
+  std::string text = Join(mua::FormatStartupDiagnostics(diagnostics));
+  CHECK(Has(text, "Texture filtering=4x | Upscaling=AMD FSR 1 Balanced"));
+  CHECK(Has(text, "Runtime renderer: guest=752x424 | internal=1504x848 | fsr input=1504x848 | "
+                  "render resolution=2560x1440 | presenter=fsr | upscaling=AMD FSR 1 Balanced | "));
+
+  diagnostics.graphics.guest_width = 1280;
+  diagnostics.graphics.guest_height = 720;
+  diagnostics.graphics.internal_width = 2560;
+  diagnostics.graphics.internal_height = 1440;
+  diagnostics.graphics.fsr_input_width = 0;
+  diagnostics.graphics.fsr_input_height = 0;
+  diagnostics.graphics.present_effect = "bilinear";
+  diagnostics.graphics.upscaling = "Off";
+  text = Join(mua::FormatStartupDiagnostics(diagnostics));
+  CHECK(Has(text, "Runtime renderer: guest=1280x720 | internal=2560x1440 | render resolution=2560x1440 | "
+                  "presenter=bilinear | upscaling=Off | "));
+  CHECK(!Has(text, "fsr input="));
+}
+
 int main() {
   TestIdentity();
   TestStartupBlock();
@@ -229,6 +263,7 @@ int main() {
   TestPresentationWording();
   TestCleanExit();
   TestPrivacy();
+  TestUpscaling();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

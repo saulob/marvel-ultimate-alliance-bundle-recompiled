@@ -32,6 +32,8 @@ constexpr std::string_view kEssentialInfo[] = {
     "Player settings:",
     "Game files:",
     "Graphics card:",
+    "Upscaling:",
+    "Guest back buffer:",
     "DXGI adapter:",
     "Vulkan device:",
     "Vulkan instance API version",

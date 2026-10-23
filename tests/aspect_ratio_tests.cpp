@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "aspect_ratio.h"
 
@@ -191,7 +192,7 @@ void TestSources() {
   std::printf("setting, launcher and hook wiring\n");
   const std::string settings = ReadText(kSrcDir / "settings.cpp");
   CHECK(Has(settings, "REXCVAR_DEFINE_STRING(mua_aspect_ratio, \"16:9\""));
-  CHECK(Has(settings, "kGameScopedKeys[] = {\"mua_frame_rate\", \"mua_aspect_ratio\"}"));
+  CHECK(Has(settings, "kGameScopedKeys[] = {\"mua_frame_rate\", \"mua_aspect_ratio\","));
   CHECK(Has(settings, "void ApplyAspectRatio()"));
   CHECK(Has(settings, "REXLOG_INFO(\"Aspect ratio: {} ({}x{})\""));
 
@@ -219,6 +220,9 @@ void TestSources() {
   CHECK(Has(hooks, "void mua_aspect_back_buffer(PPCRegister& width, PPCRegister& height)"));
   CHECK(Has(hooks, "void mua_aspect_display_aspect(PPCRegister& game_aspect)"));
   CHECK(Has(hooks, "mua::BackBufferWidthFor("));
+  CHECK(Has(hooks, "mua::UpscaledBackBuffer(canvas,"));
+  CHECK(Has(hooks, "height.s64 = back_buffer.height;"));
+  CHECK(Has(hooks, "if (width.s32 != mua::kHdBackBufferWidth || height.s32 != mua::kHdBackBufferHeight) {"));
   CHECK(Has(hooks, "mua::DisplayAspectFor("));
   CHECK(!Has(hooks, "gw2"));
   CHECK(!Has(hooks, "DEBUG_SAULO"));
@@ -283,6 +287,64 @@ void TestGuestSites() {
 #endif
 }
 
+// Only MUA1's device creation falls back from an Upscaling back buffer to the video mode, at one store.
+void TestDeviceBackBufferSite() {
+  std::printf("device back buffer site\n");
+  const std::string hooks = ReadText(kSrcDir / "aspect_render.cpp");
+  CHECK(Has(hooks, "void mua_upscale_device_back_buffer(PPCRegister& width, PPCRegister& height)"));
+  CHECK(Has(hooks, "if (!g_back_buffer_upscaled) {"));
+  CHECK(Has(hooks, "mua::VideoModeSize(ConfiguredAspect())"));
+  const auto without_cr = [](const std::string& text) {
+    std::string normalized;
+    for (const char c : text) {
+      if (c != '\r') {
+        normalized += c;
+      }
+    }
+    return normalized;
+  };
+  const char* site = "address = 0x824FE714\nname = \"mua_upscale_device_back_buffer\"\nregisters = [\"r8\", \"r9\"]";
+  for (const char* game : {"mua1", "mua1-gold", "mua2"}) {
+    const std::string overrides = without_cr(ReadText(kSrcDir / ".." / "config" / game / "overrides.toml"));
+    const bool mua1 = std::string_view(game) == "mua1";
+    CHECK(Has(overrides, site) == mua1);
+    CHECK(Has(overrides, "mua_upscale_device_back_buffer") == mua1);
+  }
+
+#ifdef MUA_GENERATED_ROOT
+  // 0x824FE714 is the seventh instruction after loc_824FE6F8, the store of the video mode width in r8.
+  const fs::path dir = fs::path(MUA_GENERATED_ROOT) / "mua1";
+  if (!fs::exists(dir)) {
+    return;
+  }
+  bool found = false;
+  for (const auto& entry : fs::directory_iterator(dir)) {
+    if (entry.path().extension() != ".cpp") {
+      continue;
+    }
+    const std::string text = without_cr(ReadText(entry.path()));
+    const size_t label = text.find("\nloc_824FE6F8:\n");
+    if (label == std::string::npos) {
+      continue;
+    }
+    found = true;
+    std::vector<std::string> instructions;
+    for (size_t at = text.find("\t// ", label); at != std::string::npos && instructions.size() < 9;
+         at = text.find("\t// ", at + 1)) {
+      instructions.push_back(text.substr(at + 4, text.find('\n', at) - at - 4));
+    }
+    CHECK(instructions.size() == 9);
+    if (instructions.size() == 9) {
+      CHECK(instructions[2] == "lwz r8,148(r31)");
+      CHECK(instructions[4] == "lwz r9,152(r31)");
+      CHECK(instructions[7] == "stw r8,0(r28)");
+      CHECK(instructions[8] == "stw r9,28(r31)");
+    }
+  }
+  CHECK(found);
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +356,7 @@ int main() {
   TestHookMaths();
   TestSources();
   TestGuestSites();
+  TestDeviceBackBufferSite();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

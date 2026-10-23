@@ -1,0 +1,421 @@
+gpu_work_summary (on, hot reload): every 10 seconds the D3D12 command processor logs its swaps per second, the draws,
+resolves and submissions per swap and the time it was blocked on the GPU fence and on the async submission thread
+(GPU-bound or CPU-bound). It also logs the EDRAM render targets with the most drawn pixels (largest viewport, guest
+and host size, draws per swap, share of pixels), the resolves by source pitch and destination texture size, and the
+swap packet, front buffer texture and presenter input sizes. The presenter logs its input, output and swap chain
+sizes and the effect chain whenever they change.
+
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index 60b0e72..61fc0ac 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -666,6 +666,10 @@ class Presenter {
+                                                uint32_t host_rt_width, uint32_t host_rt_height,
+                                                uint32_t max_rt_width, uint32_t max_rt_height,
+                                                const GuestOutputPaintConfig& config) const;
++  // Logs the guest output size, the effects scaling it and the size they write into the swap chain when they change.
++  // Painting the main target is serialized, so it needs no lock.
++  static void LogGuestOutputPaintFlow(const GuestOutputPaintFlow& flow, uint32_t swap_chain_width,
++                                      uint32_t swap_chain_height);
+   // is_8bpc_out_ref is where to write whether the source actually has no more
+   // than 8 bits of precision per channel (though the image provided by the
+   // refresher may still have a higher storage precision) - if not written, it
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index afe49a9..b4dd70b 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -10,7 +10,10 @@
+  */
+ 
+ #include <algorithm>
++#include <array>
+ #include <chrono>
++#include <cmath>
++#include <cstdio>
+ #include <cstdlib>
+ #include <bit>
+ #include <cstdarg>
+@@ -78,10 +81,214 @@ REXCVAR_DEFINE_BOOL(gpu_skip_unchanged_constant_writes, true, "GPU",
+                     "game rewrites float, bool, loop or fetch constants with the values they have")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(gpu_work_summary, true, "GPU/D3D12",
++                    "Every 10 seconds, log the draws, resolves and submissions per swap and the time "
++                    "the command processor waited for the GPU and for the submission thread")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::d3d12 {
+ 
+ namespace {
+ 
++// One EDRAM render target as draws see it: the largest viewport drawn into it and the guest pixels those draws cover.
++struct GpuTargetStats {
++  bool depth_only = false;
++  uint32_t base = 0;
++  uint32_t format = 0;
++  uint32_t msaa = 0;
++  uint32_t pitch = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  uint32_t draws = 0;
++  uint64_t pixels = 0;
++};
++
++struct GpuResolveStats {
++  uint32_t source_pitch = 0;
++  uint32_t dest_pitch = 0;
++  uint32_t dest_height = 0;
++  uint32_t count = 0;
++};
++
++// Touched only by the command processor thread.
++struct GpuWorkSummary {
++  std::chrono::steady_clock::time_point window_start;
++  uint64_t window_first_submission = 0;
++  uint32_t swaps = 0;
++  uint32_t draws = 0;
++  uint32_t copies = 0;
++  std::array<GpuTargetStats, 16> targets{};
++  size_t target_count = 0;
++  uint32_t untracked_draws = 0;
++  std::array<GpuResolveStats, 8> resolves{};
++  size_t resolve_count = 0;
++  uint32_t swap_packet_width = 0;
++  uint32_t swap_packet_height = 0;
++  uint32_t swap_texture_width = 0;
++  uint32_t swap_texture_height = 0;
++  uint32_t presenter_input_width = 0;
++  uint32_t presenter_input_height = 0;
++  std::chrono::steady_clock::duration fence_wait{};
++  std::chrono::steady_clock::duration submission_thread_wait{};
++};
++GpuWorkSummary g_gpu_work_summary;
++
++std::string SizeText(uint32_t width, uint32_t height) {
++  return std::to_string(width) + "x" + std::to_string(height);
++}
++
++// The guest viewport of a draw, or its window scissor when the viewport transform is off.
++std::pair<uint32_t, uint32_t> DrawExtent(const RegisterFile& regs, uint32_t pitch) {
++  const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
++  uint32_t width = 0;
++  uint32_t height = 0;
++  const float x_scale = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE);
++  const float y_scale = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE);
++  if (vte.vport_x_scale_ena && vte.vport_y_scale_ena && std::isfinite(x_scale) && std::isfinite(y_scale)) {
++    width = uint32_t(std::min(std::fabs(x_scale) * 2.0f + 0.5f, 16384.0f));
++    height = uint32_t(std::min(std::fabs(y_scale) * 2.0f + 0.5f, 16384.0f));
++  } else {
++    const auto tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
++    const auto br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
++    width = br.br_x > tl.tl_x ? br.br_x - tl.tl_x : 0;
++    height = br.br_y > tl.tl_y ? br.br_y - tl.tl_y : 0;
++  }
++  return {pitch ? std::min(width, pitch) : width, height};
++}
++
++void NoteGpuWorkDraw(const RegisterFile& regs, xenos::EdramMode edram_mode) {
++  GpuWorkSummary& summary = g_gpu_work_summary;
++  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  GpuTargetStats draw;
++  draw.depth_only = edram_mode == xenos::EdramMode::kDepthOnly;
++  if (draw.depth_only) {
++    const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
++    draw.base = depth_info.depth_base;
++    draw.format = uint32_t(depth_info.depth_format);
++  } else {
++    const auto color_info = regs.Get<reg::RB_COLOR_INFO>();
++    draw.base = color_info.color_base;
++    draw.format = uint32_t(color_info.color_format);
++  }
++  draw.msaa = 1u << uint32_t(surface_info.msaa_samples);
++  draw.pitch = surface_info.surface_pitch;
++  const auto [width, height] = DrawExtent(regs, draw.pitch);
++  GpuTargetStats* target = nullptr;
++  for (size_t i = 0; i < summary.target_count; ++i) {
++    GpuTargetStats& known = summary.targets[i];
++    if (known.depth_only == draw.depth_only && known.base == draw.base && known.format == draw.format &&
++        known.msaa == draw.msaa && known.pitch == draw.pitch) {
++      target = &known;
++      break;
++    }
++  }
++  if (!target) {
++    if (summary.target_count == summary.targets.size()) {
++      ++summary.untracked_draws;
++      return;
++    }
++    target = &summary.targets[summary.target_count++];
++    *target = draw;
++  }
++  target->width = std::max(target->width, width);
++  target->height = std::max(target->height, height);
++  ++target->draws;
++  target->pixels += uint64_t(width) * height;
++}
++
++void NoteGpuWorkResolve(const RegisterFile& regs) {
++  GpuWorkSummary& summary = g_gpu_work_summary;
++  const uint32_t source_pitch = regs.Get<reg::RB_SURFACE_INFO>().surface_pitch;
++  const auto dest = regs.Get<reg::RB_COPY_DEST_PITCH>();
++  for (size_t i = 0; i < summary.resolve_count; ++i) {
++    GpuResolveStats& known = summary.resolves[i];
++    if (known.source_pitch == source_pitch && known.dest_pitch == dest.copy_dest_pitch &&
++        known.dest_height == dest.copy_dest_height) {
++      ++known.count;
++      return;
++    }
++  }
++  if (summary.resolve_count < summary.resolves.size()) {
++    summary.resolves[summary.resolve_count++] = {source_pitch, dest.copy_dest_pitch, dest.copy_dest_height, 1};
++  }
++}
++
++std::string GpuTargetsText(GpuWorkSummary& summary, double swaps, uint32_t scale_x, uint32_t scale_y) {
++  std::sort(summary.targets.begin(), summary.targets.begin() + summary.target_count,
++            [](const GpuTargetStats& a, const GpuTargetStats& b) { return a.pixels > b.pixels; });
++  uint64_t total = 0;
++  for (size_t i = 0; i < summary.target_count; ++i) {
++    total += summary.targets[i].pixels;
++  }
++  std::string text;
++  for (size_t i = 0; i < std::min<size_t>(summary.target_count, 5); ++i) {
++    const GpuTargetStats& target = summary.targets[i];
++    char draws[32];
++    std::snprintf(draws, sizeof(draws), "%.1f", target.draws / swaps);
++    text += (i ? "; " : "") + std::string(target.depth_only ? "depth" : "color") + " fmt " +
++            std::to_string(target.format) + " " + std::to_string(target.msaa) + "x base " +
++            std::to_string(target.base) + " pitch " + std::to_string(target.pitch) + ": " +
++            SizeText(target.width, target.height) + " guest -> " +
++            SizeText(target.width * scale_x, target.height * scale_y) + " host, " + draws + " draws/swap, " +
++            std::to_string(total ? target.pixels * 100 / total : 0) + "% of pixels";
++  }
++  if (summary.untracked_draws) {
++    text += "; " + std::to_string(summary.untracked_draws) + " draws on untracked targets";
++  }
++  return text.empty() ? "none" : text;
++}
++
++std::string GpuResolvesText(GpuWorkSummary& summary, double swaps) {
++  std::sort(summary.resolves.begin(), summary.resolves.begin() + summary.resolve_count,
++            [](const GpuResolveStats& a, const GpuResolveStats& b) { return a.count > b.count; });
++  std::string text;
++  for (size_t i = 0; i < std::min<size_t>(summary.resolve_count, 5); ++i) {
++    const GpuResolveStats& resolve = summary.resolves[i];
++    char count[32];
++    std::snprintf(count, sizeof(count), "%.1f", resolve.count / swaps);
++    text += (i ? "; " : "") + std::string("pitch ") + std::to_string(resolve.source_pitch) + " -> " +
++            SizeText(resolve.dest_pitch, resolve.dest_height) + " texture, " + count + "/swap";
++  }
++  return text.empty() ? "none" : text;
++}
++
++void NoteGpuWorkSwap(uint64_t current_submission, uint32_t scale_x, uint32_t scale_y, bool rov) {
++  constexpr auto kWindow = std::chrono::seconds(10);
++  GpuWorkSummary& summary = g_gpu_work_summary;
++  const auto now = std::chrono::steady_clock::now();
++  if (summary.swaps == 0 && summary.window_first_submission == 0) {
++    summary.window_start = now;
++    summary.window_first_submission = current_submission;
++  }
++  ++summary.swaps;
++  const auto elapsed = now - summary.window_start;
++  if (elapsed < kWindow) {
++    return;
++  }
++  if (REXCVAR_GET(gpu_work_summary)) {
++    const double swaps = double(summary.swaps);
++    const auto per_swap_ms = [swaps](std::chrono::steady_clock::duration total) {
++      return std::chrono::duration<double, std::milli>(total).count() / swaps;
++    };
++    REXGPU_INFO(
++        "GPU work: {:.1f} swaps/s; per swap {:.0f} draws, {:.1f} resolves, {:.1f} submissions, "
++        "{:.2f} ms waiting for the GPU, {:.2f} ms waiting for the submission thread",
++        swaps / std::chrono::duration<double>(elapsed).count(), summary.draws / swaps, summary.copies / swaps,
++        double(current_submission - summary.window_first_submission) / swaps, per_swap_ms(summary.fence_wait),
++        per_swap_ms(summary.submission_thread_wait));
++    REXGPU_INFO("GPU targets ({}, scale {}x{}): {}", rov ? "rov" : "host render targets", scale_x, scale_y,
++                GpuTargetsText(summary, swaps, scale_x, scale_y));
++    REXGPU_INFO("GPU resolves: {}", GpuResolvesText(summary, swaps));
++    REXGPU_INFO("GPU swap: packet {} guest, front buffer texture {} guest, presenter input {} host",
++                SizeText(summary.swap_packet_width, summary.swap_packet_height),
++                SizeText(summary.swap_texture_width, summary.swap_texture_height),
++                SizeText(summary.presenter_input_width, summary.presenter_input_height));
++  }
++  summary = GpuWorkSummary{};
++  summary.window_start = now;
++  summary.window_first_submission = current_submission;
++}
++
+ // Returns whether any stored value changed; branch-free so it vectorizes like memory::copy_and_swap.
+ bool StoreSwappedRegisters(uint32_t* __restrict dest, const uint32_t* __restrict src,
+                            uint32_t count) {
+@@ -2118,6 +2325,10 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+     return;
+   }
+ 
++  NoteGpuWorkSwap(submission_current_, texture_cache_->draw_resolution_scale_x(),
++                  texture_cache_->draw_resolution_scale_y(),
++                  render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock);
++
+   // In case the swap command is the only one in the frame.
+   if (!BeginSubmission(true)) {
+     REXGPU_ERROR("IssueSwap: BeginSubmission failed");
+@@ -2215,6 +2426,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+     }
+   }
+ 
++  g_gpu_work_summary.swap_packet_width = frontbuffer_width;
++  g_gpu_work_summary.swap_packet_height = frontbuffer_height;
++  g_gpu_work_summary.swap_texture_width = frontbuffer_width_unscaled;
++  g_gpu_work_summary.swap_texture_height = frontbuffer_height_unscaled;
++  g_gpu_work_summary.presenter_input_width = guest_output_width;
++  g_gpu_work_summary.presenter_input_height = guest_output_height;
++
+   system::X_VIDEO_MODE video_mode;
+   kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+@@ -2575,6 +2793,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
++  ++g_gpu_work_summary.draws;
+ 
+   // Between draws is a packet boundary like the primary buffer end. Ending inside an occlusion
+   // query would lose its result.
+@@ -2596,6 +2815,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+ 
+   bool surface_pitch_is_zero = regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == 0;
++  if (edram_mode == xenos::EdramMode::kColorDepth || edram_mode == xenos::EdramMode::kDepthOnly) {
++    NoteGpuWorkDraw(regs, edram_mode);
++  }
+ 
+   // Vertex shader analysis.
+   auto vertex_shader = static_cast<D3D12Shader*>(active_vertex_shader());
+@@ -3233,6 +3455,8 @@ bool D3D12CommandProcessor::IssueCopy() {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
++  ++g_gpu_work_summary.copies;
++  NoteGpuWorkResolve(*register_file_);
+   if (DevFrameLog& frame_log = GetDevFrameLog(); frame_log.active) {
+     const RegisterFile& regs = *register_file_;
+     auto copy_control = regs.Get<reg::RB_COPY_CONTROL>();
+@@ -3511,7 +3735,9 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+                     SUCCEEDED(queue_operations_since_submission_fence_->SetEventOnCompletion(
+                         fence_value, fence_completion_event_)))) {
+         PROFILE_CMD_BUFFER_STALL();
++        const auto wait_start = std::chrono::steady_clock::now();
+         WaitForSingleObject(fence_completion_event_, INFINITE);
++        g_gpu_work_summary.fence_wait += std::chrono::steady_clock::now() - wait_start;
+         queue_operations_done_since_submission_signal_ = false;
+       } else {
+         REXGPU_ERROR(
+@@ -3530,7 +3756,9 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+     if (SUCCEEDED(
+             submission_fence_->SetEventOnCompletion(await_submission, fence_completion_event_))) {
+       PROFILE_CMD_BUFFER_STALL();
++      const auto wait_start = std::chrono::steady_clock::now();
+       WaitForSingleObject(fence_completion_event_, INFINITE);
++      g_gpu_work_summary.fence_wait += std::chrono::steady_clock::now() - wait_start;
+       submission_completed_ = submission_fence_->GetCompletedValue();
+     }
+   }
+@@ -4088,9 +4316,11 @@ void D3D12CommandProcessor::AwaitAsyncSubmissions() {
+   if (!async_submission_enabled_) {
+     return;
+   }
++  const auto wait_start = std::chrono::steady_clock::now();
+   std::unique_lock<std::mutex> lock(async_submission_mutex_);
+   async_submission_idle_cv_.wait(
+       lock, [this]() { return async_submission_queue_.empty() && !async_submission_busy_; });
++  g_gpu_work_summary.submission_thread_wait += std::chrono::steady_clock::now() - wait_start;
+ }
+ 
+ void D3D12CommandProcessor::AsyncSubmissionThread() {
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index f24a757..b885bb4 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -656,6 +656,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+         }
+       }
+     }
++    LogGuestOutputPaintFlow(guest_output_flow, paint_context_.swap_chain_width, paint_context_.swap_chain_height);
+ 
+     if (guest_output_flow.effect_count) {
+       ID3D12DescriptorHeap* view_heap = paint_context_.view_heap.Get();
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index a49f66c..9b1e763 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -13,6 +13,7 @@
+ #include <atomic>
+ #include <cctype>
+ #include <chrono>
++#include <string>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -883,6 +884,60 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
+   return std::move(consumer_lock);
+ }
+ 
++void Presenter::LogGuestOutputPaintFlow(const GuestOutputPaintFlow& flow, uint32_t swap_chain_width,
++                                        uint32_t swap_chain_height) {
++  struct Shape {
++    uint32_t input_width, input_height, output_width, output_height, swap_chain_width, swap_chain_height;
++    size_t effect_count;
++    GuestOutputPaintEffect last_effect;
++    bool operator==(const Shape&) const = default;
++  };
++  static Shape logged{};
++  if (!flow.effect_count) {
++    return;
++  }
++  const std::pair<uint32_t, uint32_t>& output = flow.effect_output_sizes[flow.effect_count - 1];
++  const Shape shape{flow.properties.frontbuffer_width, flow.properties.frontbuffer_height, output.first,
++                    output.second, swap_chain_width, swap_chain_height, flow.effect_count,
++                    flow.effects[flow.effect_count - 1]};
++  if (shape == logged) {
++    return;
++  }
++  logged = shape;
++  std::string effects;
++  for (size_t i = 0; i < flow.effect_count; ++i) {
++    const char* name = "other";
++    switch (flow.effects[i]) {
++      case GuestOutputPaintEffect::kBilinear:
++      case GuestOutputPaintEffect::kBilinearDither:
++        name = "bilinear";
++        break;
++      case GuestOutputPaintEffect::kCasSharpen:
++      case GuestOutputPaintEffect::kCasSharpenDither:
++        name = "cas sharpen";
++        break;
++      case GuestOutputPaintEffect::kCasResample:
++      case GuestOutputPaintEffect::kCasResampleDither:
++        name = "cas resample";
++        break;
++      case GuestOutputPaintEffect::kFsrEasu:
++        name = "fsr easu";
++        break;
++      case GuestOutputPaintEffect::kFsrRcas:
++      case GuestOutputPaintEffect::kFsrRcasDither:
++        name = "fsr rcas";
++        break;
++      default:
++        break;
++    }
++    effects += (i ? ", " : "") + std::string(name) + " " + std::to_string(flow.effect_output_sizes[i].first) + "x" +
++               std::to_string(flow.effect_output_sizes[i].second);
++  }
++  REXLOG_INFO("Presenter: input {}x{} | output {}x{} | swap chain {}x{} | effects: {}", shape.input_width,
++              shape.input_height, shape.output_width, shape.output_height, swap_chain_width, swap_chain_height,
++              effects);
++}
++
+ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+     const GuestOutputProperties& properties, uint32_t host_rt_width, uint32_t host_rt_height,
+     uint32_t max_rt_width, uint32_t max_rt_height, const GuestOutputPaintConfig& config) const {

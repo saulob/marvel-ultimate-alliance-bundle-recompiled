@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/system/mmio_handler.h>
 #include <rex/system/xmemory.h>
@@ -83,3 +84,29 @@ REX_HOOK_RAW(MUA_GUEST_MEMSET) {
   }
   std::memset(rex::memory::GuestPtr(base, dest), int(ctx.r4.u32 & 0xFF), size);
 }
+
+#if MUA_GUEST_HAS_MEMMOVE
+REXCVAR_DEFINE_BOOL(mua_native_memmove, true, "Marvel Ultimate Alliance",
+                    "Run the game's memmove as the host memmove where both ranges are flat guest memory")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+// r3 destination, r4 source, r5 size; returns the destination. Below the source (signed compare) it tail-calls memcpy,
+// which leaves the destination at r1 - 8; above it, it copies backward.
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_MEMMOVE));
+REX_HOOK_RAW(MUA_GUEST_MEMMOVE) {
+  const uint32_t dest = ctx.r3.u32;
+  const uint32_t source = ctx.r4.u32;
+  const uint32_t size = ctx.r5.u32;
+  if (!REXCVAR_GET(mua_native_memmove) || !IsFlatHostRange(dest, size) || !IsFlatHostRange(source, size)) {
+    MUA_GUEST_ORIGINAL(MUA_GUEST_MEMMOVE)(ctx, base);
+    return;
+  }
+  if (dest == source) {
+    return;
+  }
+  if (ctx.r3.s32 < ctx.r4.s32) {
+    *rex::memory::GuestPtr<uint64_t*>(base, ctx.r1.u32 - 8) = std::byteswap(ctx.r3.u64);
+  }
+  std::memmove(rex::memory::GuestPtr(base, dest), rex::memory::GuestPtr(base, source), size);
+}
+#endif  // MUA_GUEST_HAS_MEMMOVE
