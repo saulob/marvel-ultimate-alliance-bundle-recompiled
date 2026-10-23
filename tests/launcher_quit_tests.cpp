@@ -9,6 +9,7 @@
 #include <string>
 
 #include "launcher_quit.h"
+#include "launcher_shortcuts.h"
 
 namespace {
 
@@ -74,9 +75,36 @@ void TestWindowClose() {
   CHECK(Has(app, "app_context().QuitFromUIThread();"));
 }
 
+void TestSaveShortcut() {
+  std::printf("Ctrl+S runs the Save button's action, and only then
+");
+  mua::SaveShortcutState state;
+  state.ctrl_down = true;
+  state.s_pressed = true;
+  CHECK(mua::SaveShortcutFires(state));
+  for (bool mua::SaveShortcutState::*blocker :
+       {&mua::SaveShortcutState::text_input, &mua::SaveShortcutState::capturing_key,
+        &mua::SaveShortcutState::popup_open, &mua::SaveShortcutState::starting}) {
+    mua::SaveShortcutState blocked = state;
+    blocked.*blocker = true;
+    CHECK(!mua::SaveShortcutFires(blocked));
+  }
+  state.ctrl_down = false;
+  CHECK(!mua::SaveShortcutFires(state));
+  state.ctrl_down = true;
+  state.s_pressed = false;
+  CHECK(!mua::SaveShortcutFires(state));
+
+  const std::string launcher = ReadSource("launcher.cpp");
+  CHECK(Has(launcher, "ImGui::IsKeyPressed(ImGuiKey_S, false)"));
+  CHECK(Has(launcher, "launcher_->Save();"));
+  CHECK(!Has(launcher, "settings_.Save()"));
+}
+
 }  // namespace
 
 int main() {
+  TestSaveShortcut();
   TestDecision();
   TestQuitWiring();
   TestFooterHint();

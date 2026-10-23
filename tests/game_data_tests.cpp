@@ -67,6 +67,18 @@ void TestFolders() {
   CHECK(mua::GameUserDataRoot(Mua2(), root) == root / "mua2");
 }
 
+void TestCacheFolders() {
+  std::printf("each game builds its shader and pipeline storage in its own folder
+");
+  const fs::path root = "cache";
+  CHECK(mua::GameCacheRoot(Mua1(), root) == root / "mua1");
+  CHECK(mua::GameCacheRoot(Gold(), root) == root / "mua1_gold");
+  CHECK(mua::GameCacheRoot(Mua2(), root) == root / "mua2");
+  CHECK(mua::GameCacheRoot(Mua1(), root) != mua::GameCacheRoot(Gold(), root));
+  CHECK(mua::ProfileOf(Mua1()).title_id == mua::ProfileOf(Gold()).title_id);
+  CHECK(mua::ProfileOf(Mua2()).title_id != mua::ProfileOf(Gold()).title_id);
+}
+
 void TestGoldTitleFolderMoves() {
   std::printf("Gold Edition's saves move out of the root, once\n");
   Scratch scratch;
@@ -219,6 +231,9 @@ void TestWiring() {
 
   CHECK(Has(app, "paths.game_data_root = game.data_dir;"));
   CHECK(Has(app, "paths.user_data_root = mua::GameUserDataRoot(*game.game, defaults.user_data_root);"));
+  CHECK(Has(app, "paths.cache_root = mua::GameCacheRoot(*game.game, defaults.cache_root);"));
+  CHECK(Has(app, "RepairShaderStorage(routed.cache_root)"));
+  CHECK(!Has(app, "RepairShaderStorage(defaults.cache_root)"));
   CHECK(Has(app, "mua::SetActiveGame(verified->id);"));
   CHECK(Has(app, "window()->SetTitle(mua::GameWindowTitle(*verified));"));
   const std::string launcher = ReadSource("launcher.cpp");
@@ -232,6 +247,7 @@ void TestWiring() {
 
 int main() {
   TestFolders();
+  TestCacheFolders();
   TestGoldTitleFolderMoves();
   TestMua1FolderAndSettingsMove();
   TestAchievementStoresAreSeparate();

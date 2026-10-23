@@ -1,0 +1,12 @@
+diff --git a/src/launcher.cpp b/src/launcher.cpp
+--- a/src/launcher.cpp
++++ b/src/launcher.cpp
+@@ -1147,8 +1147,6 @@ void Launcher::HandleHotkeys() {
+     if (!io.NavVisible && !ImGui::IsAnyItemActive()) want_play_ = true;
+   } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+     want_quit_ = true;
+-  } else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+-    Save();
+   }
+ }
+ 

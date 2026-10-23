@@ -1,0 +1,63 @@
+diff --git a/include/trg/launcher.h b/include/trg/launcher.h
+index 5d25f19..ef1b9d4 100644
+--- a/include/trg/launcher.h
++++ b/include/trg/launcher.h
+@@ -59,6 +59,7 @@ struct Theme {
+   ImVec4 warn;          // "Game files needed" card
+   ImVec4 good_dot;
+   ImVec4 warn_dot;      // also the sidebar's attention dot
++  ImVec4 border{0, 0, 0, 0};  // sidebar and page panel outline; invisible when transparent
+ 
+   // Deep space blue with a green accent (Outpost Kaloki X).
+   static Theme Midnight();
+diff --git a/src/launcher.cpp b/src/launcher.cpp
+index 9bbee08..f2e4a48 100644
+--- a/src/launcher.cpp
++++ b/src/launcher.cpp
+@@ -82,6 +82,26 @@ ImFont* LoadFirstFont(std::initializer_list<std::string> paths, float size) {
+   return nullptr;
+ }
+ 
++class PanelBorder {
++ public:
++  PanelBorder(const Theme& t, float s) : visible_(t.border.w > 0.0f) {
++    if (!visible_) return;
++    ImGui::PushStyleColor(ImGuiCol_Border, t.border);
++    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, std::max(1.0f, std::round(s)));
++  }
++  ~PanelBorder() {
++    if (!visible_) return;
++    ImGui::PopStyleVar();
++    ImGui::PopStyleColor();
++  }
++  PanelBorder(const PanelBorder&) = delete;
++  PanelBorder& operator=(const PanelBorder&) = delete;
++  ImGuiChildFlags flags() const { return visible_ ? ImGuiChildFlags_Borders : ImGuiChildFlags_None; }
++
++ private:
++  bool visible_;
++};
++
+ void PushAccent(const Theme& t) {
+   ImGui::PushStyleColor(ImGuiCol_Button, t.accent);
+   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.accent_hot);
+@@ -997,7 +1017,8 @@ void Launcher::DrawTabStrip(ImVec2 origin, float width, float height) {
+ 
+ void Launcher::DrawSidebar(ImVec2 size) {
+   const Theme& t = config_.theme;
+-  ImGui::BeginChild("##sidebar", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
++  const PanelBorder border(t, s_);
++  ImGui::BeginChild("##sidebar", size, border.flags(), ImGuiWindowFlags_NoScrollbar);
+   const float pad = 10 * s_;
+   const float item_h = 46 * s_;
+   ImGui::SetCursorPos(ImVec2(pad, pad));
+@@ -1028,7 +1049,8 @@ void Launcher::DrawSidebar(ImVec2 size) {
+ }
+ 
+ void Launcher::DrawContent(ImVec2 size) {
+-  ImGui::BeginChild("##content", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
++  const PanelBorder border(config_.theme, s_);
++  ImGui::BeginChild("##content", size, border.flags(), ImGuiWindowFlags_NoScrollbar);
+   if (config_.pages.empty()) {
+     ImGui::EndChild();
+     return;

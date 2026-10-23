@@ -56,6 +56,9 @@ std::string GameWindowTitle(const GameDefinition& game);
 // title ID, so each game has its own folder.
 std::filesystem::path GameUserDataRoot(const GameDefinition& game, const std::filesystem::path& user_data_root);
 
+// Shader and pipeline storage is named by title ID alone, so each game builds it in its own folder.
+std::filesystem::path GameCacheRoot(const GameDefinition& game, const std::filesystem::path& cache_root);
+
 // The game the runtime was started for; window titles follow it. Null until a verified game is started.
 void SetActiveGame(GameId id);
 const GameDefinition* ActiveGame();

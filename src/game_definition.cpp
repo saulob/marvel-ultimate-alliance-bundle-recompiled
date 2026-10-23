@@ -100,6 +100,10 @@ std::filesystem::path GameUserDataRoot(const GameDefinition& game, const std::fi
   return user_data_root / std::string(game.data_folder);
 }
 
+std::filesystem::path GameCacheRoot(const GameDefinition& game, const std::filesystem::path& cache_root) {
+  return cache_root / std::string(game.data_folder);
+}
+
 void SetActiveGame(GameId id) {
   g_active_game = id;
 }

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(marvel_ultimate_alliance VERSION 0.1.0 LANGUAGES C CXX)
+enable_language(RC)
 set(MUA_VERSION_SUFFIX "-dev")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -246,8 +247,12 @@ add_custom_target(mua_rexglue_check COMMAND ${MUA_REXGLUE_CHECK} VERBATIM)
 
 # One program per game: it carries that game's recompiled module (generated/<key>), its guest hooks and the host code
 # every program shares. The launcher is the program without a module: it only starts the game's own program.
-function(mua_add_game_executable target module_key)
-    add_executable(${target} WIN32 ${MUA_HOST_SOURCES})
+function(mua_add_game_executable target module_key icon_key)
+    # Resource 1 is the first icon in the executable: Explorer, the taskbar and SDL's window class use it.
+    set(_app_rc "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/${target}.rc")
+    set_source_files_properties("${_app_rc}" PROPERTIES
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/icons/${icon_key}/app-icon.ico")
+    add_executable(${target} WIN32 ${MUA_HOST_SOURCES} "${_app_rc}")
     if(NOT "${module_key}" STREQUAL "")
         target_sources(${target} PRIVATE ${MUA_RUNTIME_SOURCES})
     endif()
@@ -286,10 +291,10 @@ function(mua_add_game_executable target module_key)
     )
 endfunction()
 
-mua_add_game_executable(marvel_ultimate_alliance "")
-mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1)
-mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold)
-mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2)
+mua_add_game_executable(marvel_ultimate_alliance "" launcher)
+mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)
+mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold mua1-gold)
+mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2 mua2)
 
 add_custom_target(mua_rexglue_staging ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE:rex::gpu-xenos>"

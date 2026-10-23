@@ -167,19 +167,20 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     if (window()) {
       window()->SetTitle(kWindowTitle);
     }
-    for (const mua::ShaderStorageRepair& repair : mua::RepairShaderStorage(defaults.cache_root)) {
-      REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);
-    }
     game_settings_.CaptureLateRegistered();
     const mua::GameState selected = library_->State(game_settings_.SelectedGame());
     if (!IsLauncher()) {
-      LogPipelineStorage(defaults.cache_root, mua::ProfileOf(*selected.game).title_id);
       ActivateGame(selected);
       game_settings_.ApplyGameSettings();
       mua::ApplyShaderWait();
       mua::ApplyMultisampling();
       mua::PinGuestVideoMode();
-      return RoutedPaths(defaults, selected);
+      const rex::PathConfig routed = RoutedPaths(defaults, selected);
+      for (const mua::ShaderStorageRepair& repair : mua::RepairShaderStorage(routed.cache_root)) {
+        REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);
+      }
+      LogPipelineStorage(routed.cache_root, mua::ProfileOf(*selected.game).title_id);
+      return routed;
     }
     if (!imgui_drawer()) {
       StartRuntimeAndExit(selected);
@@ -325,7 +326,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     });
   }
 
-  // DEBUG_SAULO: the files the GPU plugin builds its pipelines from, shared by both games through the title ID.
+  // DEBUG_SAULO: the files the GPU plugin builds its pipelines from; size 0/missing means a cold build.
   static void LogPipelineStorage(const std::filesystem::path& cache_root, uint32_t title_id) {
     for (const char* suffix : {"xsh", "rov.d3d12.xpso", "rtv.d3d12.xpso"}) {
       const std::filesystem::path file = cache_root / "shaders" / "shareable" / std::format("{:08X}.{}", title_id, suffix);
@@ -363,8 +364,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     if (mua::CanPlay(game, LocalRuntimeBlocker(*game.game))) {
       paths.game_data_root = game.data_dir;
       paths.user_data_root = mua::GameUserDataRoot(*game.game, defaults.user_data_root);
-      REXLOG_INFO("DEBUG_SAULO routed: game={} data={} saves={}", game.game->key, mua::Utf8(paths.game_data_root),
-                  mua::Utf8(paths.user_data_root));
+      paths.cache_root = mua::GameCacheRoot(*game.game, defaults.cache_root);
+      REXLOG_INFO("DEBUG_SAULO routed: game={} data={} saves={} cache={}", game.game->key,
+                  mua::Utf8(paths.game_data_root), mua::Utf8(paths.user_data_root), mua::Utf8(paths.cache_root));
     } else {
       paths.game_data_root.clear();
       REXLOG_ERROR("{} cannot be started: refusing to boot it", game.game->display_name);

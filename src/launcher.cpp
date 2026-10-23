@@ -36,12 +36,14 @@
 #include "game_files.h"
 #include "game_install.h"
 #include "game_library.h"
+#include "game_theme.h"
 #include "graphics_adapters.h"
 #include "multisampling.h"
 #include "imgui_gamepad.h"
 #include "keybinds.h"
 #include "launcher_achievements.h"
 #include "launcher_quit.h"
+#include "launcher_shortcuts.h"
 #include "log_filter.h"
 #include "platform.h"
 #include "render_scale.h"
@@ -61,9 +63,6 @@ constexpr float kHeaderHeight = 92.0f;
 
 constexpr ImGuiConfigFlags kNavFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
 
-// Marvel red over the Midnight background.
-const ImVec4 kAccent = ImVec4(0.93f, 0.15f, 0.17f, 1.0f);
-
 std::string FrameRateHelp(const FramePolicy& policy) {
   return std::to_string(policy.native) +
          " FPS is the original game rate. Higher rates speed up gameplay and rendering together, not just "
@@ -72,16 +71,28 @@ std::string FrameRateHelp(const FramePolicy& policy) {
 
 constexpr const char* kAuthorUrl = "https://github.com/saulob";
 
-trg::Theme LauncherTheme() {
-  return trg::Theme::Midnight().WithAccent(kAccent);
+ImVec4 Rgb(uint32_t rgb) {
+  return ImVec4(float((rgb >> 16) & 0xFF) / 255.0f, float((rgb >> 8) & 0xFF) / 255.0f, float(rgb & 0xFF) / 255.0f, 1.0f);
+}
+
+trg::Theme LauncherTheme(GameId game) {
+  const GamePalette palette = PaletteOf(game);
+  trg::Theme theme = trg::Theme::Midnight().WithAccent(Rgb(palette.primary));
+  theme.accent_hot = Rgb(palette.hover);
+  theme.border = Rgb(palette.border);
+  return theme;
+}
+
+ImU32 Shade(const ImVec4& color, float factor) {
+  return IM_COL32(int(color.x * factor * 255.0f), int(color.y * factor * 255.0f), int(color.z * factor * 255.0f), 255);
 }
 
 constexpr float kHeaderArtAspect = 1600.0f / 180.0f;
 
 trg::HeaderPainter LauncherHeader(ImTextureID art, float art_aspect) {
   return [art, art_aspect](const trg::HeaderContext& c) {
-    c.draw->AddRectFilledMultiColor(c.min, c.max, IM_COL32(14, 18, 30, 255), IM_COL32(52, 12, 16, 255),
-                                    IM_COL32(28, 8, 10, 255), IM_COL32(8, 10, 18, 255));
+    c.draw->AddRectFilledMultiColor(c.min, c.max, IM_COL32(14, 18, 30, 255), Shade(c.theme.accent, 0.22f),
+                                    Shade(c.theme.accent, 0.12f), IM_COL32(8, 10, 18, 255));
     if (art == ImTextureID{}) {
       return;
     }
@@ -277,6 +288,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       io.ClearInputKeys();
       io.ClearInputMouse();
     }
+    HandleSaveShortcut(io);
     ImGui::BeginDisabled(starting_);
     const trg::Result result = launcher_->Frame();
     ImGui::EndDisabled();
@@ -294,6 +306,25 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         break;
       case trg::Result::kNone:
         break;
+    }
+  }
+
+  // The same Launcher::Save the Save button runs; TRG's own Ctrl+S branch is patched out.
+  void HandleSaveShortcut(const ImGuiIO& io) {
+    SaveShortcutState state;
+    state.ctrl_down = io.KeyCtrl || ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    state.s_pressed = ImGui::IsKeyPressed(ImGuiKey_S, false);
+    state.text_input = io.WantTextInput;
+    state.capturing_key = launcher_->capturing_key();
+    state.popup_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    state.starting = starting_;
+    if (state.s_pressed) {
+      REXLOG_INFO("DEBUG_SAULO Ctrl+S: ctrl={} text={} capture={} popup={} starting={} fires={} game={}",
+                  state.ctrl_down, state.text_input, state.capturing_key, state.popup_open, state.starting,
+                  SaveShortcutFires(state), Selected().game->key);
+    }
+    if (SaveShortcutFires(state)) {
+      launcher_->Save();
     }
   }
 
@@ -356,7 +387,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     const ImVec2 text_size = font->CalcTextSizeA(size, FLT_MAX, 0.0f, kText);
     const ImVec2 pos(vp->Pos.x + (vp->Size.x - text_size.x) * 0.5f,
                      vp->Pos.y + (vp->Size.y - text_size.y) * 0.5f);
-    ImGui::GetForegroundDrawList()->AddText(font, size, pos, ImGui::GetColorU32(kAccent), kText);
+    ImGui::GetForegroundDrawList()->AddText(font, size, pos, ImGui::GetColorU32(launcher_->config().theme.accent), kText);
   }
 
   // Runs inside the last frame; the in-game overlays share this ImGui context.
@@ -498,6 +529,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     install_failure_.clear();
     install_failure_text_.clear();
     selected_ = game;
+    launcher_->config().theme = LauncherTheme(game);
     settings_.SelectGame(game);
     achievements_.reset();
     achievements_tried_ = false;
@@ -526,7 +558,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     c.settings = &settings_;
     // PLAY saves in RequestPlay, so a failed save keeps the launcher open.
     c.save_on_play = false;
-    c.theme = LauncherTheme();
+    c.theme = LauncherTheme(selected_);
     c.note = "Play applies the changes. Save keeps them without starting.";
     c.hints = "Enter  Play     Alt+F4  Quit     Ctrl+S  Save";
     c.fonts = g_fonts;
@@ -889,10 +921,10 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     ImGui::PushFont(ui.fonts().semibold, 0.0f);
     ImGui::Text("%d / %d unlocked", summary.unlocked, summary.total);
     ImGui::SameLine();
-    ImGui::TextColored(kAccent, "%dG / %dG", summary.earned_gamerscore, summary.total_gamerscore);
+    ImGui::TextColored(ui.theme().accent, "%dG / %dG", summary.earned_gamerscore, summary.total_gamerscore);
     ImGui::PopFont();
     const float fraction = summary.total > 0 ? float(summary.unlocked) / float(summary.total) : 0.0f;
-    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kAccent);
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ui.theme().accent);
     ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 6.0f * ui.scale()), "");
     ImGui::PopStyleColor();
     ui.Spacer(8);
