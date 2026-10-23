@@ -179,10 +179,10 @@ void TestMapsCarryTheSameHooks() {
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_RESET_EVENT) ").empty());
   CHECK(Matches(mua1_map, "#define (MUA_GUEST_HAS_MEMMOVE) 1").size() == 1);
   CHECK(Matches(mua1_map, "#define (MUA_GUEST_MEMMOVE) sub_8282A150").size() == 1);
-  for (const std::string& text : {gold_map, mua2_map}) {
-    CHECK(Matches(text, "#define (MUA_GUEST_HAS_MEMMOVE) 0").size() == 1);
-    CHECK(Matches(text, "#define (MUA_GUEST_MEMMOVE) ").empty());
-  }
+  CHECK(Matches(gold_map, "#define (MUA_GUEST_HAS_MEMMOVE) 1").size() == 1);
+  CHECK(Matches(gold_map, "#define (MUA_GUEST_MEMMOVE) sub_82859500").size() == 1);
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_MEMMOVE) 0").size() == 1);
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_MEMMOVE) ").empty());
 }
 
 void TestEveryUsedHookIsMapped() {

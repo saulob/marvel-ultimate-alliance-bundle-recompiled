@@ -46,8 +46,8 @@ void mua_aspect_back_buffer(PPCRegister& width, PPCRegister& height) {
   }
 }
 
-// Codegen midasm hook (overrides.toml) in sub_824FE4C8, where a fullscreen back buffer that is no display mode falls
-// back to the video mode in r8 and r9.
+// Codegen midasm hook (overrides.toml) in the engine's D3D presentation parameters, where a fullscreen back buffer
+// that is no display mode falls back to the video mode in r8 and r9.
 void mua_upscale_device_back_buffer(PPCRegister& width, PPCRegister& height) {
   if (!g_back_buffer_upscaled) {
     return;

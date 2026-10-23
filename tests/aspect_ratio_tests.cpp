@@ -287,7 +287,7 @@ void TestGuestSites() {
 #endif
 }
 
-// Only MUA1's device creation falls back from an Upscaling back buffer to the video mode, at one store.
+// MUA1 and Gold fall back from an Upscaling back buffer to the video mode at one store each; MUA2 has none yet.
 void TestDeviceBackBufferSite() {
   std::printf("device back buffer site\n");
   const std::string hooks = ReadText(kSrcDir / "aspect_render.cpp");
@@ -303,45 +303,58 @@ void TestDeviceBackBufferSite() {
     }
     return normalized;
   };
-  const char* site = "address = 0x824FE714\nname = \"mua_upscale_device_back_buffer\"\nregisters = [\"r8\", \"r9\"]";
-  for (const char* game : {"mua1", "mua1-gold", "mua2"}) {
-    const std::string overrides = without_cr(ReadText(kSrcDir / ".." / "config" / game / "overrides.toml"));
-    const bool mua1 = std::string_view(game) == "mua1";
-    CHECK(Has(overrides, site) == mua1);
-    CHECK(Has(overrides, "mua_upscale_device_back_buffer") == mua1);
+
+  struct DeviceSite {
+    const char* game;
+    const char* address;
+    const char* label;
+  };
+  const DeviceSite sites[] = {
+      {"mua1", "0x824FE714", "loc_824FE6F8"},
+      {"mua1-gold", "0x8251891C", "loc_82518900"},
+  };
+  for (const DeviceSite& site : sites) {
+    const std::string overrides = without_cr(ReadText(kSrcDir / ".." / "config" / site.game / "overrides.toml"));
+    const std::string expected = std::string("address = ") + site.address +
+                                 "\nname = \"mua_upscale_device_back_buffer\"\nregisters = [\"r8\", \"r9\"]";
+    CHECK(Has(overrides, expected.c_str()));
   }
+  const std::string mua2_overrides = without_cr(ReadText(kSrcDir / ".." / "config" / "mua2" / "overrides.toml"));
+  CHECK(!Has(mua2_overrides, "mua_upscale_device_back_buffer"));
 
 #ifdef MUA_GENERATED_ROOT
-  // 0x824FE714 is the seventh instruction after loc_824FE6F8, the store of the video mode width in r8.
-  const fs::path dir = fs::path(MUA_GENERATED_ROOT) / "mua1";
-  if (!fs::exists(dir)) {
-    return;
-  }
-  bool found = false;
-  for (const auto& entry : fs::directory_iterator(dir)) {
-    if (entry.path().extension() != ".cpp") {
+  // Each site's label is the seventh instruction before the store of the video mode width in r8.
+  for (const DeviceSite& site : sites) {
+    const fs::path dir = fs::path(MUA_GENERATED_ROOT) / site.game;
+    if (!fs::exists(dir)) {
       continue;
     }
-    const std::string text = without_cr(ReadText(entry.path()));
-    const size_t label = text.find("\nloc_824FE6F8:\n");
-    if (label == std::string::npos) {
-      continue;
+    bool found = false;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+      if (entry.path().extension() != ".cpp") {
+        continue;
+      }
+      const std::string text = without_cr(ReadText(entry.path()));
+      const size_t label = text.find("\n" + std::string(site.label) + ":\n");
+      if (label == std::string::npos) {
+        continue;
+      }
+      found = true;
+      std::vector<std::string> instructions;
+      for (size_t at = text.find("\t// ", label); at != std::string::npos && instructions.size() < 9;
+           at = text.find("\t// ", at + 1)) {
+        instructions.push_back(text.substr(at + 4, text.find('\n', at) - at - 4));
+      }
+      CHECK(instructions.size() == 9);
+      if (instructions.size() == 9) {
+        CHECK(instructions[2] == "lwz r8,148(r31)");
+        CHECK(instructions[4] == "lwz r9,152(r31)");
+        CHECK(instructions[7] == "stw r8,0(r28)");
+        CHECK(instructions[8] == "stw r9,28(r31)");
+      }
     }
-    found = true;
-    std::vector<std::string> instructions;
-    for (size_t at = text.find("\t// ", label); at != std::string::npos && instructions.size() < 9;
-         at = text.find("\t// ", at + 1)) {
-      instructions.push_back(text.substr(at + 4, text.find('\n', at) - at - 4));
-    }
-    CHECK(instructions.size() == 9);
-    if (instructions.size() == 9) {
-      CHECK(instructions[2] == "lwz r8,148(r31)");
-      CHECK(instructions[4] == "lwz r9,152(r31)");
-      CHECK(instructions[7] == "stw r8,0(r28)");
-      CHECK(instructions[8] == "stw r9,28(r31)");
-    }
+    CHECK(found);
   }
-  CHECK(found);
 #endif
 }
 
