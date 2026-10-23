@@ -181,8 +181,8 @@ void TestMapsCarryTheSameHooks() {
   CHECK(Matches(mua1_map, "#define (MUA_GUEST_MEMMOVE) sub_8282A150").size() == 1);
   CHECK(Matches(gold_map, "#define (MUA_GUEST_HAS_MEMMOVE) 1").size() == 1);
   CHECK(Matches(gold_map, "#define (MUA_GUEST_MEMMOVE) sub_82859500").size() == 1);
-  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_MEMMOVE) 0").size() == 1);
-  CHECK(Matches(mua2_map, "#define (MUA_GUEST_MEMMOVE) ").empty());
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_MEMMOVE) 1").size() == 1);
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_MEMMOVE) sub_82A65700").size() == 1);
 }
 
 void TestEveryUsedHookIsMapped() {
@@ -288,6 +288,49 @@ void TestMappedFunctionsAreGenerated() {
 #endif
 }
 
+// The compare-then-tail-call-memcpy-or-copy-backward shape every game's memmove shares, confirmed by generated code
+// rather than assumed from its address, with the memcpy it tail-calls matching that game's own MUA_GUEST_MEMCPY.
+void TestMemmoveMatchesMemcpy() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("memmove tail-calls that game's own memcpy\n");
+  const std::filesystem::path root = MUA_GENERATED_ROOT;
+  for (const MapFile& map : kMaps) {
+    const std::string registry = ReadSource(root / map.generated_dir / "marvel_ultimate_alliance_register.cpp");
+    if (registry.empty()) {
+      continue;
+    }
+    const std::string header = ReadSource(kSources / map.file);
+    const std::set<std::string> memmove = Matches(header, "#define MUA_GUEST_MEMMOVE sub_([0-9A-F]{8})");
+    const std::set<std::string> memcpy = Matches(header, "#define MUA_GUEST_MEMCPY sub_([0-9A-F]{8})");
+    CHECK(memmove.size() == 1 && memcpy.size() == 1);
+    if (memmove.size() != 1 || memcpy.size() != 1) {
+      continue;
+    }
+    const std::string memmove_fn = "sub_" + *memmove.begin();
+    const std::string memcpy_fn = "sub_" + *memcpy.begin();
+    std::string body;
+    for (const auto& entry : std::filesystem::directory_iterator(root / map.generated_dir)) {
+      if (entry.path().extension() != ".cpp") {
+        continue;
+      }
+      const std::string text = ReadSource(entry.path());
+      const size_t start = text.find("DEFINE_REX_FUNC(" + memmove_fn + ")");
+      if (start == std::string::npos) {
+        continue;
+      }
+      const size_t end = text.find("DEFINE_REX_FUNC(", start + 1);
+      body = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+      break;
+    }
+    CHECK(!body.empty());
+    CHECK(body.find("ctx.cr0.compare<int32_t>(ctx.r3.s32, ctx.r4.s32, ctx.xer);") != std::string::npos);
+    CHECK(body.find("if (ctx.cr0.eq) return;") != std::string::npos);
+    CHECK(body.find(memcpy_fn + "(ctx, base);") != std::string::npos);
+    CHECK(body.find("REX_STORE_U8(ctx.r3.u32 + -1, ctx.r0.u8);") != std::string::npos);
+  }
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -297,6 +340,7 @@ int main() {
   TestOptionalHooksFollowTheirFlags();
   TestSelection();
   TestMappedFunctionsAreGenerated();
+  TestMemmoveMatchesMemcpy();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
