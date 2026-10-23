@@ -15,6 +15,10 @@ endif()
 # Codegen re-runs only when an input listed in codegen.d, or the rexglue tool, changes. The stamp is the only output:
 # codegen leaves unchanged sources untouched, so listing them would keep the command permanently out of date.
 # ReXGlue's own up-to-date record leaves out the rexglue tool, so a patched tool needs --ignore-stamp.
+# rexglue.exe has shared internal state across modules (at least generated/rexglue.cmake, possibly more); concurrent
+# codegen runs for different modules have produced a corrupt function table (a phantom address-0 entry) for one of
+# them. Each module's codegen command depends on the previous module's stamp so Ninja never runs two at once.
+set(_mua_codegen_prev_stamp "")
 function(mua_declare_module key codegen_target)
     string(TOUPPER "${key}" _id)
     string(REPLACE "-" "_" _id "${_id}")
@@ -40,13 +44,14 @@ function(mua_declare_module key codegen_target)
         OUTPUT "${_dir}/codegen.build.stamp"
         COMMAND $<TARGET_FILE:rex::rexglue> codegen --ignore-stamp "${_manifest}"
         COMMAND ${CMAKE_COMMAND} -E touch "${_dir}/codegen.build.stamp"
-        DEPENDS $<TARGET_FILE:rex::rexglue>
+        DEPENDS $<TARGET_FILE:rex::rexglue> ${_mua_codegen_prev_stamp}
         DEPFILE "${_dir}/codegen.d"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Generating recompiled code for ${key}"
         VERBATIM
     )
     add_custom_target(${codegen_target} DEPENDS "${_dir}/codegen.build.stamp")
+    set(_mua_codegen_prev_stamp "${_dir}/codegen.build.stamp" PARENT_SCOPE)
 endfunction()
 
 mua_declare_module(mua1-gold marvel_ultimate_alliance_mua1_gold_codegen)

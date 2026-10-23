@@ -47,7 +47,8 @@ void mua_aspect_back_buffer(PPCRegister& width, PPCRegister& height) {
 }
 
 // Codegen midasm hook (overrides.toml) in the engine's D3D presentation parameters, where a fullscreen back buffer
-// that is no display mode falls back to the video mode in r8 and r9.
+// that matches no supported display mode falls back to the video mode (MUA1 sub_824FE4C8, Gold sub_825186D0,
+// MUA2 sub_82271DF8 — same mode-list scan and native fallback in all three, just renamed registers in MUA2).
 void mua_upscale_device_back_buffer(PPCRegister& width, PPCRegister& height) {
   if (!g_back_buffer_upscaled) {
     return;

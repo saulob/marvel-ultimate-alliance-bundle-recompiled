@@ -371,6 +371,10 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   settings.SelectGame(mua::GameId::kMua1Gold);
   CHECK(settings.Get("mua_upscaler") == "off");
   CHECK(settings.Get("mua_upscale_quality") == "native");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "native");
+  settings.SelectGame(mua::GameId::kMua1Gold);
 
   const std::string effect = rex::cvar::GetFlagByName("present_effect");
   const std::string window_width = rex::cvar::GetFlagByName("window_width");

@@ -883,11 +883,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
               6);
   }
 
-  // MUA2 keeps its Upscaling setting off until its own device back-buffer hook exists.
-  bool UpscalingApplies() const {
-    return Selected().game &&
-           (Selected().game->id == GameId::kMua1 || Selected().game->id == GameId::kMua1Gold);
-  }
+  bool UpscalingApplies() const { return Selected().game != nullptr; }
 
   // The choice only matters when the GPU cannot run the rasterizer-ordered views EDRAM path.
   bool MultisamplingApplies() {

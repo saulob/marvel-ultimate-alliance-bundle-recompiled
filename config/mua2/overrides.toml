@@ -53,3 +53,12 @@ address = 0x8252D55C
 name = "mua_aspect_display_aspect"
 registers = ["f13"]
 after_instruction = false
+
+# Keeps the Upscaling back buffer for the device presentation params in sub_82271DF8's display-mode scan, where a
+# back buffer matching no supported mode falls back to the video mode in r7 and r8; same shape as MUA1/Gold, just
+# with different register allocation (r8/r9 there).
+[[midasm_hook]]
+address = 0x82272074
+name = "mua_upscale_device_back_buffer"
+registers = ["r7", "r8"]
+after_instruction = false

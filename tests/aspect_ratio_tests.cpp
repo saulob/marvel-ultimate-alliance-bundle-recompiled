@@ -287,7 +287,12 @@ void TestGuestSites() {
 #endif
 }
 
-// MUA1 and Gold fall back from an Upscaling back buffer to the video mode at one store each; MUA2 has none yet.
+// MUA1, Gold and MUA2 all fall back from an Upscaling back buffer to the video mode at the same point structurally:
+// a display-mode-list scan (no match for the requested size) falling through to a three-field native-mode load
+// (width/height/refresh) and store. MUA2's version lives in a separate helper (sub_82271DF8, called by the device
+// resource builder sub_8226DB50) instead of being inlined in the presentation-params builder like MUA1/Gold, and
+// its register allocation differs (r7/r8 instead of r8/r9), but the field offsets (148/152/156 native, 0/28/32
+// output) are byte-for-byte identical.
 void TestDeviceBackBufferSite() {
   std::printf("device back buffer site\n");
   const std::string hooks = ReadText(kSrcDir / "aspect_render.cpp");
@@ -308,22 +313,28 @@ void TestDeviceBackBufferSite() {
     const char* game;
     const char* address;
     const char* label;
+    const char* width_reg;
+    const char* height_reg;
+    size_t instruction_count;
+    size_t width_load_index;
+    size_t height_load_index;
+    size_t width_store_index;
+    size_t height_store_index;
   };
   const DeviceSite sites[] = {
-      {"mua1", "0x824FE714", "loc_824FE6F8"},
-      {"mua1-gold", "0x8251891C", "loc_82518900"},
+      {"mua1", "0x824FE714", "loc_824FE6F8", "r8", "r9", 9, 2, 4, 7, 8},
+      {"mua1-gold", "0x8251891C", "loc_82518900", "r8", "r9", 9, 2, 4, 7, 8},
+      {"mua2", "0x82272074", "loc_82272054", "r7", "r8", 11, 3, 5, 8, 9},
   };
   for (const DeviceSite& site : sites) {
     const std::string overrides = without_cr(ReadText(kSrcDir / ".." / "config" / site.game / "overrides.toml"));
-    const std::string expected = std::string("address = ") + site.address +
-                                 "\nname = \"mua_upscale_device_back_buffer\"\nregisters = [\"r8\", \"r9\"]";
+    const std::string expected = std::string("address = ") + site.address + "\nname = \"mua_upscale_device_back_buffer\"\nregisters = [\"" +
+                                 site.width_reg + "\", \"" + site.height_reg + "\"]";
     CHECK(Has(overrides, expected.c_str()));
   }
-  const std::string mua2_overrides = without_cr(ReadText(kSrcDir / ".." / "config" / "mua2" / "overrides.toml"));
-  CHECK(!Has(mua2_overrides, "mua_upscale_device_back_buffer"));
 
 #ifdef MUA_GENERATED_ROOT
-  // Each site's label is the seventh instruction before the store of the video mode width in r8.
+  // Each site's label sits a fixed number of instructions before the store of the video mode width/height.
   for (const DeviceSite& site : sites) {
     const fs::path dir = fs::path(MUA_GENERATED_ROOT) / site.game;
     if (!fs::exists(dir)) {
@@ -341,16 +352,16 @@ void TestDeviceBackBufferSite() {
       }
       found = true;
       std::vector<std::string> instructions;
-      for (size_t at = text.find("\t// ", label); at != std::string::npos && instructions.size() < 9;
+      for (size_t at = text.find("\t// ", label); at != std::string::npos && instructions.size() < site.instruction_count;
            at = text.find("\t// ", at + 1)) {
         instructions.push_back(text.substr(at + 4, text.find('\n', at) - at - 4));
       }
-      CHECK(instructions.size() == 9);
-      if (instructions.size() == 9) {
-        CHECK(instructions[2] == "lwz r8,148(r31)");
-        CHECK(instructions[4] == "lwz r9,152(r31)");
-        CHECK(instructions[7] == "stw r8,0(r28)");
-        CHECK(instructions[8] == "stw r9,28(r31)");
+      CHECK(instructions.size() == site.instruction_count);
+      if (instructions.size() == site.instruction_count) {
+        CHECK(instructions[site.width_load_index] == std::string("lwz ") + site.width_reg + ",148(r31)");
+        CHECK(instructions[site.height_load_index] == std::string("lwz ") + site.height_reg + ",152(r31)");
+        CHECK(Has(instructions[site.width_store_index], (std::string("stw ") + site.width_reg + ",0(").c_str()));
+        CHECK(instructions[site.height_store_index] == std::string("stw ") + site.height_reg + ",28(r31)");
       }
     }
     CHECK(found);
