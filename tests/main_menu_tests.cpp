@@ -1,6 +1,7 @@
-// Main menu on MUA1 and Gold: the Xbox Live item is dropped from the item list while the menu parses its XML, so the
-// menu keeps exactly Play / Options / Review in the game's own slots, navigation wraps over those three, each action
-// stays with its item, and nothing outside MUA1/Gold (MUA2, Skip Intro) is touched.
+// Main menu on MUA1 and Gold: the Xbox Live item is replaced while the menu parses its XML, so the menu keeps exactly
+// Play / Options / Review / Exit Game in the game's own four slots, navigation wraps over those four, each action
+// stays with its item, Exit Game ends the title through XamLoaderTerminateTitle, and nothing outside MUA1/Gold (MUA2,
+// Skip Intro) is touched.
 // Run: mua_main_menu_tests
 
 #include <algorithm>
@@ -50,17 +51,19 @@ class GuestMenu {
   static constexpr uint32_t kMenuObject = 0x40;
   static constexpr uint32_t kVtable = 0x8203F634;
   static constexpr uint32_t kLiveEntry = 0x44;
+  static constexpr uint32_t kExitStrings = 0x80;
 
   GuestMenu() : memory_(0x20000, 0) {
     Store(kMenuObject, kVtable);
     empty_ = Intern("");
     Store(kLiveEntry, Intern("option02_text"));
+    menu::WriteExitStrings(base(), kExitStrings);
     next_ = 0x8000;
   }
 
   uint8_t* base() { return memory_.data(); }
   const uint8_t* base() const { return memory_.data(); }
-  menu::GuestAddresses guest() const { return {kVtable, kLiveEntry, empty_}; }
+  menu::GuestAddresses guest() const { return {kVtable, kLiveEntry, empty_, kExitStrings}; }
   uint32_t first() const { return nodes_.front(); }
   const std::vector<uint32_t>& nodes() const { return nodes_; }
   void Store(uint32_t address, uint32_t value) { menu::StoreU32(base(), address, value); }
@@ -174,10 +177,7 @@ std::vector<Item> ParseItems(GuestMenu& data) {
   std::vector<Item> created;
   const menu::GuestAddresses guest = data.guest();
   for (uint32_t node = data.first(); node != 0; node = menu::LoadU32(data.base(), node + menu::kNodeNextOffset)) {
-    menu::RemoveLiveItem(data.base(), node, guest);
-    if (menu::ShouldSkipItem(data.base(), node, guest)) {
-      continue;
-    }
+    menu::ReplaceLiveItem(data.base(), node, guest);
     Item item;
     item.name = std::string(menu::AttributeValue(data.base(), node, "name"));
     item.text = std::string(menu::AttributeValue(data.base(), node, "text"));
@@ -224,9 +224,7 @@ void TestOriginalMenuHasFourEntries() {
   std::printf("original main menu data\n");
   GuestMenu data = BuildMainMenuData();
   const menu::GuestAddresses guest = data.guest();
-  for (uint32_t node : data.nodes()) {
-    CHECK(!menu::ShouldSkipItem(data.base(), node, guest));
-  }
+  CHECK(menu::GuestString(data.base(), menu::ExitText(guest)) == "EXIT GAME");
   std::vector<std::string> texts;
   for (const char* name : {"option01_text", "option02_text", "option03_text", "option04_text"}) {
     texts.push_back(Text(data, name));
@@ -234,29 +232,28 @@ void TestOriginalMenuHasFourEntries() {
   CHECK((texts == std::vector<std::string>{"PLAY", "PLAY ONLINE", "OPTIONS", "REVIEW"}));
 }
 
-void TestEntriesAfterRemoval() {
-  std::printf("xbox live removed, three entries remain\n");
+void TestEntriesAfterReplacement() {
+  std::printf("xbox live replaced, four entries remain\n");
   GuestMenu data = BuildMainMenuData();
   const std::vector<Item> items = ParseItems(data);
   const std::vector<Item> main = MainTextItems(items);
 
-  CHECK(main.size() == 3);
-  if (main.size() == 3) {
+  CHECK(main.size() == 4);
+  if (main.size() == 4) {
     CHECK(main[0].name == "option01_text" && main[0].text == "PLAY" && main[0].command == "menusetmode play");
     CHECK(main[1].name == "option02_text" && main[1].text == "OPTIONS" && main[1].command == "options_main");
     CHECK(main[2].name == "option03_text" && main[2].text == "REVIEW" &&
           main[2].command == "set reviewmode -1;openmenu review");
+    CHECK(main[3].name == "option04_text" && main[3].text == "EXIT GAME" && main[3].command == "mua_exit_game");
   }
   for (const Item& item : items) {
     CHECK(item.text != "PLAY ONLINE");
-    CHECK(item.name != "option04_text");
-    CHECK(item.name != "option04_focus");
     CHECK(item.command.find("live") == std::string::npos);
   }
 }
 
-void TestNoFourthSlotOrInvisibleEntry() {
-  std::printf("no fourth slot\n");
+void TestFourNativeSlots() {
+  std::printf("native slots and focus models\n");
   GuestMenu data = BuildMainMenuData();
   const std::vector<Item> items = ParseItems(data);
   std::vector<std::string> names;
@@ -264,12 +261,19 @@ void TestNoFourthSlotOrInvisibleEntry() {
     names.push_back(item.name);
   }
   const auto count = [&](const char* name) { return std::count(names.begin(), names.end(), std::string(name)); };
-  for (const char* focus : {"option01_focus", "option02_focus", "option03_focus"}) {
-    CHECK(count(focus) == 1);
+  for (const char* name : {"option01_focus", "option02_focus", "option03_focus", "option04_focus", "option01_text",
+                           "option02_text", "option03_text", "option04_text", "option05_text"}) {
+    CHECK(count(name) == 1);
   }
-  CHECK(count("option04_focus") == 0);
-  CHECK(count("option04_text") == 0);
-  CHECK(count("option02_text") == 1);
+  CHECK(MainTextItems(items).size() == 4);
+  for (int slot = 1; slot <= 4; ++slot) {
+    const std::string name = "option0" + std::to_string(slot) + "_text";
+    CHECK(data.Value(name, "animtext_scene") == "AT_option" + std::to_string(slot));
+    CHECK(data.Value(name, "style") == "BIG_MAINMENU");
+    CHECK(data.Value(name, "mode") == "default main");
+  }
+  CHECK(data.Value("option04_focus", "mode") == "main ");
+  CHECK(data.Value("option04_focus", "model") == "ui/models/m_invis");
   for (const Item& item : items) {
     if (item.name.ends_with("_text") && item.mode.find("main") != std::string::npos) {
       CHECK(!item.text.empty());
@@ -277,30 +281,49 @@ void TestNoFourthSlotOrInvisibleEntry() {
   }
 }
 
-void TestNavigationWrapsOverThreeEntries() {
-  std::printf("navigation over the three entries\n");
+void TestNoXboxLiveAction() {
+  std::printf("no xbox live action\n");
+  GuestMenu data = BuildMainMenuData();
+  const std::vector<Item> items = ParseItems(data);
+  const menu::GuestAddresses guest = data.guest();
+  for (const Item& item : items) {
+    CHECK(item.text.find("ONLINE") == std::string::npos);
+    CHECK(item.text.find("LIVE") == std::string::npos);
+  }
+  CHECK(menu::GuestString(data.base(), menu::LoadU32(data.base(), guest.live_name_entry)).empty());
+  for (const Item& item : MainTextItems(items)) {
+    CHECK(!item.command.empty() && !menu::IsBlank(item.command));
+  }
+}
+
+void TestNavigationWrapsOverFourEntries() {
+  std::printf("navigation over the four entries\n");
   GuestMenu data = BuildMainMenuData();
   ParseItems(data);
 
   CHECK(Text(data, Neighbor(data, "option01_text", "down")) == "OPTIONS");
   CHECK(Text(data, Neighbor(data, "option02_text", "down")) == "REVIEW");
-  CHECK(Text(data, Neighbor(data, "option03_text", "down")) == "PLAY");
-  CHECK(Neighbor(data, "option03_text", "down") == "option01_text");
+  CHECK(Text(data, Neighbor(data, "option03_text", "down")) == "EXIT GAME");
+  CHECK(Text(data, Neighbor(data, "option04_text", "down")) == "PLAY");
+  CHECK(Neighbor(data, "option04_text", "down") == "option01_text");
 
+  CHECK(Text(data, Neighbor(data, "option04_text", "up")) == "REVIEW");
   CHECK(Text(data, Neighbor(data, "option03_text", "up")) == "OPTIONS");
   CHECK(Text(data, Neighbor(data, "option02_text", "up")) == "PLAY");
-  CHECK(Text(data, Neighbor(data, "option01_text", "up")) == "REVIEW");
+  CHECK(Text(data, Neighbor(data, "option01_text", "up")) == "EXIT GAME");
+  CHECK(Neighbor(data, "option01_text", "up") == "option04_text");
 
-  for (const char* start : {"option01_text", "option02_text", "option03_text"}) {
+  const std::vector<std::string> slots = {"option01_text", "option02_text", "option03_text", "option04_text"};
+  for (const std::string& start : slots) {
     std::string name = start;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
       name = Neighbor(data, name, "down");
-      CHECK(name == "option01_text" || name == "option02_text" || name == "option03_text");
+      CHECK(std::count(slots.begin(), slots.end(), name) == 1);
     }
     CHECK(name == start);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
       name = Neighbor(data, name, "up");
-      CHECK(!name.empty());
+      CHECK(std::count(slots.begin(), slots.end(), name) == 1);
     }
     CHECK(name == start);
   }
@@ -315,9 +338,9 @@ void TestRebuildsKeepTheSameMenu() {
   CHECK(std::memcmp(after_first.data(), data.base(), after_first.size()) == 0);
   CHECK(first.size() == second.size());
   const std::vector<Item> main = MainTextItems(second);
-  CHECK(main.size() == 3);
+  CHECK(main.size() == 4);
   CHECK(Text(data, Neighbor(data, "option01_text", "down")) == "OPTIONS");
-  CHECK(Neighbor(data, "option03_text", "down") == "option01_text");
+  CHECK(Neighbor(data, "option04_text", "down") == "option01_text");
 }
 
 void TestOtherModesAreUntouched() {
@@ -326,7 +349,8 @@ void TestOtherModesAreUntouched() {
   GuestMenu after = BuildMainMenuData();
   ParseItems(after);
   for (const char* name : {"option01_text", "option05_text", "option06_text", "option10_text", "help", "left_frame",
-                           "option01_focus", "option02_focus", "option03_focus"}) {
+                           "option01_focus", "option02_focus", "option03_focus", "option04_focus",
+                           "debug_tab_label"}) {
     for (const char* attribute : {"name", "text", "usecmd", "up", "down", "mode", "animtext_scene"}) {
       CHECK(before.Value(name, attribute) == after.Value(name, attribute));
     }
@@ -334,8 +358,10 @@ void TestOtherModesAreUntouched() {
   CHECK(after.Value("option01_text", "up") == "debug_tab_label");
   CHECK(after.Value("option02_text", "up") == "option01_text");
   CHECK(after.Value("option03_text", "up") == "option02_text");
-  CHECK(after.Value("option03_text", "down") == "debug_tab_label");
-  CHECK(after.Value("debug_tab_label", "up") == "option03_text");
+  CHECK(after.Value("option03_text", "down") == "option04_text");
+  CHECK(after.Value("option04_text", "up") == "option03_text");
+  CHECK(after.Value("option04_text", "down") == "debug_tab_label");
+  CHECK(after.Value("debug_tab_label", "up") == "option04_text");
   CHECK(after.Value("debug_tab_label", "down") == "option01_text");
 }
 
@@ -347,7 +373,7 @@ void TestLiveHandlersHaveNothingToMatch() {
   ParseItems(data);
   const std::string_view entry = menu::GuestString(data.base(), menu::LoadU32(data.base(), guest.live_name_entry));
   CHECK(entry.empty());
-  for (const char* item : {"option01_text", "option02_text", "option03_text"}) {
+  for (const char* item : {"option01_text", "option02_text", "option03_text", "option04_text"}) {
     CHECK(data.Value(item, "name") != std::string(entry));
   }
 }
@@ -381,6 +407,68 @@ void TestUnexpectedDataIsLeftAlone() {
     CHECK(std::memcmp(before.data(), data.base(), before.size()) == 0);
     CHECK(MainTextItems(items).size() == 4);
   }
+  {
+    GuestMenu data = BuildMainMenuData();
+    menu::GuestAddresses guest = data.guest();
+    guest.exit_strings = 0;
+    for (uint32_t node : data.nodes()) {
+      menu::ReplaceLiveItem(data.base(), node, guest);
+    }
+    CHECK(data.Value("option02_text", "text") == "PLAY ONLINE");
+    CHECK(data.Value("option04_text", "text") == "REVIEW");
+  }
+}
+
+void TestExitCommandIdentity() {
+  std::printf("exit game command\n");
+  GuestMenu data = BuildMainMenuData();
+  const menu::GuestAddresses guest = data.guest();
+  CHECK(menu::IsExitCommand(data.base(), menu::ExitCommand(guest)));
+  CHECK(!menu::IsExitCommand(data.base(), 0));
+  CHECK(!menu::IsExitCommand(data.base(), menu::ExitText(guest)));
+  for (const char* command : {"menusetmode play", "options_main", "set reviewmode -1;openmenu review", " ", "",
+                              "mainmenuexit 1", "quit"}) {
+    CHECK(!menu::IsExitCommand(data.base(), data.Intern(command)));
+  }
+  ParseItems(data);
+  CHECK(menu::IsExitCommand(data.base(), menu::LoadU32(data.base(), menu::AttributeSlot(
+                                             data.base(), data.Find("option04_text"), "usecmd"))));
+  for (const char* item : {"option01_text", "option02_text", "option03_text"}) {
+    const uint32_t slot = menu::AttributeSlot(data.base(), data.Find(item), "usecmd");
+    CHECK(!menu::IsExitCommand(data.base(), menu::LoadU32(data.base(), slot)));
+  }
+}
+
+void TestExitUsesTheTitleExitPath() {
+  std::printf("exit game uses the title exit path\n");
+  const std::string source = ReadSource(kSrcDir / "main_menu.cpp");
+  const size_t use = source.find("REX_HOOK_RAW(MUA_GUEST_ITEM_USE)");
+  CHECK(use != std::string::npos);
+  const std::string hook = use == std::string::npos ? std::string() : source.substr(use);
+  CHECK(Has(source, "REX_EXTERN(__imp__XamLoaderTerminateTitle);"));
+  CHECK(Has(hook, "IsExitItem(ctx, base, ctx.r3.u32)"));
+  CHECK(Has(hook, "__imp__XamLoaderTerminateTitle(ctx, base);"));
+  CHECK(Has(hook, "MUA_GUEST_ORIGINAL(MUA_GUEST_ITEM_USE)(ctx, base);"));
+  CHECK(Has(source, "MUA_GUEST_STRING_DATA(ctx, base);"));
+  for (const char* direct : {"ExitProcess", "TerminateProcess", "_Exit", "std::exit", "quick_exit", "abort(", "FlushLogging"}) {
+    CHECK(!Has(source, direct));
+  }
+  const std::string header = ReadSource(kSrcDir / "main_menu_items.h");
+  for (const char* direct : {"ExitProcess", "TerminateProcess", "_Exit", "std::exit"}) {
+    CHECK(!Has(header, direct));
+  }
+}
+
+void TestShutdownStaysWithTheHost() {
+  std::printf("host shutdown is unchanged\n");
+  const std::string app = ReadSource(kSrcDir / "marvel_ultimate_alliance_app.h");
+  CHECK(Has(app, "void OnShutdown() override"));
+  CHECK(Has(app, "mua::FormatCleanExit(mua::ProcessUptimeText())"));
+  CHECK(Has(app, "void OnClosing(rex::ui::UIEvent&) override"));
+  CHECK(Has(app, "mua::DiscardSessionLogBeforeHardExit();"));
+  CHECK(Has(app, "Window closing, hard-exiting process."));
+  CHECK(!Has(app, "main_menu"));
+  CHECK(!Has(app, "XamLoader"));
 }
 
 void TestOnlyTheMainMenuIsRewritten() {
@@ -398,6 +486,9 @@ void TestHookSource() {
   CHECK(Has(source, "REX_HOOK_RAW(MUA_GUEST_MENU_ITEM_CREATE)"));
   CHECK(Has(source, "MUA_GUEST_ORIGINAL(MUA_GUEST_MENU_ITEM_CREATE)(ctx, base);"));
   CHECK(Has(source, "mua::guest::kMainMenuVtable"));
+  CHECK(Has(source, "mua::main_menu::ReplaceLiveItem(base, node, Guest(base));"));
+  CHECK(!Has(source, "ShouldSkipItem"));
+  CHECK(!Has(source, "ctx.r3.u64 = 0;"));
   CHECK(!Has(source, "DEBUG_SAULO"));
   CHECK(!Has(source, "visual_trace"));
 
@@ -412,18 +503,23 @@ void TestGuestMaps() {
   std::printf("mua1 and gold guest maps\n");
   const std::string mua1 = ReadSource(kSrcDir / "guest_map_mua1.h");
   CHECK(Has(mua1, "#define MUA_GUEST_MENU_ITEM_CREATE sub_823CF578"));
+  CHECK(Has(mua1, "#define MUA_GUEST_ITEM_USE sub_823DC040"));
+  CHECK(Has(mua1, "#define MUA_GUEST_STRING_DATA sub_82390570"));
   CHECK(Has(mua1, "kMainMenuVtable = 0x8203F634;"));
   CHECK(Has(mua1, "kMainMenuLiveNameEntry = 0x8288D5F8;"));
   CHECK(Has(mua1, "kEmptyString = 0x820034A0;"));
 
   const std::string gold = ReadSource(kSrcDir / "guest_map_mua1_gold.h");
   CHECK(Has(gold, "#define MUA_GUEST_MENU_ITEM_CREATE sub_823E5290"));
+  CHECK(Has(gold, "#define MUA_GUEST_ITEM_USE sub_823F1F78"));
+  CHECK(Has(gold, "#define MUA_GUEST_STRING_DATA sub_823A5948"));
   CHECK(Has(gold, "kMainMenuVtable = 0x8203E4CC;"));
   CHECK(Has(gold, "kMainMenuLiveNameEntry = 0x828BE2E0;"));
   CHECK(Has(gold, "kEmptyString = 0x820034D8;"));
 
   const std::string mua2 = ReadSource(kSrcDir / "guest_map_mua2.h");
-  for (const char* name : {"MUA_GUEST_MENU_ITEM_CREATE", "kMainMenuVtable", "kMainMenuLiveNameEntry", "kEmptyString"}) {
+  for (const char* name : {"MUA_GUEST_MENU_ITEM_CREATE", "MUA_GUEST_ITEM_USE", "MUA_GUEST_STRING_DATA", "kMainMenuVtable",
+                           "kMainMenuLiveNameEntry", "kEmptyString"}) {
     CHECK(!Has(mua2, name));
   }
 }
@@ -452,11 +548,13 @@ struct GeneratedGame {
   const char* activation;
   const char* handler;
   const char* name_displacement;
+  const char* item_use;
+  const char* string_data;
 };
 
 const GeneratedGame kGames[] = {
-    {"mua1", "mua1", "sub_823D5768", "-2508", "sub_823CF578", "sub_823F4278", "sub_823F4620", "-10760"},
-    {"gold", "mua1-gold", "sub_823EB538", "-6964", "sub_823E5290", "sub_8240A910", "sub_8240ACD8", "-7456"},
+    {"mua1", "mua1", "sub_823D5768", "-2508", "sub_823CF578", "sub_823F4278", "sub_823F4620", "-10760", "sub_823DC040", "sub_82390570"},
+    {"gold", "mua1-gold", "sub_823EB538", "-6964", "sub_823E5290", "sub_8240A910", "sub_8240ACD8", "-7456", "sub_823F1F78", "sub_823A5948"},
 };
 
 std::string FunctionBody(const std::string& file_text, const std::string& name) {
@@ -500,11 +598,12 @@ void TestGeneratedStructure() {
       std::printf("  %s: module not generated, skipped\n", game.key);
       continue;
     }
-    const auto bodies = GeneratedBodies(directory, {game.ctor, game.create, game.activation, game.handler});
-    for (const char* name : {game.ctor, game.create, game.activation, game.handler}) {
+    const auto bodies =
+        GeneratedBodies(directory, {game.ctor, game.create, game.activation, game.handler, game.item_use, game.string_data});
+    for (const char* name : {game.ctor, game.create, game.activation, game.handler, game.item_use, game.string_data}) {
       CHECK(bodies.contains(name));
     }
-    if (bodies.size() != 4) {
+    if (bodies.size() != 6) {
       continue;
     }
 
@@ -523,6 +622,12 @@ void TestGeneratedStructure() {
     CHECK(std::regex_search(bodies.at(game.activation), name_load));
     CHECK(std::regex_search(bodies.at(game.handler), name_load));
     CHECK(Has(bodies.at(game.activation), "li r4,1178"));
+
+    const std::string& item_use = bodies.at(game.item_use);
+    CHECK(std::regex_search(item_use, std::regex(R"(// addi r\d+,r3,36)")));
+    CHECK(Has(item_use, "lwz r11,28("));
+    CHECK(Has(item_use, "li r3,3"));
+    CHECK(Has(bodies.at(game.string_data), "addi r3,r11,4104"));
   }
 }
 
@@ -532,13 +637,17 @@ void TestGeneratedStructure() {
 
 int main() {
   TestOriginalMenuHasFourEntries();
-  TestEntriesAfterRemoval();
-  TestNoFourthSlotOrInvisibleEntry();
-  TestNavigationWrapsOverThreeEntries();
+  TestEntriesAfterReplacement();
+  TestFourNativeSlots();
+  TestNoXboxLiveAction();
+  TestNavigationWrapsOverFourEntries();
   TestRebuildsKeepTheSameMenu();
   TestOtherModesAreUntouched();
   TestLiveHandlersHaveNothingToMatch();
   TestUnexpectedDataIsLeftAlone();
+  TestExitCommandIdentity();
+  TestExitUsesTheTitleExitPath();
+  TestShutdownStaysWithTheHost();
   TestOnlyTheMainMenuIsRewritten();
   TestHookSource();
   TestGuestMaps();

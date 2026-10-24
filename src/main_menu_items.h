@@ -6,15 +6,15 @@
 #include <string_view>
 
 // The main menu's item list as MUA1/Gold parse it: sibling XML nodes whose attributes are (name, value) pointer
-// pairs. Each text item is bound by name to one scene slot, so removing the Xbox Live item moves the content of the
-// items below it up one slot instead of renaming them.
+// pairs. Each text item is bound by name to one scene slot, so dropping the Xbox Live item moves the content of the
+// items below it up one slot and the freed last slot carries Exit Game.
 namespace mua::main_menu {
 
 inline constexpr std::string_view kLiveItem = "option02_text";
 inline constexpr std::string_view kOptionsItem = "option03_text";
 inline constexpr std::string_view kReviewItem = "option04_text";
-inline constexpr std::string_view kReviewFocusItem = "option04_focus";
-inline constexpr std::string_view kDebugItem = "debug_tab_label";
+inline constexpr std::string_view kExitText = "EXIT GAME";
+inline constexpr std::string_view kExitCommand = "mua_exit_game";
 
 inline constexpr std::string_view kNameAttribute = "name";
 inline constexpr std::string_view kTextAttribute = "text";
@@ -26,6 +26,9 @@ inline constexpr uint32_t kNodeNextOffset = 4;
 inline constexpr uint32_t kNodeAttributeCountOffset = 12;
 inline constexpr uint32_t kNodeAttributesOffset = 16;
 inline constexpr uint32_t kAttributeSize = 8;
+inline constexpr uint32_t kItemCommandOffset = 36;
+inline constexpr uint32_t kExitStringsSize = 32;
+inline constexpr uint32_t kExitCommandOffset = 16;
 inline constexpr uint32_t kMaxSiblings = 256;
 inline constexpr uint32_t kMaxAttributes = 64;
 inline constexpr size_t kMaxNameLength = 64;
@@ -34,6 +37,7 @@ struct GuestAddresses {
   uint32_t menu_vtable;
   uint32_t live_name_entry;
   uint32_t empty_string;
+  uint32_t exit_strings;
 };
 
 inline uint32_t LoadU32(const uint8_t* base, uint32_t address) {
@@ -53,6 +57,25 @@ inline std::string_view GuestString(const uint8_t* base, uint32_t address) {
   }
   const char* text = reinterpret_cast<const char*>(base + address);
   return std::string_view(text, strnlen(text, kMaxNameLength));
+}
+
+inline void StoreString(uint8_t* base, uint32_t address, std::string_view text) {
+  std::memcpy(base + address, text.data(), text.size());
+  base[address + text.size()] = 0;
+}
+
+// Guest-resident text and command of the Exit Game item; the attribute values point at them.
+inline void WriteExitStrings(uint8_t* base, uint32_t exit_strings) {
+  StoreString(base, exit_strings, kExitText);
+  StoreString(base, exit_strings + kExitCommandOffset, kExitCommand);
+}
+
+inline uint32_t ExitText(const GuestAddresses& guest) { return guest.exit_strings; }
+
+inline uint32_t ExitCommand(const GuestAddresses& guest) { return guest.exit_strings + kExitCommandOffset; }
+
+inline bool IsExitCommand(const uint8_t* base, uint32_t command) {
+  return command != 0 && GuestString(base, command) == kExitCommand;
 }
 
 inline bool IsBlank(std::string_view text) { return text.find_first_not_of(' ') == std::string_view::npos; }
@@ -93,10 +116,10 @@ inline uint32_t FindItem(const uint8_t* base, uint32_t node, std::string_view na
   return 0;
 }
 
-// The review item's text is replaced by the empty string once its content has moved up a slot.
-inline bool IsReviewItemMoved(const uint8_t* base, uint32_t review, const GuestAddresses& guest) {
+// The review item's text holds the Exit Game text once its slot has been rebuilt.
+inline bool IsRebuilt(const uint8_t* base, uint32_t review, const GuestAddresses& guest) {
   const uint32_t text = AttributeSlot(base, review, kTextAttribute);
-  return text != 0 && LoadU32(base, text) == guest.empty_string;
+  return text != 0 && LoadU32(base, text) == ExitText(guest);
 }
 
 // Leaves the Xbox Live branch of the main menu's handlers with no item to match: they compare the activated item's
@@ -105,16 +128,17 @@ inline void DetachLiveHandlers(uint8_t* base, const GuestAddresses& guest) {
   StoreU32(base, guest.live_name_entry, guest.empty_string);
 }
 
-// Moves the Options and Review content up into the Xbox Live and Options slots, and reroutes the debug item's wrap
-// link to the last slot left. Changes nothing unless every part of the list is where the game's data puts it.
-inline void RemoveLiveItem(uint8_t* base, uint32_t node, const GuestAddresses& guest) {
+// Moves the Options and Review content up into the Xbox Live and Options slots and gives the last slot Exit Game, so
+// the four slots, their focus models and their links stay the game's own. Changes nothing unless every part of the
+// list is where the game's data puts it.
+inline void ReplaceLiveItem(uint8_t* base, uint32_t node, const GuestAddresses& guest) {
   const uint32_t live = FindItem(base, node, kLiveItem);
   const uint32_t options = FindItem(base, live, kOptionsItem);
   const uint32_t review = FindItem(base, options, kReviewItem);
-  if (live == 0 || options == 0 || review == 0) {
+  if (guest.exit_strings == 0 || live == 0 || options == 0 || review == 0) {
     return;
   }
-  if (IsReviewItemMoved(base, review, guest)) {
+  if (IsRebuilt(base, review, guest)) {
     DetachLiveHandlers(base, guest);
     return;
   }
@@ -127,45 +151,20 @@ inline void RemoveLiveItem(uint8_t* base, uint32_t node, const GuestAddresses& g
   const uint32_t live_command = AttributeSlot(base, live, kCommandAttribute);
   const uint32_t options_text = AttributeSlot(base, options, kTextAttribute);
   const uint32_t options_command = AttributeSlot(base, options, kCommandAttribute);
-  const uint32_t options_down = AttributeSlot(base, options, kDownAttribute);
-  const uint32_t options_name = AttributeSlot(base, options, kNameAttribute);
   const uint32_t review_text = AttributeSlot(base, review, kTextAttribute);
   const uint32_t review_command = AttributeSlot(base, review, kCommandAttribute);
-  const uint32_t review_down = AttributeSlot(base, review, kDownAttribute);
-  if (live_text == 0 || live_command == 0 || options_text == 0 || options_command == 0 || options_down == 0 ||
-      options_name == 0 || review_text == 0 || review_command == 0 || review_down == 0) {
+  if (live_text == 0 || live_command == 0 || options_text == 0 || options_command == 0 || review_text == 0 ||
+      review_command == 0) {
     return;
   }
-
-  const uint32_t debug = FindItem(base, review, kDebugItem);
-  const uint32_t debug_up = debug == 0 ? 0 : AttributeSlot(base, debug, kUpAttribute);
 
   StoreU32(base, live_text, LoadU32(base, options_text));
   StoreU32(base, live_command, LoadU32(base, options_command));
   StoreU32(base, options_text, LoadU32(base, review_text));
   StoreU32(base, options_command, LoadU32(base, review_command));
-  StoreU32(base, options_down, LoadU32(base, review_down));
-  if (debug_up != 0) {
-    StoreU32(base, debug_up, LoadU32(base, options_name));
-  }
-  StoreU32(base, review_text, guest.empty_string);
+  StoreU32(base, review_text, ExitText(guest));
+  StoreU32(base, review_command, ExitCommand(guest));
   DetachLiveHandlers(base, guest);
-}
-
-// The review item and its focus model sit in the slot below the last one the menu keeps.
-inline bool ShouldSkipItem(const uint8_t* base, uint32_t node, const GuestAddresses& guest) {
-  if (node == 0) {
-    return false;
-  }
-  const std::string_view name = ItemName(base, node);
-  if (name == kReviewItem) {
-    return IsReviewItemMoved(base, node, guest);
-  }
-  if (name == kReviewFocusItem) {
-    const uint32_t review = FindItem(base, node, kReviewItem);
-    return review != 0 && IsReviewItemMoved(base, review, guest);
-  }
-  return false;
 }
 
 }  // namespace mua::main_menu

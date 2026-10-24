@@ -1,0 +1,17 @@
+A thread that suspends itself waits in the kernel, so the title stop does not count it as running guest code.
+
+diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
+--- a/src/system/xthread.cpp
++++ b/src/system/xthread.cpp
+@@ -1087,6 +1087,11 @@
+   if (guest_thread->suspend_count == 0) {
+     return X_STATUS_SUCCESS;
+   }
++  // A thread suspending itself is blocked in the kernel until resumed.
++  if (IsInThread(this)) {
++    GuestWait wait;
++    return thread_->Suspend(&unused_host_suspend_count) ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
++  }
+   return thread_->Suspend(&unused_host_suspend_count) ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+ }
+ 
