@@ -504,6 +504,19 @@ void ApplyShaderWait() {
                            std::to_string(ShaderWaitMsFor(FrameRateOrDefault(REXCVAR_GET(mua_frame_rate)))));
 }
 
+void ApplyDynamicPageStreaming(std::optional<GameId> game) {
+  constexpr char kKey[] = "gpu_stream_dynamic_pages";
+  const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(kKey);
+  if (!info) {
+    REXLOG_WARN("Dynamic page streaming: {} is not in this runtime", kKey);
+    return;
+  }
+  if (game == GameId::kMua1 && info->source == rex::cvar::Source::kDefault) {
+    rex::cvar::SetFlagByName(kKey, "true");
+  }
+  REXLOG_INFO("Dynamic page streaming: {}={}", kKey, rex::cvar::GetFlagByName(kKey));
+}
+
 // Also replaces a native_2x_msaa = false written by launchers that labelled it Off.
 void ApplyMultisampling() {
   rex::cvar::SetFlagByName("native_2x_msaa",

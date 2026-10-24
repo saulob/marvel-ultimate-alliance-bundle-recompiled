@@ -9,6 +9,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
+#include "guest_frame_counters.h"
 #include "guest_map.h"
 #include "recomp_image.h"
 #include "settings.h"
@@ -38,7 +39,9 @@ void PaceGuestFrame() {
     deadline = g_limiter.Next(ProjectLimiterRate(ConfiguredFrameRate(), RuntimeFramePolicy()), LimiterClock::now());
   }
   if (deadline) {
+    const auto wait_start = LimiterClock::now();
     WaitUntil(*deadline);
+    AddGuestFrameTime(GuestFrameTime::kLimiterWait, LimiterClock::now() - wait_start);
   }
 }
 

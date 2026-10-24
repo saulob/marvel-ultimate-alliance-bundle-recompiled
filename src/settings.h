@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -63,6 +64,10 @@ void ApplyMultisampling();
 
 // Sets async_shader_wait_ms for the Frame rate choice. Call with ApplyMultisampling.
 void ApplyShaderWait();
+
+// Turns on gpu_stream_dynamic_pages for the one game it is qualified on, unless the config sets it. Call with
+// ApplyMultisampling.
+void ApplyDynamicPageStreaming(std::optional<GameId> game);
 
 // Sets present_effect for the game's Upscaling choice. Call before the presenter is created (OnPreSetup).
 void ApplyUpscaler(const GameSettings& settings);

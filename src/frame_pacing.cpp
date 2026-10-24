@@ -14,6 +14,7 @@
 
 #include "frame_limiter.h"
 #include "frame_pacing.h"
+#include "guest_frame_counters.h"
 #include "guest_map.h"
 #include "save_diagnostics.h"
 
@@ -38,10 +39,49 @@ double NowSeconds() {
 
 }  // namespace
 
+#if defined(MUA_RUNTIME_MUA1)
+namespace {
+
+constexpr int kMaxTimingReports = 90;
+constexpr double kSlowWorldUpdateMs = 50.0;
+constexpr int kMaxSlowWorldUpdateReports = 40;
+
+std::mutex g_timing_mutex;
+mua::WorldUpdateTiming g_timing;
+int g_timing_reports = 0;
+int g_slow_update_reports = 0;
+
+// DEBUG_SAULO: World::Update host time, also published for the GPU plugin's Performance line.
+void NoteWorldUpdateTime(std::chrono::steady_clock::duration elapsed) {
+  mua::AddGuestFrameTime(mua::GuestFrameTime::kWorldUpdate, elapsed);
+  const double ms = std::chrono::duration<double, std::milli>(elapsed).count();
+  std::lock_guard lock(g_timing_mutex);
+  if (ms >= kSlowWorldUpdateMs && g_slow_update_reports < kMaxSlowWorldUpdateReports) {
+    ++g_slow_update_reports;
+    REXLOG_WARN("DEBUG_SAULO slow world update: {:.1f} ms", ms);
+  }
+  if (g_timing_reports >= kMaxTimingReports) {
+    return;
+  }
+  if (const auto line = g_timing.Add(ms, NowSeconds())) {
+    ++g_timing_reports;
+    REXLOG_INFO("DEBUG_SAULO {}", *line);
+  }
+}
+
+}  // namespace
+#endif
+
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE));
 REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
   const uint32_t world = ctx.r3.u32;
+#if defined(MUA_RUNTIME_MUA1)
+  const auto update_start = std::chrono::steady_clock::now();
   MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
+  NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);
+#else
+  MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
+#endif
   if (g_reports >= kMaxReports) {
     return;
   }

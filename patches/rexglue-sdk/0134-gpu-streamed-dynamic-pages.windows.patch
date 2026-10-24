@@ -1,0 +1,481 @@
+Adapted from tools/rexglue-sdk/src/graphics/shared_memory.cpp in YesterMester/TheSimpsonsGameRecomp (commits 15feabc9
+and 6c1695b3), which keeps the ReXGlue SDK's BSD 3-Clause License, see packaging/licenses/ReXGlue-LICENSE.txt.
+
+Streams the vertex and index pages the game rewrites every frame. Every page the command processor uploads is made
+valid and write-protected, so the guest's next write to it takes an access violation, a protection query and an
+unprotect on the writing thread, and the next draw uploads the page and protects it again. A page whose writes faulted in
+two frames in a row now becomes streamed: vertex fetch and DMA index requests upload it without making it valid or
+protecting it, so it is uploaded again on every such request and never goes stale. Texture, resolve and memexport
+requests still make it valid and protected. A streamed page uploaded more than 64 times in a frame is watched again, and
+the set is learned again every 600 frames. With gpu_stream_skip_unchanged, a streamed request whose bytes still match
+what the page was last uploaded with skips the upload. Only the D3D12 command processor calls OnGuestFrameEnd, so
+nothing is streamed on other backends. Unlike the original, gpu_stream_dynamic_pages is off unless the title turns it
+on, and the frame end only visits the blocks that faulted and the pages that were uploaded.
+
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -11,7 +11,9 @@
+  */
+ 
+ #include <cstdint>
++#include <memory>
+ #include <mutex>
++#include <unordered_map>
+ #include <utility>
+ #include <vector>
+ 
+@@ -75,9 +77,15 @@
+ 
+   // Checks if the range has been updated, uploads new data if needed and
+   // ensures the host GPU memory backing the range are resident. Returns true if
+-  // the range has been fully updated and is usable.
+-  bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
+-  bool RequestRange(uint32_t start, uint32_t length);
++  // the range has been fully updated and is usable. allow_streamed is for vertex and index data
++  // only the current draw reads: with gpu_stream_dynamic_pages, pages the game rewrites every frame
++  // are then uploaded without being made valid or write-protected.
++  bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count,
++                     bool allow_streamed = false);
++  bool RequestRange(uint32_t start, uint32_t length, bool allow_streamed = false);
++
++  // Once per guest frame on the command processor thread: updates which pages are streamed.
++  void OnGuestFrameEnd();
+ 
+   // Marks the range and, if not exact_range, potentially its surroundings
+   // (to up to the first GPU-written page, as an access violation exception
+@@ -139,6 +147,9 @@
+   // overall bounds of pages to be uploaded.
+   virtual bool UploadRanges(
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
++  // For UploadRanges, after MakeRangeValid: copies guest pages to the upload buffer, keeping the
++  // bytes streamed pages were uploaded with.
++  void CopyPagesForUpload(uint32_t page_first, uint32_t page_count, uint8_t* dest);
+ 
+  private:
+   memory::Memory& memory_;
+@@ -183,6 +194,34 @@
+   std::vector<uint64_t> system_page_flags_valid_and_gpu_written_;
+   uint32_t num_system_page_flags_ = 0;
+ 
++  // gpu_stream_dynamic_pages: a page whose writes fault in two frames in a row is streamed, which
++  // saves a protection change and a guest write fault per page per frame. The set is learned again
++  // every kStreamedPagesResetFrames frames, and a page uploaded more than
++  // kStreamedPageMaxUploadsPerFrame times in a frame is watched again until then. Guest threads set
++  // the faulted bits; the rest is changed only by the command processor thread.
++  static constexpr uint32_t kStreamedPagesResetFrames = 600;
++  static constexpr uint8_t kStreamedPageMaxUploadsPerFrame = 64;
++  std::vector<uint64_t> system_page_flags_streamed_;
++  std::vector<uint64_t> system_page_flags_streamed_blocked_;
++  std::vector<uint64_t> system_page_flags_faulted_;
++  std::vector<uint64_t> system_page_flags_faulted_previous_;
++  // Blocks with faulted bits, reserved for every block so guest threads never reallocate them.
++  std::vector<uint32_t> faulted_blocks_;
++  std::vector<uint32_t> faulted_blocks_previous_;
++  std::vector<uint8_t> streamed_page_uploads_;
++  std::vector<uint32_t> streamed_pages_uploaded_;
++  uint32_t streamed_pages_frames_ = 0;
++  bool streamed_pages_active_ = false;
++  // Set while an allow_streamed request uploads, read by MakeRangeValid.
++  bool upload_allow_streamed_ = false;
++  // gpu_stream_skip_unchanged: the bytes each streamed page was last uploaded with, what the buffer
++  // holds until another upload or a GPU write replaces them.
++  std::unordered_map<uint32_t, std::unique_ptr<uint8_t[]>> streamed_page_shadows_;
++  std::vector<std::pair<uint32_t, uint32_t>> kept_upload_ranges_;
++  void MarkPageFaulted(uint32_t page);
++  void DropUnchangedStreamedPages(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
++  void EraseStreamedPageShadows(uint32_t page_first, uint32_t page_last);
++
+   static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(
+       void* context_ptr, uint32_t physical_address_start, uint32_t length, bool exact_range);
+ 
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -29,6 +29,18 @@
+                       "whole block): fewer pages re-uploaded, more write faults")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(gpu_stream_dynamic_pages, false, "GPU",
++                    "Upload vertex and index data in pages the game rewrites every frame on "
++                    "every use instead of write-protecting them after each upload (saves a "
++                    "protection change and a write fault per page per frame)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(gpu_stream_skip_unchanged, true, "GPU",
++                    "With gpu_stream_dynamic_pages, skip uploading a streamed page for a draw "
++                    "when the bytes the draw reads from it are the same as when it was last "
++                    "uploaded")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+@@ -43,6 +55,13 @@
+   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
+   system_page_flags_valid_.assign(num_system_page_flags_, 0);
+   system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
++  system_page_flags_streamed_.assign(num_system_page_flags_, 0);
++  system_page_flags_streamed_blocked_.assign(num_system_page_flags_, 0);
++  system_page_flags_faulted_.assign(num_system_page_flags_, 0);
++  system_page_flags_faulted_previous_.assign(num_system_page_flags_, 0);
++  faulted_blocks_.reserve(num_system_page_flags_);
++  faulted_blocks_previous_.reserve(num_system_page_flags_);
++  streamed_page_uploads_.assign(size_t(num_system_page_flags_) * 64, 0);
+ 
+   memory_invalidation_callback_handle_ =
+       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
+@@ -95,9 +114,76 @@
+   system_page_flags_valid_.shrink_to_fit();
+   system_page_flags_valid_and_gpu_written_.clear();
+   system_page_flags_valid_and_gpu_written_.shrink_to_fit();
++  system_page_flags_streamed_ = {};
++  system_page_flags_streamed_blocked_ = {};
++  system_page_flags_faulted_ = {};
++  system_page_flags_faulted_previous_ = {};
++  faulted_blocks_ = {};
++  faulted_blocks_previous_ = {};
++  streamed_page_uploads_ = {};
++  streamed_pages_uploaded_ = {};
++  streamed_page_shadows_.clear();
++  streamed_pages_active_ = false;
+   num_system_page_flags_ = 0;
+ }
+ 
++void SharedMemory::OnGuestFrameEnd() {
++  bool enabled = REXCVAR_GET(gpu_stream_dynamic_pages);
++  if (!enabled && !streamed_pages_active_) {
++    return;
++  }
++  auto global_lock = global_critical_region_.Acquire();
++  if (!num_system_page_flags_) {
++    return;
++  }
++  for (uint32_t page : streamed_pages_uploaded_) {
++    streamed_page_uploads_[page] = 0;
++  }
++  streamed_pages_uploaded_.clear();
++  // Streamed pages stop faulting, so forget them now and then: pages the game stopped rewriting
++  // every frame go back to being watched.
++  if (!enabled || ++streamed_pages_frames_ >= kStreamedPagesResetFrames) {
++    streamed_pages_frames_ = 0;
++    std::fill(system_page_flags_streamed_.begin(), system_page_flags_streamed_.end(), uint64_t(0));
++    std::fill(system_page_flags_streamed_blocked_.begin(),
++              system_page_flags_streamed_blocked_.end(), uint64_t(0));
++    streamed_page_shadows_.clear();
++  }
++  if (enabled) {
++    for (uint32_t block : faulted_blocks_) {
++      system_page_flags_streamed_[block] |= system_page_flags_faulted_[block] &
++                                            system_page_flags_faulted_previous_[block] &
++                                            ~system_page_flags_streamed_blocked_[block];
++    }
++  }
++  for (uint32_t block : faulted_blocks_previous_) {
++    system_page_flags_faulted_previous_[block] = 0;
++  }
++  faulted_blocks_previous_.clear();
++  if (enabled) {
++    for (uint32_t block : faulted_blocks_) {
++      system_page_flags_faulted_previous_[block] = system_page_flags_faulted_[block];
++    }
++    faulted_blocks_previous_.swap(faulted_blocks_);
++  }
++  for (uint32_t block : faulted_blocks_previous_) {
++    system_page_flags_faulted_[block] = 0;
++  }
++  for (uint32_t block : faulted_blocks_) {
++    system_page_flags_faulted_[block] = 0;
++  }
++  faulted_blocks_.clear();
++  streamed_pages_active_ = enabled;
++}
++
++void SharedMemory::MarkPageFaulted(uint32_t page) {
++  uint64_t& faulted = system_page_flags_faulted_[page >> 6];
++  if (!faulted) {
++    faulted_blocks_.push_back(page >> 6);
++  }
++  faulted |= uint64_t(1) << (page & 63);
++}
++
+ void SharedMemory::InvalidateAllPages() {
+   auto global_lock = global_critical_region_.Acquire();
+ 
+@@ -300,27 +386,76 @@
+   uint32_t valid_block_first = valid_page_first >> 6;
+   uint32_t valid_block_last = valid_page_last >> 6;
+ 
++  if (written_by_gpu) {
++    EraseStreamedPageShadows(valid_page_first, valid_page_last);
++  }
++
++  // Streamed pages of an allow_streamed upload are neither made valid nor protected, so their next
++  // request uploads them again.
++  const bool skip_streamed = upload_allow_streamed_ && !written_by_gpu;
++  bool any_streamed = false;
+   {
+     auto global_lock = global_critical_region_.Acquire();
+ 
+     for (uint32_t i = valid_block_first; i <= valid_block_last; ++i) {
+-      uint64_t valid_bits = UINT64_MAX;
++      uint64_t range_bits = UINT64_MAX;
+       if (i == valid_block_first) {
+-        valid_bits &= ~((uint64_t(1) << (valid_page_first & 63)) - 1);
++        range_bits &= ~((uint64_t(1) << (valid_page_first & 63)) - 1);
+       }
+       if (i == valid_block_last && (valid_page_last & 63) != 63) {
+-        valid_bits &= (uint64_t(1) << ((valid_page_last & 63) + 1)) - 1;
++        range_bits &= (uint64_t(1) << ((valid_page_last & 63) + 1)) - 1;
++      }
++      uint64_t valid_bits = range_bits;
++      if (skip_streamed) {
++        uint64_t streamed_bits = range_bits & system_page_flags_streamed_[i];
++        uint64_t streamed_bits_remaining = streamed_bits;
++        uint32_t bit;
++        while (rex::bit_scan_forward(streamed_bits_remaining, &bit)) {
++          streamed_bits_remaining &= ~(uint64_t(1) << bit);
++          uint32_t page = (i << 6) + bit;
++          uint8_t& uploads = streamed_page_uploads_[page];
++          if (uploads >= kStreamedPageMaxUploadsPerFrame) {
++            streamed_bits &= ~(uint64_t(1) << bit);
++            system_page_flags_streamed_[i] &= ~(uint64_t(1) << bit);
++            system_page_flags_streamed_blocked_[i] |= uint64_t(1) << bit;
++          } else if (!uploads++) {
++            streamed_pages_uploaded_.push_back(page);
++          }
++        }
++        if (streamed_bits) {
++          any_streamed = true;
++          valid_bits &= ~streamed_bits;
++        }
+       }
+       system_page_flags_valid_[i] |= valid_bits;
+       uint64_t& gpu_written = system_page_flags_valid_and_gpu_written_[i];
+-      gpu_written = written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits);
++      gpu_written = written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~range_bits);
+     }
+   }
+ 
+-  if (memory_invalidation_callback_handle_) {
++  if (!memory_invalidation_callback_handle_) {
++    return;
++  }
++  if (!any_streamed) {
+     memory().EnablePhysicalMemoryAccessCallbacks(
+         valid_page_first << page_size_log2_,
+         (valid_page_last - valid_page_first + 1) << page_size_log2_, true, false);
++    return;
++  }
++  // Protect only the runs made valid above; only this thread changes the streamed set.
++  uint32_t run_first = UINT32_MAX;
++  for (uint32_t page = valid_page_first; page <= valid_page_last + 1; ++page) {
++    bool protect_page = page <= valid_page_last &&
++                        !((system_page_flags_streamed_[page >> 6] >> (page & 63)) & 1);
++    if (protect_page) {
++      if (run_first == UINT32_MAX) {
++        run_first = page;
++      }
++    } else if (run_first != UINT32_MAX) {
++      memory().EnablePhysicalMemoryAccessCallbacks(
++          run_first << page_size_log2_, (page - run_first) << page_size_log2_, true, false);
++      run_first = UINT32_MAX;
++    }
+   }
+ }
+ 
+@@ -391,7 +526,8 @@
+   return true;
+ }
+ 
+-bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count) {
++bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count,
++                                 bool allow_streamed) {
+   if (ranges == nullptr || !count) {
+     return true;
+   }
+@@ -523,12 +659,116 @@
+     return true;
+   }
+ 
+-  return UploadRanges(upload_ranges_);
++  upload_allow_streamed_ = allow_streamed && streamed_pages_active_;
++  if (upload_allow_streamed_ && REXCVAR_GET(gpu_stream_skip_unchanged) &&
++      !streamed_page_shadows_.empty()) {
++    DropUnchangedStreamedPages(merged_ranges.data(), merged_ranges.size());
++    if (upload_ranges_.empty()) {
++      upload_allow_streamed_ = false;
++      return true;
++    }
++  }
++  bool uploaded = UploadRanges(upload_ranges_);
++  upload_allow_streamed_ = false;
++  return uploaded;
++}
++
++void SharedMemory::DropUnchangedStreamedPages(const std::pair<uint32_t, uint32_t>* ranges,
++                                              size_t count) {
++  const uint32_t page_size = uint32_t(1) << page_size_log2_;
++  kept_upload_ranges_.clear();
++  for (const std::pair<uint32_t, uint32_t>& upload_range : upload_ranges_) {
++    for (uint32_t page = upload_range.first; page < upload_range.first + upload_range.second;
++         ++page) {
++      bool unchanged = false;
++      if ((system_page_flags_streamed_[page >> 6] >> (page & 63)) & 1) {
++        auto shadow_it = streamed_page_shadows_.find(page);
++        if (shadow_it != streamed_page_shadows_.end()) {
++          // Only the bytes the request reads matter.
++          uint32_t page_start = page << page_size_log2_;
++          uint32_t page_end = page_start + page_size;
++          const uint8_t* guest = memory().TranslatePhysical(page_start);
++          const uint8_t* shadow = shadow_it->second.get();
++          unchanged = true;
++          for (size_t i = 0; i < count && unchanged; ++i) {
++            uint32_t compare_start = std::max(ranges[i].first, page_start);
++            uint32_t compare_end = std::min(ranges[i].first + ranges[i].second, page_end);
++            if (compare_start < compare_end &&
++                std::memcmp(guest + (compare_start - page_start),
++                            shadow + (compare_start - page_start), compare_end - compare_start)) {
++              unchanged = false;
++            }
++          }
++        }
++      }
++      if (unchanged) {
++        continue;
++      }
++      if (!kept_upload_ranges_.empty() &&
++          kept_upload_ranges_.back().first + kept_upload_ranges_.back().second == page) {
++        ++kept_upload_ranges_.back().second;
++      } else {
++        kept_upload_ranges_.emplace_back(page, 1);
++      }
++    }
++  }
++  upload_ranges_.swap(kept_upload_ranges_);
+ }
+ 
+-bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
++void SharedMemory::EraseStreamedPageShadows(uint32_t page_first, uint32_t page_last) {
++  if (streamed_page_shadows_.empty()) {
++    return;
++  }
++  if (page_last - page_first >= streamed_page_shadows_.size()) {
++    for (auto it = streamed_page_shadows_.begin(); it != streamed_page_shadows_.end();) {
++      if (it->first >= page_first && it->first <= page_last) {
++        it = streamed_page_shadows_.erase(it);
++      } else {
++        ++it;
++      }
++    }
++  } else {
++    for (uint32_t page = page_first; page <= page_last; ++page) {
++      streamed_page_shadows_.erase(page);
++    }
++  }
++}
++
++void SharedMemory::CopyPagesForUpload(uint32_t page_first, uint32_t page_count, uint8_t* dest) {
++  if (!page_count) {
++    return;
++  }
++  const uint8_t* source = memory().TranslatePhysical(page_first << page_size_log2_);
++  if (!upload_allow_streamed_ || !REXCVAR_GET(gpu_stream_skip_unchanged)) {
++    std::memcpy(dest, source, size_t(page_count) << page_size_log2_);
++    EraseStreamedPageShadows(page_first, page_first + page_count - 1);
++    return;
++  }
++  const size_t page_size = size_t(1) << page_size_log2_;
++  for (uint32_t i = 0; i < page_count; ++i) {
++    uint32_t page = page_first + i;
++    const uint8_t* page_source = source + (size_t(i) << page_size_log2_);
++    uint8_t* page_dest = dest + (size_t(i) << page_size_log2_);
++    // After MakeRangeValid: whether this upload left the page streamed.
++    if ((system_page_flags_streamed_[page >> 6] >> (page & 63)) & 1) {
++      // Through the shadow, so it holds exactly the uploaded bytes while a guest thread may be
++      // writing the page.
++      std::unique_ptr<uint8_t[]>& shadow = streamed_page_shadows_[page];
++      if (!shadow) {
++        shadow = std::make_unique<uint8_t[]>(page_size);
++      }
++      std::memcpy(shadow.get(), page_source, page_size);
++      std::memcpy(page_dest, shadow.get(), page_size);
++    } else {
++      std::memcpy(page_dest, page_source, page_size);
++      streamed_page_shadows_.erase(page);
++    }
++  }
++}
++
++bool SharedMemory::RequestRange(uint32_t start, uint32_t length, bool allow_streamed) {
+   std::pair<uint32_t, uint32_t> range(start, length);
+-  return RequestRanges(&range, 1);
++  return RequestRanges(&range, 1, allow_streamed);
+ }
+ 
+ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
+@@ -555,6 +795,11 @@
+   uint32_t page_first_written = page_first;
+   uint32_t page_last_written = page_last;
+ 
++  // Inexact ranges come from guest write faults.
++  if (!exact_range && streamed_pages_active_) {
++    MarkPageFaulted(page_first);
++  }
++
+   if (!exact_range) {
+     // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be
+     // invalidated - if no GPU-written data nearby that was not intended to be
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -324,13 +324,11 @@
+         return false;
+       }
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+-      std::memcpy(upload_buffer_mapping,
+-                  memory().TranslatePhysical(upload_range_start << page_size_log2()),
+-                  upload_buffer_size);
++      uint32_t upload_buffer_pages = uint32_t(upload_buffer_size >> page_size_log2());
++      CopyPagesForUpload(upload_range_start, upload_buffer_pages, upload_buffer_mapping);
+       command_list.D3DCopyBufferRegion(buffer_, upload_range_start << page_size_log2(),
+                                        upload_buffer, UINT64(upload_buffer_offset),
+                                        UINT64(upload_buffer_size));
+-      uint32_t upload_buffer_pages = uint32_t(upload_buffer_size >> page_size_log2());
+       upload_range_start += upload_buffer_pages;
+       upload_range_length -= upload_buffer_pages;
+     }
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -2436,6 +2436,9 @@
+   NoteGpuWorkSwap(submission_current_, idle_wait_ns_, texture_cache_->draw_resolution_scale_x(),
+                   texture_cache_->draw_resolution_scale_y(),
+                   render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock);
++  if (shared_memory_) {
++    shared_memory_->OnGuestFrameEnd();
++  }
+ 
+   // In case the swap command is the only one in the frame.
+   if (!BeginSubmission(true)) {
+@@ -3202,7 +3205,7 @@
+         // shared memory has nothing mapped (undefined on Tiled Resources Tier 1: GPU hangs).
+         vfetch_request_size = 4096;
+       }
+-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size)) {
++      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size, true)) {
+         REXGPU_ERROR(
+             "Failed to request vertex buffer at 0x{:08X} (size {}) in the "
+             "shared memory",
+diff --git a/src/graphics/primitive_processor.cpp b/src/graphics/primitive_processor.cpp
+--- a/src/graphics/primitive_processor.cpp
++++ b/src/graphics/primitive_processor.cpp
+@@ -912,7 +912,7 @@
+       cacheable.index_buffer_type == ProcessedIndexBufferType::kHostBuiltinForDMA) {
+     // Request the index buffer memory.
+     // TODO(Triang3l): Shared memory request cache.
+-    if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {
++    if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes, true)) {
+       REXGPU_ERROR(
+           "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
+           "bytes needed, in the shared memory",

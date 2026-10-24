@@ -191,6 +191,33 @@ void TestReport() {
   CHECK(rate.has_value() && std::fabs(*rate - 120.0) < 1.0);
 }
 
+void TestWorldUpdateTiming() {
+  std::printf("world update timing\n");
+  // Calls 0.125 s apart: the window closes on the 81st, 10 s after the first.
+  WorldUpdateTiming timing;
+  std::string line;
+  double now = 0.0;
+  for (int i = 0; i < 1000 && line.empty(); ++i) {
+    now += 0.125;
+    const double ms = i % 4 == 0 ? 12.0 : (i % 4 == 1 ? 6.0 : 2.0);
+    if (const auto report = timing.Add(ms, now)) {
+      line = *report;
+    }
+  }
+  CHECK(Has(line, "world update: calls/s=8.1"));
+  CHECK(Has(line, "avg=5.58 ms | max=12.00 ms"));
+  CHECK(Has(line, ">5 ms=41 | >10 ms=21"));
+  CHECK(Has(line, "busy=4.5% of real time"));
+  std::string next;
+  for (int i = 0; i < 1000 && next.empty(); ++i) {
+    now += 0.125;
+    if (const auto report = timing.Add(1.0, now)) {
+      next = *report;
+    }
+  }
+  CHECK(Has(next, "max=1.00 ms | >5 ms=0 | >10 ms=0"));
+}
+
 void TestWiring() {
   std::printf("hooks\n");
   const std::string pacing = ReadSource("frame_pacing.cpp");
@@ -216,6 +243,27 @@ void TestWiring() {
   CHECK(Has(pacing, "policy.host_limiter"));
   CHECK(!Has(limiter, "interpolat"));
   CHECK(!Has(limiter, "vsync"));
+
+  // DEBUG_SAULO: MUA1 times World::Update and publishes it with the limiter and guest fence waits.
+  CHECK(Has(pacing, "const auto update_start = std::chrono::steady_clock::now();"));
+  CHECK(Has(pacing, "NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);"));
+  CHECK(Has(pacing, "mua::AddGuestFrameTime(mua::GuestFrameTime::kWorldUpdate, elapsed);"));
+  CHECK(Has(pacing, "DEBUG_SAULO slow world update"));
+  CHECK(Has(limiter, "AddGuestFrameTime(GuestFrameTime::kLimiterWait, LimiterClock::now() - wait_start);"));
+  const std::string fence = ReadSource("gpu_fence_wait.cpp");
+  CHECK(Has(fence, "mua::AddGuestFrameTime(mua::GuestFrameTime::kFenceWait"));
+  const std::string counters = ReadSource("guest_frame_counters.h");
+  CHECK(Has(counters, "#if defined(MUA_RUNTIME_MUA1) && defined(_WIN32)"));
+  CHECK(Has(counters, "rex::perf::IncrementCounter(CounterId::kGuestUpdates, 1);"));
+  const std::string watchdog = ReadSource("hang_watchdog.cpp");
+  CHECK(Has(watchdog, "std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();"));
+  CHECK(Has(watchdog, "kHitchSampleAfter = std::chrono::milliseconds(150)"));
+  CHECK(Has(watchdog, "kHitchStackAfter = std::chrono::milliseconds(500)"));
+  CHECK(Has(watchdog, "DEBUG_SAULO hitch: {} ms open | top {} | guest {}"));
+  // Everything goes to the session log: no hang_N.txt or hitch_stacks_N.txt.
+  CHECK(!Has(watchdog, "ofstream"));
+  CHECK(!Has(watchdog, "hang_\""));
+  CHECK(!Has(watchdog, "hitch_stacks_"));
 }
 
 }  // namespace
@@ -226,6 +274,7 @@ int main() {
   TestMua2GameSpeedAtEveryRate();
   TestLimiterCadence();
   TestReport();
+  TestWorldUpdateTiming();
   TestWiring();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

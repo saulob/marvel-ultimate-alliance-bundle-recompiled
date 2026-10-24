@@ -56,6 +56,52 @@ function Get-FileSha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# The files the patches changed or added in the ReXGlue source, with their content hash and time. Resetting the source
+# and applying the patches again rewrites all of them, and Ninja rebuilds whatever is newer than its object.
+function Get-PatchedSourceState([string]$Src) {
+    $names = @(& git -C $Src diff --name-only) + @(& git -C $Src ls-files --others --exclude-standard -- src include tests cmake)
+    $state = @{}
+    foreach ($name in $names) {
+        $path = Join-Path $Src $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $state[$name] = @{ Sha256 = Get-FileSha256 $path; Time = (Get-Item -LiteralPath $path).LastWriteTimeUtc }
+        }
+    }
+    return $state
+}
+
+# Gives back the time of every file in $State that came out of the patching with the same content; returns how many.
+function Restore-UnchangedFileTimes([string]$Src, $State) {
+    $kept = 0
+    foreach ($name in $State.Keys) {
+        $path = Join-Path $Src $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        if ((Get-FileSha256 $path) -ne $State[$name].Sha256) { continue }
+        (Get-Item -LiteralPath $path).LastWriteTimeUtc = $State[$name].Time
+        $kept++
+    }
+    return $kept
+}
+
+# Copies only when the content differs, so an installed file keeps its time and nothing built from it is redone.
+function Copy-FileIfDifferent([string]$Source, [string]$Destination) {
+    if ((Test-Path -LiteralPath $Destination -PathType Leaf) -and (Get-FileSha256 $Source) -eq (Get-FileSha256 $Destination)) {
+        return $false
+    }
+    New-Item -ItemType Directory -Force (Split-Path $Destination) | Out-Null
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    return $true
+}
+
+function Copy-TreeIfDifferent([string]$Source, [string]$Destination) {
+    $copied = 0
+    foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File) {
+        $relative = $file.FullName.Substring($Source.TrimEnd('\').Length).TrimStart('\')
+        if (Copy-FileIfDifferent $file.FullName (Join-Path $Destination $relative)) { $copied++ }
+    }
+    return $copied
+}
+
 function Get-TextSha256([string]$Text) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))) -replace '-', '').ToLowerInvariant() }

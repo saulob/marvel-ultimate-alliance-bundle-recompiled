@@ -63,3 +63,8 @@ The runtime and Xenos GPU plugin in `tools\rexglue` are built from the pinned Re
 `patches\rexglue-sdk` (the first build fetches the source and takes a while). `tools\build.ps1` rebuilds them whenever
 the patches or the compiler change and refuses to start with other copies next to the executable. The Debug runtime
 stays the stock one.
+
+A build with the same patches does not touch ReXGlue. After a patch change it keeps the source and CMake/Ninja tree in
+`out\rexglue-sdk-src`, restores the time of patched files whose content did not change and rebuilds only the rest.
+`.\tools\build.ps1 -Clean` cleans `build\` only (keeping `build\user_data`); `.\tools\build-patched-rexruntime.ps1
+-FreshBuildTree` is the separate full reset of the ReXGlue build.

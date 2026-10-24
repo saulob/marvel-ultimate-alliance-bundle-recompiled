@@ -1,0 +1,467 @@
+DEBUG_SAULO, temporary: when FFmpeg rejects an XMA frame, logs the context, input buffer, packet header, frame
+position, whether the frame crossed into another packet or buffer, the loop data and whether guest memory changed
+under the decoder. Only the first error of each kind (the message without its numbers) gets that line; the
+10-second XMA summary counts the repeats. Also logs context work over 10 ms, XMADisableContext waits over 5 ms,
+input starvation in that summary, and SDL callbacks that found the frame queue empty.
+
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -10,7 +10,13 @@
+ */
+ 
+ #include <algorithm>
++#include <atomic>
++#include <chrono>
+ #include <cstring>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <vector>
+ 
+ #include <rex/audio/xma/context.h>
+ #include <rex/audio/xma/decoder.h>
+@@ -40,6 +46,230 @@
+ 
+ using stream::BitStream;
+ 
++// DEBUG_SAULO: the input of a frame FFmpeg rejects, slow context work and input starvation, to tell bad source data
++// from bad packet handling.
++namespace {
++
++struct DecodeTrace {
++  uint32_t context = 0;
++  const uint8_t* context_ptr = nullptr;
++  uint32_t initial_word0 = 0;
++  uint32_t buffer = 0;
++  uint32_t buffer_address = 0;
++  uint32_t packet_count = 0;
++  uint32_t packet_index = 0;
++  uint32_t packet_header = 0;
++  uint32_t frame_in_packet = 0;
++  uint32_t frames_in_packet = 0;
++  uint32_t read_offset = 0;
++  uint32_t frame_size = 0;
++  bool split_header = false;
++  bool crosses_packet = false;
++  bool next_from_other_buffer = false;
++  uint32_t loop_count = 0;
++  uint32_t loop_start = 0;
++  uint32_t loop_end = 0;
++  bool stereo = false;
++  const uint8_t* packet = nullptr;
++  const uint8_t* next_packet = nullptr;
++  const uint8_t* copied = nullptr;
++  bool reported = false;
++};
++
++thread_local DecodeTrace* t_trace = nullptr;
++thread_local bool t_inline_kick = false;
++
++constexpr uint32_t kMaxErrorLines = 150;
++constexpr uint32_t kMaxSlowLines = 40;
++constexpr uint32_t kMaxSummaryLines = 60;
++constexpr int64_t kSlowWorkUs = 10000;
++constexpr int64_t kSummaryWindowNs = 10'000'000'000;
++
++std::atomic<uint32_t> g_error_lines{0};
++std::atomic<uint32_t> g_slow_lines{0};
++std::atomic<uint32_t> g_summary_lines{0};
++std::atomic<uint64_t> g_works{0};
++std::atomic<uint64_t> g_inline_works{0};
++std::atomic<uint64_t> g_decodes{0};
++std::atomic<uint64_t> g_errors{0};
++std::atomic<uint64_t> g_starved{0};
++std::atomic<uint64_t> g_slow{0};
++std::atomic<uint64_t> g_lock_waits{0};
++std::atomic<int64_t> g_max_work_us{0};
++std::atomic<int64_t> g_next_summary_ns{0};
++
++// Errors that differ only in their numbers are one kind: the first of each is logged with its context, the rest are
++// counted into the 10-second summary.
++struct ErrorKind {
++  std::string text;
++  uint32_t repeats = 0;
++};
++constexpr size_t kMaxErrorKinds = 32;
++std::mutex g_kinds_mutex;
++std::vector<ErrorKind> g_kinds;
++
++std::string ErrorKindOf(std::string_view message) {
++  std::string kind;
++  for (size_t i = 0; i < message.size(); ++i) {
++    const bool digit = message[i] >= '0' && message[i] <= '9';
++    const bool negative = message[i] == '-' && i + 1 < message.size() && message[i + 1] >= '0' && message[i + 1] <= '9';
++    if (digit || negative) {
++      if (kind.empty() || kind.back() != '#') {
++        kind += '#';
++      }
++    } else {
++      kind += message[i];
++    }
++  }
++  return kind;
++}
++
++// Whether this is the first error of its kind; a kind beyond the table is treated as new.
++bool NoteErrorKind(std::string_view message) {
++  const std::string kind = ErrorKindOf(message);
++  std::lock_guard lock(g_kinds_mutex);
++  for (ErrorKind& known : g_kinds) {
++    if (known.text == kind) {
++      ++known.repeats;
++      return false;
++    }
++  }
++  if (g_kinds.size() < kMaxErrorKinds) {
++    g_kinds.push_back({kind, 0});
++  }
++  return true;
++}
++
++std::string TakeRepeatsText() {
++  std::lock_guard lock(g_kinds_mutex);
++  std::string text;
++  for (ErrorKind& kind : g_kinds) {
++    if (kind.repeats) {
++      text += (text.empty() ? "" : "; ") + std::to_string(kind.repeats) + "x '" + kind.text + "'";
++      kind.repeats = 0;
++    }
++  }
++  return text.empty() ? "none" : text;
++}
++
++int64_t NowNs() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++uint32_t LoadBE32(const uint8_t* bytes) {
++  return (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16) | (uint32_t(bytes[2]) << 8) | bytes[3];
++}
++
++// Whether guest memory no longer holds the bytes the decoder was given.
++bool SourceChanged(const DecodeTrace& trace) {
++  constexpr size_t kData = XmaContext::kBytesPerPacketData;
++  if (std::memcmp(trace.packet + XmaContext::kBytesPerPacketHeader, trace.copied, kData)) {
++    return true;
++  }
++  return trace.next_packet &&
++         std::memcmp(trace.next_packet + XmaContext::kBytesPerPacketHeader, trace.copied + kData, kData);
++}
++
++void MaybeLogSummary() {
++  const int64_t now = NowNs();
++  int64_t next = g_next_summary_ns.load(std::memory_order_relaxed);
++  if (next == 0) {
++    g_next_summary_ns.compare_exchange_strong(next, now + kSummaryWindowNs);
++    return;
++  }
++  if (now < next || !g_next_summary_ns.compare_exchange_strong(next, now + kSummaryWindowNs)) {
++    return;
++  }
++  const uint64_t works = g_works.exchange(0);
++  const uint64_t inline_works = g_inline_works.exchange(0);
++  const uint64_t decodes = g_decodes.exchange(0);
++  const uint64_t errors = g_errors.exchange(0);
++  const uint64_t starved = g_starved.exchange(0);
++  const uint64_t slow = g_slow.exchange(0);
++  const uint64_t lock_waits = g_lock_waits.exchange(0);
++  const int64_t max_work_us = g_max_work_us.exchange(0);
++  const std::string repeats = TakeRepeatsText();
++  if ((errors || starved || slow || lock_waits) && g_summary_lines.fetch_add(1) < kMaxSummaryLines) {
++    REXAPU_INFO(
++        "DEBUG_SAULO XMA 10s: work {} (inline {}) | decodes {} | errors {} | starved {} | slow >10ms {} | "
++        "max work {:.2f} ms | lock waits >5ms {} | repeats {}",
++        works, inline_works, decodes, errors, starved, slow, max_work_us / 1000.0, lock_waits, repeats);
++  }
++}
++
++class WorkTimer {
++ public:
++  explicit WorkTimer(uint32_t context) : context_(context), start_ns_(NowNs()) {}
++  ~WorkTimer() {
++    const int64_t us = (NowNs() - start_ns_) / 1000;
++    g_works.fetch_add(1, std::memory_order_relaxed);
++    if (t_inline_kick) {
++      g_inline_works.fetch_add(1, std::memory_order_relaxed);
++    }
++    int64_t max = g_max_work_us.load(std::memory_order_relaxed);
++    while (us > max && !g_max_work_us.compare_exchange_weak(max, us, std::memory_order_relaxed)) {
++    }
++    if (us >= kSlowWorkUs) {
++      g_slow.fetch_add(1, std::memory_order_relaxed);
++      if (g_slow_lines.fetch_add(1) < kMaxSlowLines) {
++        REXAPU_INFO("DEBUG_SAULO XMA slow work: ctx={} {:.2f} ms {}", context_, us / 1000.0,
++                    t_inline_kick ? "inline" : "worker");
++      }
++    }
++    MaybeLogSummary();
++  }
++
++ private:
++  uint32_t context_;
++  int64_t start_ns_;
++};
++
++}  // namespace
++
++void DebugSauloSetInlineKick(bool inline_kick) {
++  t_inline_kick = inline_kick;
++}
++
++void DebugSauloNoteLockWait(uint32_t context, double ms) {
++  g_lock_waits.fetch_add(1, std::memory_order_relaxed);
++  if (g_slow_lines.fetch_add(1) < kMaxSlowLines) {
++    REXAPU_INFO("DEBUG_SAULO XMA lock wait: ctx={} {:.2f} ms", context, ms);
++  }
++}
++
++// Called from the FFmpeg log callback, on the decoding thread, inside DecodePacket.
++void DebugSauloReportDecodeError(std::string_view message) {
++  while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) {
++    message.remove_suffix(1);
++  }
++  DecodeTrace* trace = t_trace;
++  if (!trace) {
++    if (g_error_lines.fetch_add(1) < kMaxErrorLines) {
++      REXAPU_INFO("DEBUG_SAULO XMA error outside a traced decode: '{}'", message);
++    }
++    return;
++  }
++  if (trace->reported) {
++    return;
++  }
++  trace->reported = true;
++  g_errors.fetch_add(1, std::memory_order_relaxed);
++  if (!NoteErrorKind(message) || g_error_lines.fetch_add(1) >= kMaxErrorLines) {
++    return;
++  }
++  REXAPU_INFO(
++      "DEBUG_SAULO XMA error: ctx={} '{}' | buffer {} @{:08X} packets {} | packet {} header {:08X} (frames {}, first "
++      "bit {}, skip {}) | frame {} at bit {} size {} | split header {} crosses packet {} next from other buffer {} | "
++      "loop {} {}..{} | stereo {} | source changed {} | word0 {:08X} -> {:08X} | {}",
++      trace->context, message, trace->buffer, trace->buffer_address, trace->packet_count, trace->packet_index,
++      trace->packet_header, trace->frames_in_packet, xma::GetPacketFrameOffset(trace->packet),
++      trace->packet_header & 0xFF, trace->frame_in_packet, trace->read_offset, trace->frame_size, trace->split_header,
++      trace->crosses_packet, trace->next_from_other_buffer, trace->loop_count, trace->loop_start, trace->loop_end,
++      trace->stereo, SourceChanged(*trace), trace->initial_word0,
++      XMA_CONTEXT_DATA::LoadWord(trace->context_ptr, 0), t_inline_kick ? "inline" : "worker");
++}
++
+ const uint32_t XmaContext::kBitsPerPacketHeader;
+ const uint32_t XmaContext::kOutputMaxSizeBytes;
+ 
+@@ -96,6 +326,7 @@
+   if (!is_allocated() || !is_enabled()) {
+     return false;
+   }
++  const WorkTimer work_timer(id());  // DEBUG_SAULO
+ 
+   std::lock_guard<std::mutex> lock(lock_);
+   // A concurrent Work() may have consumed the enable while this call waited for the lock.
+@@ -170,6 +401,7 @@
+   } else if (data.output_buffer_write_offset != data.output_buffer_read_offset) {
+     // Starved on input: some titles use write_offset == read_offset as their
+     // stall detector, so make them equal.
++    g_starved.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO
+     data.output_buffer_write_offset = data.output_buffer_read_offset;
+     data.output_buffer_valid = 0;
+   }
+@@ -649,6 +881,27 @@
+   const uint32_t packet_to_skip = skip_count + 1;
+   const uint32_t next_packet_index = packet_index + packet_to_skip;
+ 
++  // DEBUG_SAULO
++  DecodeTrace trace;
++  trace.context = id();
++  trace.context_ptr = memory()->TranslateVirtual(guest_ptr());
++  trace.initial_word0 = XMA_CONTEXT_DATA::LoadWord(trace.context_ptr, 0);
++  trace.buffer = data->current_buffer;
++  trace.buffer_address = data->GetCurrentInputBufferAddress();
++  trace.packet_count = current_input_packet_count;
++  trace.packet_index = uint32_t(packet_index);
++  trace.packet_header = LoadBE32(packet);
++  trace.frame_in_packet = packet_info.current_frame_;
++  trace.frames_in_packet = packet_info.frame_count_;
++  trace.read_offset = data->input_buffer_read_offset;
++  trace.loop_count = data->loop_count;
++  trace.loop_start = data->loop_start;
++  trace.loop_end = data->loop_end;
++  trace.stereo = bool(data->is_stereo);
++  trace.packet = packet;
++  trace.copied = input_buffer_.data();
++  trace.next_from_other_buffer = next_packet_index >= current_input_packet_count;
++
+   // Frame header split across packet boundary.
+   if (packet_info.current_frame_size_ == 0) {
+     const uint8_t* next_packet = GetNextPacket(data, next_packet_index, current_input_packet_count);
+@@ -659,6 +912,8 @@
+     std::memcpy(input_buffer_.data(), packet + kBytesPerPacketHeader, kBytesPerPacketData);
+     std::memcpy(input_buffer_.data() + kBytesPerPacketData, next_packet + kBytesPerPacketHeader,
+                 kBytesPerPacketData);
++    trace.split_header = true;  // DEBUG_SAULO
++    trace.next_packet = next_packet;
+ 
+     BitStream combined(input_buffer_.data(), (kBitsPerPacket - kBitsPerPacketHeader) * 2);
+     combined.SetOffset(relative_offset - kBitsPerPacketHeader);
+@@ -693,6 +948,8 @@
+       }
+       std::memcpy(input_buffer_.data() + kBytesPerPacketData, next_packet + kBytesPerPacketHeader,
+                   kBytesPerPacketData);
++      trace.crosses_packet = true;  // DEBUG_SAULO
++      trace.next_packet = next_packet;
+     }
+   }
+ 
+@@ -714,7 +971,11 @@
+     carry_valid_ = false;
+   }
+   PreparePacket(packet_info.current_frame_size_, padding_start);
++  trace.frame_size = packet_info.current_frame_size_;  // DEBUG_SAULO
++  g_decodes.fetch_add(1, std::memory_order_relaxed);
++  t_trace = &trace;
+   const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
++  t_trace = nullptr;
+   if (decoded) {
+     ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
+                  decoded_frame_.data());
+diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
+--- a/src/audio/xma_decoder.cpp
++++ b/src/audio/xma_decoder.cpp
+@@ -23,6 +23,9 @@
+ #include <rex/system/thread_state.h>
+ #include <rex/system/xthread.h>
+ 
++#include <chrono>
++#include <string_view>
++
+ extern "C" {
+ #include "libavutil/log.h"
+ }  // extern "C"
+@@ -55,6 +58,11 @@
+ 
+ namespace rex::audio {
+ 
++// DEBUG_SAULO: xma_context.cpp.
++void DebugSauloSetInlineKick(bool inline_kick);
++void DebugSauloNoteLockWait(uint32_t context, double ms);
++void DebugSauloReportDecodeError(std::string_view message);
++
+ XmaDecoder::XmaDecoder(runtime::FunctionDispatcher* function_dispatcher)
+     : memory_(function_dispatcher->memory()), function_dispatcher_(function_dispatcher) {}
+ 
+@@ -68,6 +76,9 @@
+   string::StringBuffer buff;
+   buff.AppendVarargs(fmt, va);
+   auto msg = buff.to_string_view();
++  if (level <= AV_LOG_ERROR) {
++    DebugSauloReportDecodeError(msg);  // DEBUG_SAULO
++  }
+ 
+   switch (level) {
+     case AV_LOG_ERROR:
+@@ -299,6 +310,7 @@
+     }
+     // Decode inline. waiting on the worker sweep stalls the realtime
+     // audio thread 50-100ms during kick bursts.
++    DebugSauloSetInlineKick(true);  // DEBUG_SAULO
+     for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
+       if (kicked_value & 1) {
+         uint32_t context_id = base_context_id + i;
+@@ -308,6 +320,7 @@
+         }
+       }
+     }
++    DebugSauloSetInlineKick(false);
+     work_event_->Set();
+   } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
+     // Context lock command.
+@@ -323,7 +336,13 @@
+         // could call XMADisableContext and start modifying the context struct
+         // while a decode was still in progress on the worker thread. Block()
+         // waits for the context mutex to be free (poll=false means wait, not spin).
++        const auto lock_start = std::chrono::steady_clock::now();  // DEBUG_SAULO
+         context.Block(false);
++        const double lock_ms =
++            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lock_start).count();
++        if (lock_ms >= 5.0) {
++          DebugSauloNoteLockWait(context_id, lock_ms);
++        }
+       }
+     }
+     // Signal the decoder thread to start processing.
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
++#include <chrono>
+ #include <cstring>
+ 
+ #include <rex/assert.h>
+@@ -109,6 +111,37 @@
+   return true;
+ }
+ 
++// DEBUG_SAULO: callbacks that found no frame queued, logged per 10 s window only when there were some.
++namespace {
++
++std::atomic<uint32_t> g_underruns{0};
++std::atomic<uint32_t> g_max_queued{0};
++std::atomic<uint32_t> g_underrun_lines{0};
++constexpr uint32_t kMaxUnderrunLines = 60;
++
++void NoteQueuedFrames(size_t queued) {
++  uint32_t max = g_max_queued.load(std::memory_order_relaxed);
++  while (queued > max && !g_max_queued.compare_exchange_weak(max, uint32_t(queued), std::memory_order_relaxed)) {
++  }
++}
++
++void MaybeLogUnderruns() {
++  thread_local auto window_start = std::chrono::steady_clock::now();
++  const auto now = std::chrono::steady_clock::now();
++  if (now - window_start < std::chrono::seconds(10)) {
++    return;
++  }
++  window_start = now;
++  const uint32_t underruns = g_underruns.exchange(0);
++  const uint32_t max_queued = g_max_queued.exchange(0);
++  if (underruns && g_underrun_lines.fetch_add(1) < kMaxUnderrunLines) {
++    REXAPU_INFO("DEBUG_SAULO audio queue 10s: {} silent frame(s) for an empty queue | max queued {}", underruns,
++                max_queued);
++  }
++}
++
++}  // namespace
++
+ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+   const auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
+   float* output_frame;
+@@ -135,6 +168,7 @@
+     std::unique_lock<std::mutex> guard(frames_mutex_);
+     frames_queued_.push(output_frame);
+     PROFILE_BUFFER_QUEUE_DEPTH(static_cast<int64_t>(frames_queued_.size()));
++    NoteQueuedFrames(frames_queued_.size());  // DEBUG_SAULO
+   }
+ }
+ 
+@@ -182,6 +216,7 @@
+     static uint32_t sdl_callback_count = 0;
+     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+     if (driver->frames_queued_.empty()) {
++      g_underruns.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO
+       if (sdl_callback_count < 10) {
+         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
+         sdl_callback_count++;
+@@ -228,6 +263,7 @@
+     }
+   }
+   SDL_stack_free(data);
++  MaybeLogUnderruns();  // DEBUG_SAULO
+ }
+ 
+ }  // namespace rex::audio::sdl

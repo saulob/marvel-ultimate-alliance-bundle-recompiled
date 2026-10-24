@@ -16,7 +16,7 @@
 .EXAMPLE
   .\tools\build.ps1              # incremental build only
   .\tools\build.ps1 -Run         # build, then launch the game with game\extracted
-  .\tools\build.ps1 -Clean       # clean configure and build
+  .\tools\build.ps1 -Clean       # clean configure and build of build\ (ReXGlue's source and build tree are kept)
   .\tools\build.ps1 -Config Release -BuildDir build-release
 #>
 param(

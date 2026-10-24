@@ -12,6 +12,9 @@
   tools\rexglue\win-amd64\rexruntime-patch.txt, which build.ps1 and package-release.ps1 check.
   tools\build.ps1 runs this script by itself when that check fails, so it is only needed by hand for the options
   below. Run tools\codegen.ps1 first so the SDK is in tools\rexglue.
+  The source and its CMake/Ninja build tree (-WorkDir\out) are kept between runs: the patches are applied again
+  without changing the time of files whose content stays the same, and installed files that stay the same are not
+  copied, so only what a patch change touches is rebuilt. -FreshBuildTree is the recovery option.
   See docs\rexglue-runtime-patch.md. Nothing is committed, tagged or published.
 
 .EXAMPLE
@@ -19,6 +22,7 @@
   .\tools\build-patched-rexruntime.ps1 -Check -Config Release -Staged build-release   # verify only (the CMake build does)
   .\tools\build-patched-rexruntime.ps1 -StressTest      # ... then run the allocator stress test
   .\tools\build-patched-rexruntime.ps1 -StressTest -SkipBuild   # test whatever runtime is installed
+  .\tools\build-patched-rexruntime.ps1 -FreshBuildTree  # delete the ReXGlue build tree first, then build everything again
   .\tools\build-patched-rexruntime.ps1 -Restore         # put the stock runtime and GPU plugin back (the next build.ps1 patches them again)
 #>
 param(
@@ -27,6 +31,7 @@ param(
     [ValidateSet('Debug', 'RelWithDebInfo', 'Release')]
     [string]$Config = 'Release',
     [string]$Staged,
+    [switch]$FreshBuildTree,  # delete -WorkDir\out before building
     [switch]$Restore,     # reinstall the stock runtime and GPU plugin from the SDK download and exit
     [switch]$StressTest,  # run tests\physical_heap_stress.cpp against the installed runtime
     [switch]$SkipBuild,   # with -StressTest: do not build the runtime first
@@ -123,7 +128,13 @@ function Install-PatchedRuntime {
         if (Test-Path -LiteralPath $target -PathType Leaf) { Copy-Item -LiteralPath $target $file -Force }
     }
 
-    # Another branch may have left other patches in the tree, in any tracked file.
+    if ($FreshBuildTree) {
+        Write-Host 'Deleting the ReXGlue build tree...'
+        Remove-Item -LiteralPath (Join-Path $src 'out') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Another branch may have left other patches in the tree, in any tracked file. The build tree under out\ stays.
+    $patchedBefore = Get-PatchedSourceState $src
     Invoke-Native 'git checkout' { git -C $src checkout -- . }
     Invoke-Native 'git clean' { git -C $src clean -fdq -- src include tests cmake }
     $patches = Get-RuntimePatchFiles
@@ -132,6 +143,9 @@ function Install-PatchedRuntime {
         if ($LASTEXITCODE) { throw "patches\rexglue-sdk\$($patch.Name) no longer applies to ReXGlue $($Baseline.SDK_TAG)" }
         Invoke-Native "git apply $($patch.Name)" { git -C $src apply $patch.FullName }
     }
+    $unchanged = Restore-UnchangedFileTimes $src $patchedBefore
+    $patchedNow = @(& git -C $src diff --name-only).Count + @(& git -C $src ls-files --others --exclude-standard -- src include tests cmake).Count
+    Write-Host "ReXGlue source: $($patches.Count) patches applied; $unchanged of $patchedNow patched files unchanged, $($patchedNow - $unchanged) new or changed"
 
     Import-VsEnvironment
     # -ffile-prefix-map keeps the build folder out of the runtime's log strings.
@@ -163,10 +177,11 @@ function Install-PatchedRuntime {
     }
 
     Remove-Item -LiteralPath $StampPath -ErrorAction SilentlyContinue
-    foreach ($leaf in $RuntimeFiles) { Copy-Item -LiteralPath $built[$leaf] (Join-Path $Sdk $leaf) -Force }
+    $installed = @($RuntimeFiles | Where-Object { Copy-FileIfDifferent $built[$_] (Join-Path $Sdk $_) })
     # tools\rexglue's headers come from the stock release zip and are never reinstalled otherwise; a patch that adds
     # or changes a public header (e.g. 0115's include/rex/audio/thread_priority.h) needs it mirrored here too.
-    Copy-Item -LiteralPath (Join-Path $src 'include\rex') (Join-Path $Sdk 'include') -Recurse -Force
+    $headers = Copy-TreeIfDifferent (Join-Path $src 'include\rex') (Join-Path $Sdk 'include\rex')
+    Write-Host "Installed in tools\rexglue: $($installed.Count) of $($RuntimeFiles.Count) files and $headers headers changed"
     $lines = Write-RuntimeStamp $Sdk $inputsSha256
     $problems = Test-PatchedRuntime $Sdk
     if ($problems.Count) { throw "The installed runtime and GPU plugin do not match the patches: $($problems -join '; ')" }

@@ -6,6 +6,8 @@
 #define MUA_GUEST_HAS_AUDIO_BARRIER 1
 #define MUA_GUEST_HAS_RESET_EVENT 1
 #define MUA_GUEST_HAS_MEMMOVE 1
+#define MUA_GUEST_HAS_D3D_STATE_FILTER 0
+#define MUA_GUEST_HAS_ALCHEMY_HELPERS 0
 
 #define MUA_GUEST_PRESENT_CALLBACK sub_82497D00
 #define MUA_GUEST_SWAP sub_82498340
@@ -63,8 +65,10 @@
 
 namespace mua::guest {
 
-inline constexpr uint32_t kFenceBeginSite = 0x8248AFAC;
 inline constexpr uint32_t kFencePollSite = 0x8248AFB8;
+// Not mapped yet: those waits keep the guest's polling.
+inline constexpr uint32_t kRingSpacePollSite = 0;
+inline constexpr uint32_t kRingProgressPollSite = 0;
 inline constexpr uint32_t kDeviceFenceOffset = 10768;
 inline constexpr uint32_t kDeviceFlagsOffset = 10813;
 inline constexpr uint32_t kRepeatPresentSite = 0x8249EFE0;

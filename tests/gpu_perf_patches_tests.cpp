@@ -187,8 +187,11 @@ void TestCurrentReferencePatches() {
   CHECK(Has(wake, "EVENT_WRITE_SHD"));
 
   const std::string game = ReadFile(std::string(MUA_SRC_DIR) + "/gpu_fence_wait.cpp");
-  CHECK(Has(game, "mua::guest::kFenceBeginSite"));
-  CHECK(Has(game, "mua::guest::kFencePollSite"));
+  CHECK(Has(game, "{\"fence\", mua::guest::kFencePollSite, 0, 2},"));
+  CHECK(Has(game, "{\"ring_space\", mua::guest::kRingSpacePollSite, 60, 1},"));
+  CHECK(Has(game, "{\"ring_progress\", mua::guest::kRingProgressPollSite, 4, 1},"));
+  CHECK(Has(game, "++wait.timeouts >= kWaitTimeoutLimit"));
+  CHECK(Has(game, "constexpr uint32_t kWaitTimeoutLimit = 8;"));
   CHECK(Has(game, "mua::guest::kDeviceFenceOffset"));
   CHECK(Has(game, "mua::guest::kDeviceFlagsOffset"));
   CHECK(Has(game, "REX_HOOK_RAW(MUA_GUEST_FENCE_BEGIN)"));
@@ -197,20 +200,21 @@ void TestCurrentReferencePatches() {
   const std::string gold = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua1_gold.h");
   CHECK(Has(gold, "#define MUA_GUEST_FENCE_BEGIN sub_824844C0"));
   CHECK(Has(gold, "#define MUA_GUEST_FENCE_POLL sub_82484670"));
-  CHECK(Has(gold, "kFenceBeginSite = 0x8248AFAC;"));
+  CHECK(Has(gold, "kRingSpacePollSite = 0;") && Has(gold, "kRingProgressPollSite = 0;"));
   CHECK(Has(gold, "kFencePollSite = 0x8248AFB8;"));
   CHECK(Has(gold, "kDeviceFlagsOffset = 10813;"));
   const std::string mua1 = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua1.h");
   CHECK(Has(mua1, "#define MUA_GUEST_FENCE_BEGIN sub_8246C090"));
   CHECK(Has(mua1, "#define MUA_GUEST_FENCE_POLL sub_8246C240"));
-  CHECK(Has(mua1, "kFenceBeginSite = 0x824728E0;"));
+  CHECK(Has(mua1, "kRingSpacePollSite = 0x82471C7C;"));
+  CHECK(Has(mua1, "kRingProgressPollSite = 0x82471BD8;"));
   CHECK(Has(mua1, "kFencePollSite = 0x824728EC;"));
   CHECK(Has(mua1, "kDeviceFlagsOffset = 10809;"));
   CHECK(Has(mua1, "kDeviceFenceOffset = 10768;") && Has(gold, "kDeviceFenceOffset = 10768;"));
   const std::string mua2 = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua2.h");
   CHECK(Has(mua2, "#define MUA_GUEST_FENCE_BEGIN sub_829BB820"));
   CHECK(Has(mua2, "#define MUA_GUEST_FENCE_POLL sub_829BB918"));
-  CHECK(Has(mua2, "kFenceBeginSite = 0x829C2CCC;"));
+  CHECK(Has(mua2, "kRingSpacePollSite = 0;") && Has(mua2, "kRingProgressPollSite = 0;"));
   CHECK(Has(mua2, "kFencePollSite = 0x829C2CD8;"));
   CHECK(Has(mua2, "kDeviceFenceOffset = 10896;"));
   CHECK(Has(mua2, "kDeviceFlagsOffset = 10941;"));
@@ -390,6 +394,215 @@ void TestShutdownOrder() {
   CHECK(Has(waits, "while (worker_running_ && pending_fns_.empty()"));
 }
 
+void TestPerformanceSummary() {
+  std::printf("performance summary\n");
+  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
+  const std::string summary = ReadFile(dir + "0130-performance-summary-and-audio-queue-log.windows.patch");
+  CHECK(Has(summary, "+  uint64_t idle_wait_ns_ = 0;"));
+  CHECK(Has(summary, "+      idle_wait_ns_ += uint64_t("));
+  CHECK(Has(summary, "+    g_gpu_work_summary.vertices += primitive_processing_result.host_draw_vertex_count;"));
+  CHECK(Has(summary, "+        \"Performance: {:.1f} fps | frame {:.1f} ms | draws {:.0f} | verts {:.0f} | stalls {:.1f} | \""));
+  CHECK(Has(summary, "+  if (swaps < 30 || frame_ms <= 0.0) {"));
+  CHECK(Has(summary, "+      return \"CPU / COMMAND PROCESSOR LIMITED\";"));
+  CHECK(Has(summary, "+  REXAPU_INFO(\"audio queue: audio_maxqframes={} (effective {} frames)\""));
+
+  const std::string config = ReadFile(std::string(MUA_SRC_DIR) + "/../config/marvel_ultimate_alliance.toml");
+  CHECK(Has(config, "audio_maxqframes = 16"));
+
+  // DEBUG_SAULO: the decoder input behind each rejected XMA frame, slow work, lock waits and empty-queue callbacks.
+  const std::string audio = ReadFile(dir + "0131-debug-saulo-audio-diagnostics.patch");
+  CHECK(Has(audio, "+    DebugSauloReportDecodeError(msg);  // DEBUG_SAULO"));
+  CHECK(Has(audio, "+  t_trace = &trace;"));
+  CHECK(Has(audio, "+  const WorkTimer work_timer(id());  // DEBUG_SAULO"));
+  CHECK(Has(audio, "+          DebugSauloNoteLockWait(context_id, lock_ms);"));
+  CHECK(Has(audio, "+      g_underruns.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO"));
+  CHECK(Has(audio, "source changed {}"));
+  CHECK(Has(audio, "+  if (!NoteErrorKind(message) || g_error_lines.fetch_add(1) >= kMaxErrorLines) {"));
+  CHECK(Has(audio, "max work {:.2f} ms | lock waits >5ms {} | repeats {}"));
+
+  const std::string pso = ReadFile(dir + "0133-debug-saulo-slow-pipeline-log.windows.patch");
+  CHECK(Has(pso, "+      if (elapsed_us >= 10000 && slow_reports.fetch_add(1, std::memory_order_relaxed) < 60) {"));
+  CHECK(Has(pso, "DEBUG_SAULO PSO compile: {:.1f} ms"));
+
+  const std::string guest = ReadFile(dir + "0132-guest-frame-counters.windows.patch");
+  CHECK(Has(guest, "+  kGuestUpdateNs,"));
+  CHECK(Has(guest, "+    true,   // kGuestUpdates         (running total)"));
+  CHECK(Has(guest, "+      return \"GUEST / GAME THREAD LIMITED\";"));
+  CHECK(Has(guest, "+                            guest.update_ms >= frame_ms * 0.25;"));
+  CHECK(Has(guest, "+    summary.window_first_guest = ReadGuestFrameTotals();"));
+}
+
+// The streamed set of patches/rexglue-sdk/0134 for one page: faults in two frames in a row stream it, more than 64
+// uploads in a frame block it, and every 600th frame end forgets both.
+struct StreamedPage {
+  bool streamed = false;
+  bool blocked = false;
+  bool faulted = false;
+  bool faulted_previous = false;
+  uint32_t uploads = 0;
+  uint32_t frames = 0;
+
+  // Whether the upload leaves the page streamed (neither valid nor protected).
+  bool Upload() {
+    if (!streamed) {
+      return false;
+    }
+    if (uploads >= 64) {
+      streamed = false;
+      blocked = true;
+      return false;
+    }
+    ++uploads;
+    return true;
+  }
+  void EndFrame() {
+    uploads = 0;
+    if (++frames >= 600) {
+      frames = 0;
+      streamed = false;
+      blocked = false;
+    }
+    streamed |= faulted && faulted_previous && !blocked;
+    faulted_previous = faulted;
+    faulted = false;
+  }
+};
+
+void TestStreamedPageRule() {
+  std::printf("streamed page rule\n");
+  StreamedPage page;
+  page.faulted = true;
+  page.EndFrame();
+  CHECK(!page.streamed);
+  CHECK(!page.Upload());
+  page.EndFrame();
+  page.faulted = true;
+  page.EndFrame();
+  CHECK(!page.streamed);  // not in a row
+  page.faulted = true;
+  page.EndFrame();
+  CHECK(page.streamed);
+  for (int i = 0; i < 64; ++i) {
+    CHECK(page.Upload());
+  }
+  CHECK(!page.Upload());
+  CHECK(!page.streamed && page.blocked);
+  page.faulted = true;
+  page.EndFrame();
+  page.faulted = true;
+  page.EndFrame();
+  CHECK(!page.streamed);  // blocked until the reset
+  while (page.frames != 599) {
+    page.EndFrame();
+  }
+  page.faulted = true;
+  page.EndFrame();
+  CHECK(!page.blocked && !page.streamed && page.faulted_previous);
+  page.faulted = true;
+  page.EndFrame();
+  CHECK(page.streamed);
+}
+
+size_t Count(const std::string& text, const char* needle) {
+  size_t count = 0;
+  for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) {
+    ++count;
+  }
+  return count;
+}
+
+// Shared memory requests whose statement passes allow_streamed.
+size_t CountStreamedRequests(const std::string& text) {
+  size_t count = 0;
+  for (size_t at = text.find("RequestRange"); at != std::string::npos; at = text.find("RequestRange", at + 1)) {
+    const std::string statement = text.substr(at, text.find(';', at) - at);
+    count += Has(statement, ", true)");
+  }
+  return count;
+}
+
+void TestDrawFastPathPatches() {
+  std::printf("draw fast path patches\n");
+  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
+
+  const std::string streamed = ReadFile(dir + "0134-gpu-streamed-dynamic-pages.windows.patch");
+  CHECK(Has(streamed, "YesterMester/TheSimpsonsGameRecomp"));
+  CHECK(Has(streamed, "+REXCVAR_DEFINE_BOOL(gpu_stream_dynamic_pages, false"));
+  // Only Marvel Ultimate Alliance turns it on, and not over a configured value.
+  const std::string settings = ReadFile(std::string(MUA_SRC_DIR) + "/settings.cpp");
+  CHECK(Has(settings, "if (game == GameId::kMua1 && info->source == rex::cvar::Source::kDefault) {"));
+  CHECK(Has(settings, "rex::cvar::SetFlagByName(kKey, \"true\");"));
+  CHECK(Count(settings, "SetFlagByName(kKey") == 1);
+  const std::string app = ReadFile(std::string(MUA_SRC_DIR) + "/marvel_ultimate_alliance_app.h");
+  const size_t multisampling = app.find("mua::ApplyMultisampling();");
+  const size_t streaming = app.find("mua::ApplyDynamicPageStreaming(mua::GetRecompiledImage().game);");
+  CHECK(multisampling != std::string::npos && streaming != std::string::npos && streaming > multisampling &&
+        Count(app.substr(multisampling, streaming - multisampling), "\n") == 1);
+  CHECK(Has(streamed, "+REXCVAR_DEFINE_BOOL(gpu_stream_skip_unchanged, true"));
+  CHECK(Has(streamed, "+  static constexpr uint32_t kStreamedPagesResetFrames = 600;"));
+  CHECK(Has(streamed, "+  static constexpr uint8_t kStreamedPageMaxUploadsPerFrame = 64;"));
+  CHECK(Has(streamed, "+  if (!exact_range && streamed_pages_active_) {\n+    MarkPageFaulted(page_first);"));
+  CHECK(Has(streamed, "+      system_page_flags_streamed_[block] |= system_page_flags_faulted_[block] &\n"
+                      "+                                            system_page_flags_faulted_previous_[block] &\n"
+                      "+                                            ~system_page_flags_streamed_blocked_[block];"));
+  CHECK(Has(streamed, "+  const bool skip_streamed = upload_allow_streamed_ && !written_by_gpu;"));
+  CHECK(Has(streamed, "+    EraseStreamedPageShadows(valid_page_first, valid_page_last);"));
+  CHECK(Has(streamed, "+      CopyPagesForUpload(upload_range_start, upload_buffer_pages, upload_buffer_mapping);"));
+  CHECK(Has(streamed, "+    shared_memory_->OnGuestFrameEnd();"));
+  CHECK(Has(streamed, "+  faulted_blocks_.reserve(num_system_page_flags_);"));
+  CHECK(Has(streamed, "RequestRange(vfetch_constant.address << 2, vfetch_request_size, true)"));
+  CHECK(Has(streamed, "RequestRange(guest_index_base, guest_index_buffer_needed_bytes, true)"));
+
+  const std::string index = ReadFile(dir + "0135-d3d12-index-buffer-view-memo.windows.patch");
+  CHECK(Has(index, "+            index_buffer_view.SizeInBytes = SharedMemory::kBufferSize;"));
+  CHECK(Has(index, "+            start_index = guest_index_base >> index_size_log2;"));
+  CHECK(Has(index, "+          if (guest_index_base & ((uint32_t(1) << index_size_log2) - 1)) {"));
+  CHECK(Has(index, "+        primitive_processing_result.host_draw_vertex_count, 1, start_index, 0, 0);"));
+  CHECK(Has(index, "+    current_index_buffer_view_ = {};"));
+
+  const std::string stats = ReadFile(dir + "0136-debug-saulo-draw-fastpath-stats.windows.patch");
+  CHECK(Has(stats, "DEBUG_SAULO"));
+  CHECK(Has(stats, "+REXCVAR_DEFINE_BOOL(mua_debug_draw_fastpath_stats, false"));
+  CHECK(Has(stats, "+  if (g_draw_fastpath_stats.enabled) [[unlikely]] {"));
+  CHECK(Has(stats, "+  g_draw_fastpath_stats.enabled = REXCVAR_GET(mua_debug_draw_fastpath_stats);"));
+  CHECK(Has(stats, "+    WatchedPageFaultTimer fault_timer;  // DEBUG_SAULO"));
+  CHECK(Has(stats, "+  kGuestWriteFaults,"));
+  // Plain counters: the fault totals go through the perf counter functions, nothing new is atomic or locked.
+  std::string added;
+  std::istringstream lines(stats);
+  for (std::string line; std::getline(lines, line);) {
+    if (line.starts_with("+") && !line.starts_with("+++")) {
+      added += line + "\n";
+    }
+  }
+  CHECK(!Has(added, "atomic") && !Has(added, "mutex") && !Has(added, "Acquire("));
+
+  const std::string sdk = std::string(MUA_SRC_DIR) + "/../out/rexglue-sdk-src/src/graphics/";
+  const std::string command_processor = ReadFile(sdk + "d3d12/command_processor.cpp");
+  if (command_processor.empty() || !Has(command_processor, "current_index_buffer_view_")) {
+    std::printf("  skipped: patched SDK source not present\n");
+    return;
+  }
+  // Streaming is only for data the current draw alone reads.
+  const char* const sources[] = {"d3d12/command_processor.cpp", "d3d12/render_target_cache.cpp",
+                                 "d3d12/texture_cache.cpp",     "pipeline/texture/cache.cpp",
+                                 "primitive_processor.cpp",     "d3d12/primitive_processor.cpp"};
+  size_t streamed_requests = 0;
+  for (const char* source : sources) {
+    streamed_requests += CountStreamedRequests(ReadFile(sdk + source));
+  }
+  CHECK(streamed_requests == 2);
+  CHECK(CountStreamedRequests(command_processor) == 1);
+  CHECK(Has(command_processor, "RequestRange(vfetch_constant.address << 2, vfetch_request_size, true)"));
+  // IssueDraw is the only index buffer setter, and BeginSubmission forgets the view.
+  CHECK(Count(command_processor, "D3DIASetIndexBuffer(") == 1);
+  CHECK(Count(ReadFile(sdk + "d3d12/render_target_cache.cpp"), "IASetIndexBuffer") == 0);
+  const size_t begin = command_processor.find("bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {");
+  const size_t reset = command_processor.find("current_index_buffer_view_ = {};", begin);
+  CHECK(begin != std::string::npos && reset != std::string::npos &&
+        reset < command_processor.find("bool D3D12CommandProcessor::EndSubmission(", begin));
+}
+
 }  // namespace
 
 int main() {
@@ -402,6 +615,9 @@ int main() {
   TestPortedReferenceFixes();
   TestShutdownOrder();
   TestPerformancePass();
+  TestPerformanceSummary();
+  TestStreamedPageRule();
+  TestDrawFastPathPatches();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

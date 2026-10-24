@@ -1,0 +1,196 @@
+Adds the "Performance:" line to the 10-second gpu_work_summary: swaps per second, frame time, draws, vertices and
+command buffer stalls per swap, the time blocked on the GPU fence and on the submission thread, and the time the
+command processor sat idle waiting for commands. The perf counters are compiled out of Release, so these come from
+counters kept by the command processor. A bottleneck label follows only when the evidence separates the cases: GPU
+or synchronization at 25% of the frame blocked, command processor when it is never blocked or idle, else UNKNOWN.
+The audio system logs the effective audio_maxqframes once at startup.
+
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -133,6 +133,9 @@
+   bool Restore(::rex::stream::ByteStream* stream);
+ 
+  protected:
++  // Time the worker thread spent waiting for commands; written and read on the worker thread only.
++  uint64_t idle_wait_ns_ = 0;
++
+   struct IndexBufferInfo {
+     xenos::IndexFormat format = xenos::IndexFormat::kInt16;
+     xenos::Endian endianness = xenos::Endian::kNone;
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -274,6 +274,7 @@
+       // event so the core is free for the guest threads feeding the ring.
+       constexpr uint32_t kIdleYieldCount = 32;
+       PrepareForWait();
++      const auto idle_start = std::chrono::steady_clock::now();
+       bool poll_background_work = PollBackgroundWork();
+       uint32_t loop_count = 0;
+       do {
+@@ -292,6 +293,8 @@
+         }
+       } while (worker_running_ && pending_fns_.empty() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
++      idle_wait_ns_ += uint64_t(
++          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idle_start).count());
+       ReturnFromWait();
+       if (!worker_running_ || !pending_fns_.empty()) {
+         continue;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -116,6 +116,9 @@
+   uint64_t window_first_submission = 0;
+   uint32_t swaps = 0;
+   uint32_t draws = 0;
++  uint64_t vertices = 0;
++  uint32_t stalls = 0;
++  uint64_t window_first_idle_ns = 0;
+   uint32_t copies = 0;
+   std::array<GpuTargetStats, 16> targets{};
+   size_t target_count = 0;
+@@ -133,6 +136,47 @@
+ };
+ GpuWorkSummary g_gpu_work_summary;
+ 
++enum class Bottleneck { kUnknown, kCommandProcessor, kGpu, kSynchronization, kMixed };
++
++// A share of the frame counts as a limit at 25% blocked; the command processor is the limit only when it never
++// blocks and is never idle, since idling means the guest or a frame limiter is not feeding it.
++Bottleneck ClassifyBottleneck(uint32_t swaps, double frame_ms, double gpu_wait_ms, double submit_wait_ms,
++                              double idle_ms) {
++  if (swaps < 30 || frame_ms <= 0.0) {
++    return Bottleneck::kUnknown;
++  }
++  const bool gpu = gpu_wait_ms >= frame_ms * 0.25;
++  const bool synchronization = submit_wait_ms >= frame_ms * 0.25;
++  const bool command_processor =
++      gpu_wait_ms < frame_ms * 0.10 && submit_wait_ms < frame_ms * 0.10 && idle_ms < frame_ms * 0.10;
++  const int limits = int(gpu) + int(synchronization) + int(command_processor);
++  if (limits > 1) {
++    return Bottleneck::kMixed;
++  }
++  if (gpu) {
++    return Bottleneck::kGpu;
++  }
++  if (synchronization) {
++    return Bottleneck::kSynchronization;
++  }
++  return command_processor ? Bottleneck::kCommandProcessor : Bottleneck::kUnknown;
++}
++
++const char* BottleneckText(Bottleneck bottleneck) {
++  switch (bottleneck) {
++    case Bottleneck::kCommandProcessor:
++      return "CPU / COMMAND PROCESSOR LIMITED";
++    case Bottleneck::kGpu:
++      return "GPU LIMITED";
++    case Bottleneck::kSynchronization:
++      return "WAIT / SYNCHRONIZATION LIMITED";
++    case Bottleneck::kMixed:
++      return "MIXED";
++    default:
++      return "UNKNOWN";
++  }
++}
++
+ std::string SizeText(uint32_t width, uint32_t height) {
+   return std::to_string(width) + "x" + std::to_string(height);
+ }
+@@ -252,13 +296,15 @@
+   return text.empty() ? "none" : text;
+ }
+ 
+-void NoteGpuWorkSwap(uint64_t current_submission, uint32_t scale_x, uint32_t scale_y, bool rov) {
++void NoteGpuWorkSwap(uint64_t current_submission, uint64_t idle_wait_ns, uint32_t scale_x, uint32_t scale_y,
++                     bool rov) {
+   constexpr auto kWindow = std::chrono::seconds(10);
+   GpuWorkSummary& summary = g_gpu_work_summary;
+   const auto now = std::chrono::steady_clock::now();
+   if (summary.swaps == 0 && summary.window_first_submission == 0) {
+     summary.window_start = now;
+     summary.window_first_submission = current_submission;
++    summary.window_first_idle_ns = idle_wait_ns;
+   }
+   ++summary.swaps;
+   const auto elapsed = now - summary.window_start;
+@@ -276,6 +322,17 @@
+         swaps / std::chrono::duration<double>(elapsed).count(), summary.draws / swaps, summary.copies / swaps,
+         double(current_submission - summary.window_first_submission) / swaps, per_swap_ms(summary.fence_wait),
+         per_swap_ms(summary.submission_thread_wait));
++    const double elapsed_seconds = std::chrono::duration<double>(elapsed).count();
++    const double frame_ms = elapsed_seconds * 1000.0 / swaps;
++    const double gpu_wait_ms = per_swap_ms(summary.fence_wait);
++    const double submit_wait_ms = per_swap_ms(summary.submission_thread_wait);
++    const double idle_ms = double(idle_wait_ns - summary.window_first_idle_ns) / 1e6 / swaps;
++    REXGPU_INFO(
++        "Performance: {:.1f} fps | frame {:.1f} ms | draws {:.0f} | verts {:.0f} | stalls {:.1f} | "
++        "GPU wait {:.2f} ms | submit wait {:.2f} ms | CP idle {:.2f} ms | {}",
++        swaps / elapsed_seconds, frame_ms, summary.draws / swaps, double(summary.vertices) / swaps,
++        summary.stalls / swaps, gpu_wait_ms, submit_wait_ms, idle_ms,
++        BottleneckText(ClassifyBottleneck(summary.swaps, frame_ms, gpu_wait_ms, submit_wait_ms, idle_ms)));
+     REXGPU_INFO("GPU targets ({}, scale {}x{}): {}", rov ? "rov" : "host render targets", scale_x, scale_y,
+                 GpuTargetsText(summary, swaps, scale_x, scale_y));
+     REXGPU_INFO("GPU resolves: {}", GpuResolvesText(summary, swaps));
+@@ -287,6 +344,7 @@
+   summary = GpuWorkSummary{};
+   summary.window_start = now;
+   summary.window_first_submission = current_submission;
++  summary.window_first_idle_ns = idle_wait_ns;
+ }
+ 
+ // Returns whether any stored value changed; branch-free so it vectorizes like memory::copy_and_swap.
+@@ -2325,7 +2383,7 @@
+     return;
+   }
+ 
+-  NoteGpuWorkSwap(submission_current_, texture_cache_->draw_resolution_scale_x(),
++  NoteGpuWorkSwap(submission_current_, idle_wait_ns_, texture_cache_->draw_resolution_scale_x(),
+                   texture_cache_->draw_resolution_scale_y(),
+                   render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock);
+ 
+@@ -3209,6 +3267,7 @@
+     SubmitBarriers();
+     PROFILE_DRAW_CALL();
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
++    g_gpu_work_summary.vertices += primitive_processing_result.host_draw_vertex_count;
+     deferred_command_list_.D3DDrawInstanced(primitive_processing_result.host_draw_vertex_count, 1,
+                                             0, 0);
+   } else {
+@@ -3268,6 +3327,7 @@
+     SubmitBarriers();
+     PROFILE_DRAW_CALL();
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
++    g_gpu_work_summary.vertices += primitive_processing_result.host_draw_vertex_count;
+     deferred_command_list_.D3DDrawIndexedInstanced(
+         primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
+     if (scratch_index_buffer != nullptr) {
+@@ -3735,6 +3795,7 @@
+                     SUCCEEDED(queue_operations_since_submission_fence_->SetEventOnCompletion(
+                         fence_value, fence_completion_event_)))) {
+         PROFILE_CMD_BUFFER_STALL();
++        ++g_gpu_work_summary.stalls;
+         const auto wait_start = std::chrono::steady_clock::now();
+         WaitForSingleObject(fence_completion_event_, INFINITE);
+         g_gpu_work_summary.fence_wait += std::chrono::steady_clock::now() - wait_start;
+@@ -3756,6 +3817,7 @@
+     if (SUCCEEDED(
+             submission_fence_->SetEventOnCompletion(await_submission, fence_completion_event_))) {
+       PROFILE_CMD_BUFFER_STALL();
++      ++g_gpu_work_summary.stalls;
+       const auto wait_start = std::chrono::steady_clock::now();
+       WaitForSingleObject(fence_completion_event_, INFINITE);
+       g_gpu_work_summary.fence_wait += std::chrono::steady_clock::now() - wait_start;
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -68,6 +68,7 @@
+   queued_frames_ = std::min(
+       static_cast<uint32_t>(kMaximumQueuedFrames),
+       std::max(static_cast<uint32_t>(REXCVAR_GET(audio_maxqframes)), static_cast<uint32_t>(4)));
++  REXAPU_INFO("audio queue: audio_maxqframes={} (effective {} frames)", REXCVAR_GET(audio_maxqframes), queued_frames_);
+ 
+   for (size_t i = 0; i < kMaximumClientCount; ++i) {
+     client_semaphores_[i] = rex::thread::Semaphore::Create(0, queued_frames_);

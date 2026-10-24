@@ -203,13 +203,16 @@ set(MUA_HOST_SOURCES
 
 # The hooks bound to one game's guest addresses; only the programs that carry a recompiled module have them.
 set(MUA_RUNTIME_SOURCES
+    src/alchemy_native.cpp
     src/aspect_render.cpp
     src/audio_mixer_priority.cpp
     src/audio_pcm_firewall.cpp
     src/crt_native.cpp
+    src/d3d_state_filter.cpp
     src/frame_limiter.cpp
     src/frame_pacing.cpp
     src/gpu_fence_wait.cpp
+    src/gpu_producer_counters.cpp
     src/guest_hook_report.cpp
     src/indirect_tail_calls.cpp
     src/main_menu.cpp

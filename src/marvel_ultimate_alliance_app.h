@@ -176,6 +176,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       game_settings_.ApplyGameSettings();
       mua::ApplyShaderWait();
       mua::ApplyMultisampling();
+      mua::ApplyDynamicPageStreaming(mua::GetRecompiledImage().game);
       mua::LogUpscaling();
       mua::PinGuestVideoMode();
       mua::ApplyAspectRatio();
@@ -249,8 +250,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     REXLOG_INFO("Scheduling: {}", trg::TuneProcessScheduling());
     if (window()) {
       mua::CheckWindowDisplay(window()->GetNativeWindowHandle(), REXCVAR_GET(monitor));
-      mua::StartHangWatchdog(window()->GetNativeWindowHandle(),
-                             mua::LogsFolder(mua::PortFolder(), user_data_.root, mua::ActiveLogFile(), false));
+      mua::StartHangWatchdog(window()->GetNativeWindowHandle());
       AttachWindowHost(window(), app_context(), [this] {
         rex::ui::ImGuiDrawer* drawer = imgui_drawer();
         return drawer && drawer->GetIO().WantCaptureMouse;

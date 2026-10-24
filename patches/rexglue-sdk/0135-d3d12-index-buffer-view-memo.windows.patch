@@ -1,0 +1,80 @@
+Keeps one index buffer binding across draws. Indices the GPU reads straight from guest memory were bound with a view
+starting at each draw's index base, so every indexed draw recorded an IASetIndexBuffer. Such a draw now binds the whole
+shared memory buffer and starts at its index base with StartIndexLocation, which reads exactly the same indices, and the
+view is recorded only when it differs from the one already set in the submission's command list, like the primitive
+topology, viewport and scissor. An index base not aligned to the index size keeps its own view. IssueDraw is the only
+place that sets an index buffer, and a new submission starts with none.
+
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -808,6 +808,8 @@
+ 
+   // Current primitive topology.
+   D3D_PRIMITIVE_TOPOLOGY primitive_topology_;
++  // Index buffer view of the submission's command list, SizeInBytes 0 if none is set.
++  D3D12_INDEX_BUFFER_VIEW current_index_buffer_view_ = {};
+ 
+   // Temporary storage for memexport stream constants used in the draw.
+   std::vector<draw_util::MemExportRange> memexport_ranges_;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -3334,6 +3334,7 @@
+       index_buffer_view.Format = DXGI_FORMAT_R32_UINT;
+     }
+     ID3D12Resource* scratch_index_buffer = nullptr;
++    UINT start_index = 0;
+     switch (primitive_processing_result.index_buffer_type) {
+       case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA: {
+         if (memexport_used) {
+@@ -3354,8 +3355,16 @@
+                                 D3D12_RESOURCE_STATE_INDEX_BUFFER);
+           index_buffer_view.BufferLocation = scratch_index_buffer->GetGPUVirtualAddress();
+         } else {
+-          index_buffer_view.BufferLocation =
+-              shared_memory_->GetGPUAddress() + primitive_processing_result.guest_index_base;
++          uint32_t index_size_log2 = index_buffer_view.Format == DXGI_FORMAT_R16_UINT ? 1 : 2;
++          uint32_t guest_index_base = primitive_processing_result.guest_index_base;
++          if (guest_index_base & ((uint32_t(1) << index_size_log2) - 1)) {
++            index_buffer_view.BufferLocation = shared_memory_->GetGPUAddress() + guest_index_base;
++          } else {
++            // The whole buffer, so draws with indices anywhere in guest memory share one binding.
++            index_buffer_view.BufferLocation = shared_memory_->GetGPUAddress();
++            index_buffer_view.SizeInBytes = SharedMemory::kBufferSize;
++            start_index = guest_index_base >> index_size_log2;
++          }
+         }
+       } break;
+       case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
+@@ -3371,7 +3380,12 @@
+         assert_unhandled_case(primitive_processing_result.index_buffer_type);
+         return false;
+     }
+-    deferred_command_list_.D3DIASetIndexBuffer(&index_buffer_view);
++    if (index_buffer_view.BufferLocation != current_index_buffer_view_.BufferLocation ||
++        index_buffer_view.SizeInBytes != current_index_buffer_view_.SizeInBytes ||
++        index_buffer_view.Format != current_index_buffer_view_.Format) {
++      current_index_buffer_view_ = index_buffer_view;
++      deferred_command_list_.D3DIASetIndexBuffer(&index_buffer_view);
++    }
+     if (memexport_used) {
+       shared_memory_->UseForWriting();
+     } else {
+@@ -3382,7 +3396,7 @@
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
+     g_gpu_work_summary.vertices += primitive_processing_result.host_draw_vertex_count;
+     deferred_command_list_.D3DDrawIndexedInstanced(
+-        primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
++        primitive_processing_result.host_draw_vertex_count, 1, start_index, 0, 0);
+     if (scratch_index_buffer != nullptr) {
+       ReleaseScratchGPUBuffer(scratch_index_buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+     }
+@@ -4188,6 +4202,7 @@
+       sampler_bindful_heap_current_ = nullptr;
+     }
+     primitive_topology_ = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
++    current_index_buffer_view_ = {};
+ 
+     render_target_cache_->BeginSubmission();
+ 

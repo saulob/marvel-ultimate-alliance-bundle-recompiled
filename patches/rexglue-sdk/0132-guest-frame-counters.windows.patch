@@ -1,0 +1,180 @@
+Adds four running-total perf counters the title's host code feeds in every configuration (world update time and
+count, host frame limiter wait, guest GPU fence wait) and shows them per swap on the Performance line. They add
+GUEST / GAME THREAD LIMITED: the command processor idles a quarter of the frame, neither side waits and the world
+update alone takes a quarter of the frame.
+
+diff --git a/include/rex/perf/counter.h b/include/rex/perf/counter.h
+--- a/include/rex/perf/counter.h
++++ b/include/rex/perf/counter.h
+@@ -49,6 +49,12 @@
+   kPipelineCacheHits,
+   kPipelineCacheMisses,
+ 
++  // Guest frame, running totals the title's host code adds to in every configuration
++  kGuestUpdateNs,
++  kGuestUpdates,
++  kGuestLimiterWaitNs,
++  kGuestFenceWaitNs,
++
+   kCount  // sentinel -- must be last
+ };
+ 
+diff --git a/src/core/perf/counter.cpp b/src/core/perf/counter.cpp
+--- a/src/core/perf/counter.cpp
++++ b/src/core/perf/counter.cpp
+@@ -50,6 +50,10 @@
+     "texture_cache_misses",
+     "pipeline_cache_hits",
+     "pipeline_cache_misses",
++    "guest_update_ns",
++    "guest_updates",
++    "guest_limiter_wait_ns",
++    "guest_fence_wait_ns",
+ };
+ static_assert(std::size(kCounterNames) == kNumCounters, "kCounterNames must match CounterId enum");
+ 
+@@ -73,6 +77,10 @@
+     false,  // kTextureCacheMisses
+     false,  // kPipelineCacheHits
+     false,  // kPipelineCacheMisses
++    true,   // kGuestUpdateNs        (running total)
++    true,   // kGuestUpdates         (running total)
++    true,   // kGuestLimiterWaitNs   (running total)
++    true,   // kGuestFenceWaitNs     (running total)
+ };
+ static_assert(std::size(kIsGauge) == kNumCounters, "kIsGauge must match CounterId enum");
+ 
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -119,6 +119,7 @@
+   uint64_t vertices = 0;
+   uint32_t stalls = 0;
+   uint64_t window_first_idle_ns = 0;
++  std::array<int64_t, 4> window_first_guest{};
+   uint32_t copies = 0;
+   std::array<GpuTargetStats, 16> targets{};
+   size_t target_count = 0;
+@@ -136,20 +137,46 @@
+ };
+ GpuWorkSummary g_gpu_work_summary;
+ 
+-enum class Bottleneck { kUnknown, kCommandProcessor, kGpu, kSynchronization, kMixed };
++enum class Bottleneck { kUnknown, kCommandProcessor, kGpu, kSynchronization, kGuestThread, kMixed };
++
++constexpr std::array<rex::perf::CounterId, 4> kGuestFrameCounters = {
++    rex::perf::CounterId::kGuestUpdateNs, rex::perf::CounterId::kGuestUpdates,
++    rex::perf::CounterId::kGuestLimiterWaitNs, rex::perf::CounterId::kGuestFenceWaitNs};
++
++std::array<int64_t, 4> ReadGuestFrameTotals() {
++  std::array<int64_t, 4> totals{};
++  for (size_t i = 0; i < totals.size(); ++i) {
++    totals[i] = rex::perf::GetCounter(kGuestFrameCounters[i]);
++  }
++  return totals;
++}
++
++// Per swap, from the title's host code; absent when it publishes no world updates.
++struct GuestFrame {
++  bool available = false;
++  double updates_per_swap = 0.0;
++  double update_ms = 0.0;
++  double limiter_wait_ms = 0.0;
++  double fence_wait_ms = 0.0;
++};
+ 
+ // A share of the frame counts as a limit at 25% blocked; the command processor is the limit only when it never
+-// blocks and is never idle, since idling means the guest or a frame limiter is not feeding it.
++// blocks and is never idle, since idling means the guest or a frame limiter is not feeding it. The guest thread is the
++// limit only when the command processor idles, nothing on either side waits, and the world update alone takes a
++// quarter of the frame.
+ Bottleneck ClassifyBottleneck(uint32_t swaps, double frame_ms, double gpu_wait_ms, double submit_wait_ms,
+-                              double idle_ms) {
++                              double idle_ms, const GuestFrame& guest) {
+   if (swaps < 30 || frame_ms <= 0.0) {
+     return Bottleneck::kUnknown;
+   }
+   const bool gpu = gpu_wait_ms >= frame_ms * 0.25;
+   const bool synchronization = submit_wait_ms >= frame_ms * 0.25;
+-  const bool command_processor =
+-      gpu_wait_ms < frame_ms * 0.10 && submit_wait_ms < frame_ms * 0.10 && idle_ms < frame_ms * 0.10;
+-  const int limits = int(gpu) + int(synchronization) + int(command_processor);
++  const bool host_waits_low = gpu_wait_ms < frame_ms * 0.10 && submit_wait_ms < frame_ms * 0.10;
++  const bool command_processor = host_waits_low && idle_ms < frame_ms * 0.10;
++  const bool guest_thread = host_waits_low && guest.available && idle_ms >= frame_ms * 0.25 &&
++                            guest.limiter_wait_ms < frame_ms * 0.10 && guest.fence_wait_ms < frame_ms * 0.10 &&
++                            guest.update_ms >= frame_ms * 0.25;
++  const int limits = int(gpu) + int(synchronization) + int(command_processor) + int(guest_thread);
+   if (limits > 1) {
+     return Bottleneck::kMixed;
+   }
+@@ -159,9 +186,21 @@
+   if (synchronization) {
+     return Bottleneck::kSynchronization;
+   }
++  if (guest_thread) {
++    return Bottleneck::kGuestThread;
++  }
+   return command_processor ? Bottleneck::kCommandProcessor : Bottleneck::kUnknown;
+ }
+ 
++std::string GuestFrameText(const GuestFrame& guest, double swaps_per_second) {
++  if (!guest.available) {
++    return "world update n/a";
++  }
++  return fmt::format("world update {:.2f} ms ({:.0f}/s) | limiter wait {:.2f} ms | guest fence wait {:.2f} ms",
++                     guest.update_ms, guest.updates_per_swap * swaps_per_second, guest.limiter_wait_ms,
++                     guest.fence_wait_ms);
++}
++
+ const char* BottleneckText(Bottleneck bottleneck) {
+   switch (bottleneck) {
+     case Bottleneck::kCommandProcessor:
+@@ -170,6 +209,8 @@
+       return "GPU LIMITED";
+     case Bottleneck::kSynchronization:
+       return "WAIT / SYNCHRONIZATION LIMITED";
++    case Bottleneck::kGuestThread:
++      return "GUEST / GAME THREAD LIMITED";
+     case Bottleneck::kMixed:
+       return "MIXED";
+     default:
+@@ -305,6 +346,7 @@
+     summary.window_start = now;
+     summary.window_first_submission = current_submission;
+     summary.window_first_idle_ns = idle_wait_ns;
++    summary.window_first_guest = ReadGuestFrameTotals();
+   }
+   ++summary.swaps;
+   const auto elapsed = now - summary.window_start;
+@@ -327,12 +369,19 @@
+     const double gpu_wait_ms = per_swap_ms(summary.fence_wait);
+     const double submit_wait_ms = per_swap_ms(summary.submission_thread_wait);
+     const double idle_ms = double(idle_wait_ns - summary.window_first_idle_ns) / 1e6 / swaps;
++    const std::array<int64_t, 4> guest_totals = ReadGuestFrameTotals();
++    GuestFrame guest;
++    guest.available = guest_totals[1] > summary.window_first_guest[1];
++    guest.update_ms = double(guest_totals[0] - summary.window_first_guest[0]) / 1e6 / swaps;
++    guest.updates_per_swap = double(guest_totals[1] - summary.window_first_guest[1]) / swaps;
++    guest.limiter_wait_ms = double(guest_totals[2] - summary.window_first_guest[2]) / 1e6 / swaps;
++    guest.fence_wait_ms = double(guest_totals[3] - summary.window_first_guest[3]) / 1e6 / swaps;
+     REXGPU_INFO(
+         "Performance: {:.1f} fps | frame {:.1f} ms | draws {:.0f} | verts {:.0f} | stalls {:.1f} | "
+-        "GPU wait {:.2f} ms | submit wait {:.2f} ms | CP idle {:.2f} ms | {}",
++        "GPU wait {:.2f} ms | submit wait {:.2f} ms | CP idle {:.2f} ms | {} | {}",
+         swaps / elapsed_seconds, frame_ms, summary.draws / swaps, double(summary.vertices) / swaps,
+-        summary.stalls / swaps, gpu_wait_ms, submit_wait_ms, idle_ms,
+-        BottleneckText(ClassifyBottleneck(summary.swaps, frame_ms, gpu_wait_ms, submit_wait_ms, idle_ms)));
++        summary.stalls / swaps, gpu_wait_ms, submit_wait_ms, idle_ms, GuestFrameText(guest, swaps / elapsed_seconds),
++        BottleneckText(ClassifyBottleneck(summary.swaps, frame_ms, gpu_wait_ms, submit_wait_ms, idle_ms, guest)));
+     REXGPU_INFO("GPU targets ({}, scale {}x{}): {}", rov ? "rov" : "host render targets", scale_x, scale_y,
+                 GpuTargetsText(summary, swaps, scale_x, scale_y));
+     REXGPU_INFO("GPU resolves: {}", GpuResolvesText(summary, swaps));
+@@ -345,6 +394,7 @@
+   summary.window_start = now;
+   summary.window_first_submission = current_submission;
+   summary.window_first_idle_ns = idle_wait_ns;
++  summary.window_first_guest = ReadGuestFrameTotals();
+ }
+ 
+ // Returns whether any stored value changed; branch-free so it vectorizes like memory::copy_and_swap.

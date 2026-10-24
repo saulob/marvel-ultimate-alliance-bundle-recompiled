@@ -1,0 +1,30 @@
+DEBUG_SAULO, temporary: logs a background pipeline creation that takes 10 ms or more (at most 60 lines), with its
+shader hashes, so first-use shader stutter can be matched to the pipelines behind it.
+
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -3245,7 +3245,7 @@
+     }
+ 
+     const auto creation_started_at = std::chrono::steady_clock::now();
+-    PipelineRuntimeDescription runtime_description;
++    PipelineRuntimeDescription runtime_description{};
+     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+       pipeline_to_create->state.store(nullptr, std::memory_order_release);
+       pipeline_to_create->creation_done.store(true, std::memory_order_release);
+@@ -3261,6 +3261,14 @@
+                                                .count());
+       creation_timing_count_.fetch_add(1, std::memory_order_relaxed);
+       creation_timing_sum_us_.fetch_add(elapsed_us, std::memory_order_relaxed);
++      // DEBUG_SAULO
++      static std::atomic<uint32_t> slow_reports{0};
++      if (elapsed_us >= 10000 && slow_reports.fetch_add(1, std::memory_order_relaxed) < 60) {
++        REXGPU_INFO("DEBUG_SAULO PSO compile: {:.1f} ms | vs {:016X} ps {:016X} | {}", elapsed_us / 1000.0,
++                    runtime_description.description.vertex_shader_hash,
++                    runtime_description.description.pixel_shader_hash,
++                    pipeline_to_create->state.load(std::memory_order_relaxed) ? "created" : "failed");
++      }
+       uint64_t previous_worst = creation_timing_worst_us_.load(std::memory_order_relaxed);
+       while (elapsed_us > previous_worst && !creation_timing_worst_us_.compare_exchange_weak(
+                                                 previous_worst, elapsed_us, std::memory_order_relaxed)) {

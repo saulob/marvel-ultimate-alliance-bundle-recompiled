@@ -22,3 +22,7 @@ fullscreen = false
 monitor = 1
 window_width = 853
 window_height = 480
+
+# Audio queue depth in frames (ReXGlue default 8): keeps audio from falling behind in busy scenes, about 43 ms more
+# latency. A value in the launcher's settings.toml takes precedence.
+audio_maxqframes = 16

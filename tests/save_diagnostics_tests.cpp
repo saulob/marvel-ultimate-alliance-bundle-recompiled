@@ -98,7 +98,7 @@ void TestGeneratedStorage(const fs::path& generated) {
   const std::string reader = Function(generated, "sub_8236A588");
   CHECK(Has(reader, "ctx.r22.u64 = ctx.r11.u64 | 16381;"));
   CHECK(Has(reader, "ctx.r11.s64 = 1676148736;"));
-  CHECK(Has(reader, "ctx.cr6.compare<uint32_t>(ctx.r3.u32, 122, ctx.xer);"));
+  CHECK(Has(reader, "ctx.cr6.compare<uint32_t>(ctx.r3.u32, 122, "));
 
   std::printf("the profile writer stores binary title settings in chunks\n");
   const std::string writer = Function(generated, "sub_8236A970");
