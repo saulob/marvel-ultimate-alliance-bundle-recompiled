@@ -8,10 +8,8 @@ through the host page recheck.
 diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
 --- a/src/system/mmio_handler.cpp
 +++ b/src/system/mmio_handler.cpp
-@@ -426,6 +426,13 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
-   }
-   if (!range) {
-     WatchedPageFaultTimer fault_timer;  // DEBUG_SAULO
+@@ -429,18 +429,25 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+-    // Recheck if the pages are still protected (race condition - another thread
 +    // Write faults here are almost always write watches: the callback checks the watch bits under
 +    // the lock, so the host page query only runs for writes it does not handle.
 +    if (is_write && access_violation_callback_ &&
@@ -19,10 +17,16 @@ diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
 +                                   access_violation_callback_context_, fault_host_address, true)) {
 +      return true;
 +    }
-     // Recheck if the pages are still protected (race condition - another thread
++    // Recheck if the pages are still protected (race condition - another thread
      // clears the watch we just hit).
      // Do this under the lock so we don't introduce another race condition.
-@@ -439,8 +446,8 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+     auto lock = global_critical_region_.Acquire();
+     memory::PageAccess cur_access;
+     size_t page_length = memory::page_size();
+     memory::QueryProtect(fault_host_address, page_length, cur_access);
+     if (cur_access != memory::PageAccess::kNoAccess &&
+         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
+       // Another thread has cleared this watch. Abort.
        return true;
      }
      // The address is not found within any range, so either a write watch or an

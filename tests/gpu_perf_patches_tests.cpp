@@ -625,7 +625,7 @@ void TestWriteFaultCallbackFirst() {
 
   CHECK(Has(patch, "+    if (is_write && access_violation_callback_ &&\n"));
   CHECK(Has(patch, "+        access_violation_callback_(global_critical_region_.Acquire(),\n"));
-  CHECK(Has(patch, "+      return true;\n+    }\n     // Recheck if the pages are still protected"));
+  CHECK(Has(patch, "+      return true;\n+    }\n+    // Recheck if the pages are still protected"));
   CHECK(Has(patch, "-    if (access_violation_callback_) {\n"));
   CHECK(Has(patch, "+    if (access_violation_callback_ && !is_write) {\n"));
   CHECK(!Has(patch, "-    memory::QueryProtect(") && !Has(patch, "-    if (cur_access"));

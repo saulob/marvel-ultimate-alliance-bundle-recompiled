@@ -1,0 +1,170 @@
+Port of rexglue-sdk#530: Memory::Initialize creates the guest address-space mapping with a new
+CreateFileMappingHandle overload that shm_unlinks the POSIX name once the descriptor is open, so a crashed or
+SIGKILLed run no longer leaves a ~4.8 GB xenia_memory_* object in /dev/shm. The four-argument overload keeps the
+named mapping and delegates with false; the Windows overload ignores the flag. Includes the upstream unit tests.
+
+diff --git a/include/rex/memory/utils.h b/include/rex/memory/utils.h
+index 8ccb52c..a0545ba 100644
+--- a/include/rex/memory/utils.h
++++ b/include/rex/memory/utils.h
+@@ -147,6 +147,10 @@ constexpr FileMappingHandle kFileMappingHandleInvalid = -1;
+ 
+ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
+                                           PageAccess access, bool commit);
++// On POSIX, unlink_name_after_open removes the shared-memory name once the mapping is open.
++FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
++                                          PageAccess access, bool commit,
++                                          bool unlink_name_after_open);
+ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path);
+ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
+                   size_t file_offset);
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index b52bf39..327cbfc 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -431,6 +431,12 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+ 
+ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
+                                           PageAccess access, bool commit) {
++  return CreateFileMappingHandle(path, length, access, commit, false);
++}
++
++FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
++                                          PageAccess access, bool commit,
++                                          [[maybe_unused]] bool unlink_name_after_open) {
+ #if REX_PLATFORM_ANDROID
+   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
+   if (android_ASharedMemory_create_) {
+@@ -483,6 +489,13 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+     shm_unlink(full_path.c_str());
+     return kFileMappingHandleInvalid;
+   }
++  if (unlink_name_after_open) {
++    if (shm_unlink(full_path.c_str()) != 0) {
++      REXSYS_ERROR("Unable to unlink shared memory mapping {}: {}", full_path, strerror(errno));
++      close(ret);
++      return kFileMappingHandleInvalid;
++    }
++  }
+   return static_cast<FileMappingHandle>(ret);
+ #endif
+ }
+diff --git a/src/core/memory_win.cpp b/src/core/memory_win.cpp
+index 9a668e9..d3ec4ce 100644
+--- a/src/core/memory_win.cpp
++++ b/src/core/memory_win.cpp
+@@ -188,6 +188,12 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+   return reinterpret_cast<FileMappingHandle>(h);
+ }
+ 
++FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
++                                          PageAccess access, bool commit,
++                                          [[maybe_unused]] bool unlink_name_after_open) {
++  return CreateFileMappingHandle(path, length, access, commit);
++}
++
+ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
+   CloseHandle(reinterpret_cast<HANDLE>(handle));
+ }
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 5e39f2d..5491e8d 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -145,7 +145,7 @@ bool Memory::Initialize() {
+       rex::round_up(static_cast<size_t>(0x120000000ull) + system_allocation_granularity_,
+                     static_cast<size_t>(system_allocation_granularity_));
+   mapping_ = rex::memory::CreateFileMappingHandle(file_name_, mapping_size,
+-                                                  rex::memory::PageAccess::kReadWrite, false);
++                                                  rex::memory::PageAccess::kReadWrite, false, true);
+   if (mapping_ == rex::memory::kFileMappingHandleInvalid) {
+     REXSYS_ERROR("Unable to reserve the 4gb guest address space.");
+     assert_always();
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index 4152575..d1cc083 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -22,6 +22,10 @@ add_executable(unit_tests
+     codegen/output_stamp_test.cpp
+ )
+ 
++if(UNIX AND NOT ANDROID)
++    target_sources(unit_tests PRIVATE core/memory_posix_test.cpp)
++endif()
++
+ target_sources(unit_tests PRIVATE
+     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/ui.cpp
+     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/progress.cpp
+diff --git a/tests/unit/core/memory_posix_test.cpp b/tests/unit/core/memory_posix_test.cpp
+new file mode 100644
+index 0000000..90f723c
+--- /dev/null
++++ b/tests/unit/core/memory_posix_test.cpp
+@@ -0,0 +1,68 @@
++/**
++ * @file        memory_posix_test.cpp
++ * @brief       POSIX file-mapping lifecycle tests
++ * @copyright   Copyright (c) 2026 Tom Clay
++ * @license     BSD 3-Clause License
++ */
++
++#include <cerrno>
++#include <cstdint>
++#include <string>
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <catch2/catch_test_macros.hpp>
++
++#include <rex/memory/utils.h>
++
++TEST_CASE("POSIX mapping remains usable after its shared-memory name is removed",
++          "[memory][posix]") {
++  const std::string name = "rmem_" + std::to_string(getpid());
++  const std::filesystem::path path(name);
++  constexpr size_t kMappingSize = 4096;
++
++  auto handle = rex::memory::CreateFileMappingHandle(
++      path, kMappingSize, rex::memory::PageAccess::kReadWrite, false, true);
++  REQUIRE(handle != rex::memory::kFileMappingHandleInvalid);
++
++  errno = 0;
++  const int named_handle = shm_open(("/" + name).c_str(), O_RDWR, 0);
++  CHECK(named_handle == -1);
++  CHECK(errno == ENOENT);
++  if (named_handle >= 0) {
++    close(named_handle);
++  }
++
++  void* view = rex::memory::MapFileView(handle, nullptr, kMappingSize,
++                                        rex::memory::PageAccess::kReadWrite, 0);
++  REQUIRE(view != nullptr);
++  auto* value = static_cast<uint32_t*>(view);
++  *value = 0x12345678;
++  CHECK(*value == 0x12345678);
++
++  CHECK(rex::memory::UnmapFileView(handle, view, kMappingSize));
++  rex::memory::CloseFileMappingHandle(handle, path);
++}
++
++TEST_CASE("POSIX mapping keeps its shared-memory name by default", "[memory][posix]") {
++  const std::string name = "rmem_named_" + std::to_string(getpid());
++  const std::filesystem::path path(name);
++  constexpr size_t kMappingSize = 4096;
++
++  auto handle = rex::memory::CreateFileMappingHandle(path, kMappingSize,
++                                                     rex::memory::PageAccess::kReadWrite, false);
++  REQUIRE(handle != rex::memory::kFileMappingHandleInvalid);
++
++  const int named_handle = shm_open(("/" + name).c_str(), O_RDWR, 0);
++  CHECK(named_handle >= 0);
++  if (named_handle >= 0) {
++    close(named_handle);
++  }
++
++  rex::memory::CloseFileMappingHandle(handle, path);
++  errno = 0;
++  CHECK(shm_open(("/" + name).c_str(), O_RDWR, 0) == -1);
++  CHECK(errno == ENOENT);
++}

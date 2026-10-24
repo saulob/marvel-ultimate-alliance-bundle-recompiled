@@ -147,7 +147,7 @@ index 7bd264b..5d3b7c6 100644
 +    core/wait_multiple_test.cpp
      ppc/import_function_test.cpp
      ppc/stack_test.cpp
-     system/guest_path_test.cpp
+     ppc/fpscr_test.cpp
 diff --git a/tests/unit/core/wait_multiple_test.cpp b/tests/unit/core/wait_multiple_test.cpp
 new file mode 100644
 index 0000000..90b0b72
