@@ -1,0 +1,299 @@
+Port of rexglue-sdk#501: the POSIX PosixConditionBase::WaitMultiple no longer polls every 1 ms. Waiters sleep on a
+global epoch and condition variable that Event::Set, Semaphore::Release, Mutant::Release, Timer::Signal and thread exit
+bump after the state change, with a 20 ms fallback cap. Single-handle waits and the Windows backend are unchanged.
+Includes the upstream unit tests.
+
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 9ac8d15..9cee9eb 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -267,6 +267,18 @@ static sem_t* RexCreateAnonymousSemaphore() {
+ }
+ #endif  // __APPLE__
+ 
++// WaitMultiple sleeps on this and rescans its handles when the epoch changes.
++struct MultiWaitState {
++  std::atomic<uint64_t> epoch{0};
++  std::atomic<int> waiters{0};
++  std::mutex mutex;
++  std::condition_variable cv;
++};
++static MultiWaitState& GetMultiWaitState() {
++  static MultiWaitState* state = new MultiWaitState();  // never destroyed: threads outlive statics
++  return *state;
++}
++
+ class PosixConditionBase {
+  public:
+   PosixConditionBase() {
+@@ -287,6 +299,17 @@ class PosixConditionBase {
+   virtual ~PosixConditionBase() = default;
+   virtual bool Signal() = 0;
+ 
++  // Call after the state changed, with mutex_ held.
++  void NotifyAll() {
++    cond_.notify_all();
++    auto& ms = GetMultiWaitState();
++    ms.epoch.fetch_add(1, std::memory_order_seq_cst);
++    if (ms.waiters.load(std::memory_order_seq_cst) > 0) {
++      { std::lock_guard<std::mutex> lock(ms.mutex); }  // a waiter is either not yet checking or waiting
++      ms.cv.notify_all();
++    }
++  }
++
+   WaitResult Wait(std::chrono::milliseconds timeout) {
+     bool executed;
+     auto predicate = [this] { return this->signaled(); };
+@@ -335,7 +358,15 @@ class PosixConditionBase {
+                         ? std::chrono::steady_clock::time_point::max()
+                         : start_time + timeout;
+ 
++    auto& ms = GetMultiWaitState();
++    struct WaiterGuard {
++      std::atomic<int>& n;
++      explicit WaiterGuard(std::atomic<int>& n_) : n(n_) { n.fetch_add(1, std::memory_order_seq_cst); }
++      ~WaiterGuard() { n.fetch_sub(1, std::memory_order_seq_cst); }
++    } waiter_guard(ms.waiters);
++
+     while (true) {
++      const uint64_t seen_epoch = ms.epoch.load(std::memory_order_seq_cst);
+       size_t first_signaled = std::numeric_limits<size_t>::max();
+       bool condition_met = false;
+       bool all_locked = true;
+@@ -411,13 +442,16 @@ class PosixConditionBase {
+         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+       }
+ 
+-      if (timeout == std::chrono::milliseconds::max()) {
+-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+-      } else {
++      // The cap covers state changes that do not notify.
++      auto sleep_time = std::chrono::milliseconds(20);
++      if (timeout != std::chrono::milliseconds::max()) {
+         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
+-        std::this_thread::sleep_for(sleep_time);
++        sleep_time = std::min(remaining + std::chrono::milliseconds(1), sleep_time);
+       }
++      std::unique_lock<std::mutex> wait_lock(ms.mutex);
++      ms.cv.wait_for(wait_lock, sleep_time, [&] {
++        return ms.epoch.load(std::memory_order_seq_cst) != seen_epoch;
++      });
+     }
+   }
+ 
+@@ -449,7 +483,7 @@ class PosixCondition<Event> : public PosixConditionBase {
+   bool Signal() override {
+     auto lock = std::unique_lock<std::mutex>(mutex_);
+     signal_ = true;
+-    cond_.notify_all();
++    NotifyAll();
+     return true;
+   }
+ 
+@@ -486,7 +520,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+       *out_previous_count = count_;
+     }
+     count_ += release_count;
+-    cond_.notify_all();
++    NotifyAll();
+     return true;
+   }
+ 
+@@ -518,7 +552,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
+       --count_;
+       // Free to be acquired by another thread
+       if (count_ == 0) {
+-        cond_.notify_all();
++        NotifyAll();
+       }
+       return true;
+     }
+@@ -550,7 +584,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
+   bool Signal() override {
+     std::lock_guard<std::mutex> lock(mutex_);
+     signal_ = true;
+-    cond_.notify_all();
++    NotifyAll();
+     return true;
+   }
+ 
+@@ -978,7 +1012,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+ 
+       exit_code_ = exit_code;
+       signaled_ = true;
+-      cond_.notify_all();
++      NotifyAll();
+     }
+     if (is_current_thread) {
+       pthread_exit(reinterpret_cast<void*>(exit_code));
+@@ -1448,7 +1482,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+     std::unique_lock<std::mutex> lock(thread->handle_.mutex_);
+     thread->handle_.exit_code_ = 0;
+     thread->handle_.signaled_ = true;
+-    thread->handle_.cond_.notify_all();
++    thread->handle_.NotifyAll();
+   }
+ 
+   current_thread_ = nullptr;
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index 7bd264b..5d3b7c6 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -10,6 +10,7 @@ add_executable(unit_tests
+     core/hash_test.cpp
+     core/stream_test.cpp
+     core/chrono_test.cpp
++    core/wait_multiple_test.cpp
+     ppc/import_function_test.cpp
+     ppc/stack_test.cpp
+     system/guest_path_test.cpp
+diff --git a/tests/unit/core/wait_multiple_test.cpp b/tests/unit/core/wait_multiple_test.cpp
+new file mode 100644
+index 0000000..90b0b72
+--- /dev/null
++++ b/tests/unit/core/wait_multiple_test.cpp
+@@ -0,0 +1,143 @@
++/**
++ * @file        wait_multiple_test.cpp
++ * @brief       Unit tests for rex::thread::WaitAny / WaitAll on several handles
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++
++#include <catch2/catch_test_macros.hpp>
++#include <rex/thread.h>
++
++#include <atomic>
++#include <chrono>
++#include <thread>
++
++using namespace std::chrono_literals;
++using rex::thread::Event;
++using rex::thread::Semaphore;
++using rex::thread::WaitAll;
++using rex::thread::WaitAny;
++using rex::thread::WaitHandle;
++using rex::thread::WaitResult;
++
++TEST_CASE("rex::thread::WaitAny - wakes on a signal from another thread", "[thread][wait]") {
++  auto a = Event::CreateAutoResetEvent(false);
++  auto b = Event::CreateAutoResetEvent(false);
++  auto sem = Semaphore::Create(0, 4);
++  WaitHandle* handles[] = {a.get(), b.get(), sem.get()};
++
++  std::thread signaler([&] {
++    std::this_thread::sleep_for(50ms);
++    b->Set();
++  });
++  auto start = std::chrono::steady_clock::now();
++  auto [result, index] = WaitAny(handles, 3, false, 5000ms);
++  auto elapsed = std::chrono::steady_clock::now() - start;
++  signaler.join();
++
++  REQUIRE(result == WaitResult::kSuccess);
++  REQUIRE(index == 1);
++  REQUIRE(elapsed >= 40ms);
++  REQUIRE(elapsed < 1000ms);
++
++  // Semaphore release wakes it too.
++  std::thread releaser([&] {
++    std::this_thread::sleep_for(50ms);
++    sem->Release(1, nullptr);
++  });
++  auto [result2, index2] = WaitAny(handles, 3, false, 5000ms);
++  releaser.join();
++  REQUIRE(result2 == WaitResult::kSuccess);
++  REQUIRE(index2 == 2);
++}
++
++TEST_CASE("rex::thread::WaitAny - times out when nothing is signaled", "[thread][wait]") {
++  auto a = Event::CreateAutoResetEvent(false);
++  auto b = Event::CreateManualResetEvent(false);
++  WaitHandle* handles[] = {a.get(), b.get()};
++
++  auto start = std::chrono::steady_clock::now();
++  auto [result, index] = WaitAny(handles, 2, false, 100ms);
++  auto elapsed = std::chrono::steady_clock::now() - start;
++  (void)index;
++
++  REQUIRE(result == WaitResult::kTimeout);
++  REQUIRE(elapsed >= 95ms);
++  REQUIRE(elapsed < 1000ms);
++}
++
++TEST_CASE("rex::thread::WaitAny - returns at once for a handle already signaled", "[thread][wait]") {
++  auto a = Event::CreateAutoResetEvent(false);
++  auto b = Event::CreateAutoResetEvent(true);
++  WaitHandle* handles[] = {a.get(), b.get()};
++
++  auto [result, index] = WaitAny(handles, 2, false, 5000ms);
++  REQUIRE(result == WaitResult::kSuccess);
++  REQUIRE(index == 1);
++}
++
++TEST_CASE("rex::thread::WaitAll - waits for every handle", "[thread][wait]") {
++  auto a = Event::CreateManualResetEvent(false);
++  auto b = Event::CreateManualResetEvent(false);
++  WaitHandle* handles[] = {a.get(), b.get()};
++
++  std::thread signaler([&] {
++    std::this_thread::sleep_for(30ms);
++    a->Set();
++    std::this_thread::sleep_for(60ms);
++    b->Set();
++  });
++  auto start = std::chrono::steady_clock::now();
++  auto result = WaitAll(handles, 2, false, 5000ms);
++  auto elapsed = std::chrono::steady_clock::now() - start;
++  signaler.join();
++
++  REQUIRE(result == WaitResult::kSuccess);
++  REQUIRE(elapsed >= 80ms);  // not satisfied by the first event alone
++  REQUIRE(elapsed < 1000ms);
++}
++
++TEST_CASE("rex::thread::WaitAll - times out while one handle stays unsignaled", "[thread][wait]") {
++  auto a = Event::CreateManualResetEvent(true);
++  auto b = Event::CreateManualResetEvent(false);
++  WaitHandle* handles[] = {a.get(), b.get()};
++
++  REQUIRE(WaitAll(handles, 2, false, 50ms) == WaitResult::kTimeout);
++}
++
++TEST_CASE("rex::thread::WaitAny - ping-pong between two threads does not stall", "[thread][wait]") {
++  // Each side waits on two events (its own and a never-signaled one) with no timeout and
++  // signals the other. A lost wakeup would cost the full poll cap per round trip.
++  constexpr int kRounds = 2000;
++  auto ping = Event::CreateAutoResetEvent(false);
++  auto pong = Event::CreateAutoResetEvent(false);
++  auto never_a = Event::CreateAutoResetEvent(false);
++  auto never_b = Event::CreateAutoResetEvent(false);
++
++  std::atomic<int> bad{0};  // Catch assertions are not thread-safe: count here, check after join
++  std::thread other([&] {
++    WaitHandle* handles[] = {never_b.get(), ping.get()};
++    for (int i = 0; i < kRounds; ++i) {
++      auto [result, index] = WaitAny(handles, 2, false);
++      if (result != WaitResult::kSuccess || index != 1) {
++        ++bad;
++      }
++      pong->Set();
++    }
++  });
++
++  WaitHandle* handles[] = {pong.get(), never_a.get()};
++  auto start = std::chrono::steady_clock::now();
++  for (int i = 0; i < kRounds; ++i) {
++    ping->Set();
++    auto [result, index] = WaitAny(handles, 2, false);
++    REQUIRE(result == WaitResult::kSuccess);
++    REQUIRE(index == 0);
++  }
++  auto elapsed = std::chrono::steady_clock::now() - start;
++  other.join();
++
++  REQUIRE(bad == 0);
++  REQUIRE(elapsed < 5s);
++}
