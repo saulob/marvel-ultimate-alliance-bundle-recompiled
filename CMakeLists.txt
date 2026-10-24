@@ -213,6 +213,7 @@ set(MUA_RUNTIME_SOURCES
     src/guest_hook_report.cpp
     src/indirect_tail_calls.cpp
     src/main_menu.cpp
+    src/main_menu_mua2.cpp
     src/save_diagnostics.cpp
     src/skip_intro.cpp
     src/sound_stream_ring.cpp
