@@ -9,7 +9,6 @@
 #include "frame_pacing.h"
 #include "guest_map.h"
 #include "hang_watchdog.h"
-#include "visual_trace.h"
 #include "window_host.h"
 
 // The SDK's VdSwap body, exported by rexruntime.dll. The SDK has no header for it.
@@ -50,7 +49,6 @@ REX_HOOK_RAW(__imp__VdSwap) {
     }
     mua::NoteGuestFrame();
     mua::CountPresentForDiagnostics();
-    mua::visual_trace::NotePresent();
     NoteGuestPresent();
   }
 }

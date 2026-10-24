@@ -57,6 +57,7 @@
 #define MUA_GUEST_PAD_MANAGER sub_823508A0
 #define MUA_GUEST_PAD_CONNECTED sub_8234F090
 #define MUA_GUEST_SCRIPT_DISPATCH sub_82358780
+#define MUA_GUEST_MENU_ITEM_CREATE sub_823E5290
 
 namespace mua::guest {
 
@@ -68,6 +69,9 @@ inline constexpr uint32_t kRepeatPresentSite = 0x8249EFE0;
 inline constexpr uint32_t kWorldDeltaOffset = 1000;
 inline constexpr uint32_t kInputUserSlotOffset = 1520;
 inline constexpr uint32_t kMainMenuExitCommand = 0x82015A10;
+inline constexpr uint32_t kMainMenuVtable = 0x8203E4CC;
+inline constexpr uint32_t kMainMenuLiveNameEntry = 0x828BE2E0;
+inline constexpr uint32_t kEmptyString = 0x820034D8;
 inline constexpr uint32_t kIndirectTailTable = 0x820C8878;
 
 // The callback's argument: swap interval in bits 8-11; zero releases the swap at once.

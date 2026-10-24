@@ -56,10 +56,8 @@
 #define MUA_GUEST_CONSOLE_QUEUE sub_82344CB0
 #define MUA_GUEST_PAD_MANAGER sub_8233C588
 #define MUA_GUEST_PAD_CONNECTED sub_8233AD90
-#define MUA_GUEST_UI_UPDATE sub_8240E3E0
 #define MUA_GUEST_SCRIPT_DISPATCH sub_82344378
-#define MUA_GUEST_MAIN_MENU_EXIT sub_82438F78
-#define MUA_GUEST_RESET_GAME sub_82439D48
+#define MUA_GUEST_MENU_ITEM_CREATE sub_823CF578
 
 namespace mua::guest {
 
@@ -71,6 +69,9 @@ inline constexpr uint32_t kRepeatPresentSite = 0x82484914;
 inline constexpr uint32_t kWorldDeltaOffset = 1000;
 inline constexpr uint32_t kInputUserSlotOffset = 1488;
 inline constexpr uint32_t kMainMenuExitCommand = 0x82015DE8;
+inline constexpr uint32_t kMainMenuVtable = 0x8203F634;
+inline constexpr uint32_t kMainMenuLiveNameEntry = 0x8288D5F8;
+inline constexpr uint32_t kEmptyString = 0x820034A0;
 
 // The callback's argument: swap interval in the high half, scanline threshold in percent in the low half. No
 // interval and a threshold the scanline never passes release the swap at once.

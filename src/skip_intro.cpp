@@ -11,7 +11,6 @@
 
 #include "guest_map.h"
 #include "settings.h"
-#include "visual_trace.h"
 
 #if defined(MUA_RUNTIME_MUA2)
 
@@ -90,7 +89,6 @@ void ElapseLegalWait(uint8_t* base, uint32_t gate) {
   const float elapsed = mua::ElapsedBootStamp(stamp, LoadGuestFloat(base, mua::kBootGateSecondsAddress));
   StoreGuestFloat(base, gate + mua::kBootGateStampOffset, elapsed);
   elapsed_bits = std::bit_cast<uint32_t>(elapsed);
-  mua::visual_trace::Event("legal_wait_elapsed");
 }
 
 bool MoviePlaying(PPCContext& ctx, uint8_t* base, uint32_t manager) {
@@ -187,11 +185,7 @@ REX_HOOK_RAW(MUA_GUEST_INTRO_GATE) {
     }
   }
   MUA_GUEST_ORIGINAL(MUA_GUEST_INTRO_GATE)(ctx, base);
-  const bool was_skipping = g_boot_intro.skipping_movies();
   g_boot_intro.OnIntroGate(skip, script_flags_before, base[self + mua::kIntroScriptFlagOffset]);
-  if (!was_skipping && g_boot_intro.skipping_movies()) {
-    mua::visual_trace::Event("skip_intro", "begin");
-  }
 }
 
 // The movie menu's update completes the movie through its own vt+228 on the frame playback is no longer running,
@@ -205,7 +199,6 @@ REX_HOOK_RAW(MUA_GUEST_MOVIE_MENU_UPDATE) {
     if (MoviePlaying(ctx, base, manager)) {
       ctx.r3.u64 = manager;
       MUA_GUEST_STOP_MOVIE(ctx, base);
-      mua::visual_trace::Event("movie_stop");
     }
     ctx.r3.u64 = menu;
   }
@@ -221,7 +214,6 @@ REX_HOOK_RAW(MUA_GUEST_SCRIPT_DISPATCH) {
       mua::IsIntroScriptCommand(GuestString(base, ctx.r4.u32))) {
     g_boot_intro.OnIntroScriptReplaced(true);
     ctx.r4.u32 = rex::ppc::stack_push_string(ctx, base, std::string(mua::kStartMenuCommand).c_str());
-    mua::visual_trace::Event("intro_fast_forward");
   }
   MUA_GUEST_ORIGINAL(MUA_GUEST_SCRIPT_DISPATCH)(ctx, base);
 }
@@ -229,10 +221,8 @@ REX_HOOK_RAW(MUA_GUEST_SCRIPT_DISPATCH) {
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_OPEN_MENU));
 REX_HOOK_RAW(MUA_GUEST_OPEN_MENU) {
   const std::string_view requested = GuestString(base, ctx.r4.u32);
-  mua::visual_trace::Event("open_menu", std::string(requested));
   if (g_boot_intro.before_intro() && mua::ShouldSkipBootIntro(REXCVAR_GET(mua_skip_intro)) &&
       mua::IsLegalMenu(requested)) {
-    mua::visual_trace::Event("legal_menu_skipped");
     return;
   }
   if (g_boot_intro.skipping_movies()) {
@@ -240,7 +230,6 @@ REX_HOOK_RAW(MUA_GUEST_OPEN_MENU) {
     g_boot_intro.OnOpenMenu(menu);
     if (menu == mua::kStartMenuName) {
       const bool skipped = SkipStartMenu(ctx, base);
-      mua::visual_trace::Event("start_bypass", skipped ? "done" : "fallback");
       if (skipped) {
         return;
       }

@@ -80,10 +80,10 @@ const std::set<std::string> kOptionalHooks = {
     "MUA_GUEST_PROFILE_QUERY_ALL", "MUA_GUEST_PROFILE_SIGNED_IN", "MUA_GUEST_PROFILE_ONLINE",
     "MUA_GUEST_PROFILE_NAME", "MUA_GUEST_SIGNIN_PUMP", "MUA_GUEST_SIGNIN_PUMP_SET_FLAG_A",
     "MUA_GUEST_SIGNIN_PUMP_SET_FLAG_B", "MUA_GUEST_CONSOLE", "MUA_GUEST_CONSOLE_QUEUE", "MUA_GUEST_PAD_MANAGER",
-    "MUA_GUEST_PAD_CONNECTED", "MUA_GUEST_UI_UPDATE", "MUA_GUEST_MAIN_MENU_EXIT",
-    "MUA_GUEST_RESET_GAME", "MUA_GUEST_SCRIPT_DISPATCH"};
+    "MUA_GUEST_PAD_CONNECTED", "MUA_GUEST_SCRIPT_DISPATCH", "MUA_GUEST_MENU_ITEM_CREATE"};
 const std::set<std::string> kOptionalConstants = {"kIndirectTailTable", "kInputUserSlotOffset",
-                                                  "kMainMenuExitCommand"};
+                                                  "kMainMenuExitCommand", "kMainMenuVtable",
+                                                  "kMainMenuLiveNameEntry", "kEmptyString"};
 
 // sub_8248A0A0 holds the swap for another vblank while the interval in the high half of its argument has not passed
 // since the last flip, or while the scanline has passed the threshold in the low half.

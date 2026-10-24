@@ -328,46 +328,6 @@ void TestBypassHasNoWorkarounds() {
   CHECK(!std::filesystem::exists(kSrcDir / "start_state_probe.h"));
 }
 
-// DEBUG_SAULO: the F9 recorder is host-side bookkeeping only. Its hooks always run the original, never write guest
-// registers or memory, and F9 itself is observed without being handled.
-void TestVisualTraceIsPassive() {
-  std::printf("visual trace is passive\n");
-  const std::string trace = WithoutCr(ReadSource(kSrcDir / "visual_trace.cpp"));
-  const std::string mua1 = WithoutCr(ReadSource(kSrcDir / "visual_trace_mua1.cpp"));
-  CHECK(Has(trace, "constexpr double kHistorySeconds = 5.0;"));
-  CHECK(Has(trace, "constexpr size_t kMaxEvents = 256;"));
-  CHECK(Has(trace, "DEBUG_SAULO visual marker: id={}"));
-  CHECK(Has(trace, "DEBUG_SAULO visual history: id={} age={:.3f}"));
-  CHECK(Has(trace, "event=state_now"));
-  for (const char* needle : {"Sleep", "sleep_for", "ctx.r"}) {
-    CHECK(!Has(trace, needle));
-  }
-
-  for (const char* hook : {"MUA_GUEST_UI_UPDATE", "MUA_GUEST_MAIN_MENU_EXIT", "MUA_GUEST_RESET_GAME",
-                           "MUA_GUEST_CONSOLE_QUEUE"}) {
-    const std::string body = Between(mua1, (std::string("REX_HOOK_RAW(") + hook + ") {").c_str(), "\n}\n");
-    CHECK(!body.empty());
-    CHECK(Has(body, (std::string("MUA_GUEST_ORIGINAL(") + hook + ")(ctx, base);").c_str()));
-  }
-  // Only reads of guest registers, no assignments to them or stores into guest memory.
-  for (const char* needle : {"ctx.r3.u64 =", "ctx.r4.u64 =", "ctx.r3.s64 =", "std::memcpy(const_cast", "StoreGuest"}) {
-    CHECK(!Has(mua1, needle));
-  }
-  CHECK(Has(mua1, "#if defined(MUA_RUNTIME_MUA1)"));
-  CHECK(!Has(ReadSource(kSrcDir / "guest_map_mua1_gold.h"), "MUA_GUEST_UI_UPDATE"));
-  CHECK(!Has(ReadSource(kSrcDir / "guest_map_mua2.h"), "MUA_GUEST_UI_UPDATE"));
-
-  // F9 is observed before the host's own key handling and is not marked handled, so the game still gets it.
-  const std::string window = WithoutCr(ReadSource(kSrcDir / "window_host.cpp"));
-  const size_t f9 = window.find("rex::ui::VirtualKey::kF9 && !e.prev_state()");
-  const size_t marker = window.find("mua::visual_trace::Marker();", f9);
-  const size_t f11 = window.find("rex::ui::VirtualKey::kF11");
-  CHECK(f9 != std::string::npos && marker != std::string::npos && f11 != std::string::npos);
-  CHECK(f9 < marker && marker < f11);
-  CHECK(!Has(window.substr(f9, f11 - f9), "set_handled"));
-  CHECK(Has(ReadSource(kSrcDir / "swap_hooks.cpp"), "mua::visual_trace::NotePresent();"));
-}
-
 void TestBootStateMachineForLegalAndIntro() {
   std::printf("skip intro legal menu and intro script state\n");
   CHECK(mua::IsLegalMenu("legal_360"));
@@ -529,7 +489,6 @@ int main() {
   TestBypassHasNoWorkarounds();
   TestBootStateMachineForLegalAndIntro();
   TestLegalAndIntroFastForwardHooks();
-  TestVisualTraceIsPassive();
   TestFailedApproachesAreGone();
   TestMua2Hook();
   TestNoGenericMovieOrVfsSuppression();
