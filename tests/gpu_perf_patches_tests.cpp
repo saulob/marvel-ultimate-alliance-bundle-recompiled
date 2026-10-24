@@ -653,6 +653,51 @@ void TestWriteFaultCallbackFirst() {
   }
 }
 
+// The wait condition of patches/rexglue-sdk/0143-pipeline-storage-pending-flush.patch.
+bool StorageWriterWaits(bool shader, bool write_pipeline, bool flush_shaders, bool flush_pipelines) {
+  return !shader && !write_pipeline && !flush_shaders && !flush_pipelines;
+}
+
+// The storage writer of 0143 in the D3D12 and Vulkan pipeline caches: a pending flush skips the wait, and the patch
+// leaves the storage format, file names, paths and OpenFile alone.
+void TestPipelineStoragePendingFlush() {
+  std::printf("pipeline storage pending flush\n");
+  CHECK(StorageWriterWaits(false, false, false, false));
+  CHECK(!StorageWriterWaits(false, false, true, false));
+  CHECK(!StorageWriterWaits(false, false, false, true));
+  CHECK(!StorageWriterWaits(true, false, false, false));
+  CHECK(!StorageWriterWaits(false, true, false, false));
+
+  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
+  const std::string patch = ReadFile(dir + "0143-pipeline-storage-pending-flush.patch");
+  CHECK(Count(patch, "\ndiff --git ") == 2);
+  CHECK(Has(patch, "\ndiff --git a/src/graphics/d3d12/pipeline_cache.cpp b/"));
+  CHECK(Has(patch, "\ndiff --git a/src/graphics/vulkan/pipeline_cache.cpp b/"));
+  const char* wait = "!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {";
+  CHECK(Count(patch, wait) == 2);
+  CHECK(Count(patch, "-      if (!shader && !write_pipeline) {\n") == 2);
+  CHECK(Count(patch, "\n-") - Count(patch, "\n--- ") == 2);
+  const size_t diff_start = patch.find("\ndiff --git ");
+  const std::string diff = diff_start == std::string::npos ? std::string() : patch.substr(diff_start);
+  CHECK(!Has(diff, "OpenFile") && !Has(diff, "filesystem") && !Has(diff, ".xsh") && !Has(diff, ".xpso") &&
+        !Has(diff, "sizeof(") && !Has(diff, "storage_write_request_cond_.notify"));
+
+  // When the patched source is staged, the same condition in the code itself, after the queue and flag checks.
+  const std::string sdk = std::string(MUA_SRC_DIR) + "/../out/rexglue-sdk-src/src/graphics/";
+  for (const char* cache : {"d3d12/pipeline_cache.cpp", "vulkan/pipeline_cache.cpp"}) {
+    const std::string source = ReadFile(sdk + cache);
+    if (!Has(source, wait)) {
+      continue;
+    }
+    const size_t pipeline_flag = source.find("flush_pipelines = true;");
+    const size_t condition = source.find(wait, pipeline_flag);
+    const size_t wake = source.find("storage_write_request_cond_.wait(lock);", condition);
+    CHECK(pipeline_flag != std::string::npos && pipeline_flag < condition && condition < wake);
+    CHECK(Count(source, "storage_write_request_cond_.wait(lock);") == 1);
+    CHECK(Count(source, "if (!shader && !write_pipeline) {") == 0);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -669,6 +714,7 @@ int main() {
   TestStreamedPageRule();
   TestDrawFastPathPatches();
   TestWriteFaultCallbackFirst();
+  TestPipelineStoragePendingFlush();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

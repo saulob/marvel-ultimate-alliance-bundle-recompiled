@@ -1,0 +1,31 @@
+Port of the graphics part of rexglue-sdk#529: StorageWriteThread in the D3D12 and Vulkan pipeline caches no longer
+waits on the request condition while a shader or pipeline flush is pending, so the fflush at the top of the loop runs
+and the last storage writes of a session do not stay in the stdio buffer. The POSIX OpenFile rewind of #529 is not
+included.
+
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -3119,7 +3119,8 @@ void PipelineCache::StorageWriteThread() {
+         storage_write_flush_pipelines_ = false;
+         flush_pipelines = true;
+       }
+-      if (!shader && !write_pipeline) {
++      // A pending flush runs at the top of the loop; waiting first would leave it buffered.
++      if (!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {
+         storage_write_request_cond_.wait(lock);
+         continue;
+       }
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -3669,7 +3669,8 @@ void VulkanPipelineCache::StorageWriteThread() {
+         storage_write_flush_pipelines_ = false;
+         flush_pipelines = true;
+       }
+-      if (!shader && !write_pipeline) {
++      // A pending flush runs at the top of the loop; waiting first would leave it buffered.
++      if (!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {
+         storage_write_request_cond_.wait(lock);
+         continue;
+       }
