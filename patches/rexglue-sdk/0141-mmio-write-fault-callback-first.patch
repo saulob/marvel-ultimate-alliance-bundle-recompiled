@@ -1,0 +1,55 @@
+Port of rexglue-sdk#516: MMIOHandler::ExceptionCallback sends write faults outside the MMIO ranges to the
+access-violation callback before the host page query, so a write-watch fault no longer pays a VirtualQuery.
+PhysicalHeap::TriggerCallbacks decides from the watch bits under the global lock. When another thread already cleared
+the watch, Memory::AccessViolationCallback checks the host page at the start of the write repair and retries a
+writable page without re-protecting it. Reads keep the old order, and a write the callback does not handle still goes
+through the host page recheck.
+
+diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -426,6 +426,13 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+   }
+   if (!range) {
+     WatchedPageFaultTimer fault_timer;  // DEBUG_SAULO
++    // Write faults here are almost always write watches: the callback checks the watch bits under
++    // the lock, so the host page query only runs for writes it does not handle.
++    if (is_write && access_violation_callback_ &&
++        access_violation_callback_(global_critical_region_.Acquire(),
++                                   access_violation_callback_context_, fault_host_address, true)) {
++      return true;
++    }
+     // Recheck if the pages are still protected (race condition - another thread
+     // clears the watch we just hit).
+     // Do this under the lock so we don't introduce another race condition.
+@@ -439,8 +446,8 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+       return true;
+     }
+     // The address is not found within any range, so either a write watch or an
+-    // actual access violation.
+-    if (access_violation_callback_) {
++    // actual access violation. Writes already went to the callback.
++    if (access_violation_callback_ && !is_write) {
+       return access_violation_callback_(std::move(lock), access_violation_callback_context_,
+                                         fault_host_address, is_write);
+     }
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -642,6 +642,16 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+   // if guest metadata says the page is writable but host protection is still
+   // read-only / no-access, restore write access and resume execution.
+   if (is_write) {
++    // The MMIO handler calls this before querying the host page; another thread may have already
++    // cleared the watch.
++    rex::memory::PageAccess host_access;
++    size_t host_length = rex::memory::page_size();
++    if (rex::memory::QueryProtect(host_address, host_length, host_access) &&
++        host_access != rex::memory::PageAccess::kNoAccess &&
++        host_access != rex::memory::PageAccess::kReadOnly) {
++      return true;
++    }
++
+     constexpr uint32_t kWriteProtectMask =
+         memory::kMemoryProtectWrite | memory::kMemoryProtectWriteCombine;
+     uint32_t guest_protect = 0;

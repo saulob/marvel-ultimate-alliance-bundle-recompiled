@@ -613,6 +613,46 @@ void TestDrawFastPathPatches() {
         reset < command_processor.find("bool D3D12CommandProcessor::EndSubmission(", begin));
 }
 
+// The write fault order of patches/rexglue-sdk/0141-mmio-write-fault-callback-first.patch: callback, then host page
+// query, with the stale-page check kept for the race and the old order for reads.
+void TestWriteFaultCallbackFirst() {
+  std::printf("write fault callback first\n");
+  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
+  const std::string patch = ReadFile(dir + "0141-mmio-write-fault-callback-first.patch");
+  CHECK(Count(patch, "\ndiff --git ") == 2 && Has(patch, "\ndiff --git a/src/system/mmio_handler.cpp b/"));
+  CHECK(Has(patch, "\ndiff --git a/src/system/xmemory.cpp b/"));
+  CHECK(!Has(patch, "shared_memory") && !Has(patch, "REXCVAR"));
+
+  CHECK(Has(patch, "+    if (is_write && access_violation_callback_ &&\n"));
+  CHECK(Has(patch, "+        access_violation_callback_(global_critical_region_.Acquire(),\n"));
+  CHECK(Has(patch, "+      return true;\n+    }\n     // Recheck if the pages are still protected"));
+  CHECK(Has(patch, "-    if (access_violation_callback_) {\n"));
+  CHECK(Has(patch, "+    if (access_violation_callback_ && !is_write) {\n"));
+  CHECK(!Has(patch, "-    memory::QueryProtect(") && !Has(patch, "-    if (cur_access"));
+
+  CHECK(Has(patch, "+    rex::memory::PageAccess host_access;"));
+  CHECK(Has(patch,
+            "+        host_access != rex::memory::PageAccess::kNoAccess &&\n"
+            "+        host_access != rex::memory::PageAccess::kReadOnly) {\n+      return true;"));
+  CHECK(!Has(patch, "+    rex::memory::Protect("));
+
+  // When the patched source is staged, the same order in the code itself.
+  const std::string sdk = std::string(MUA_SRC_DIR) + "/../out/rexglue-sdk-src/src/system/";
+  const std::string mmio = ReadFile(sdk + "mmio_handler.cpp");
+  if (Has(mmio, "Writes already went to the callback.")) {
+    const size_t body = mmio.find("bool MMIOHandler::ExceptionCallback(");
+    const size_t callback = mmio.find("if (is_write && access_violation_callback_ &&", body);
+    const size_t query = mmio.find("memory::QueryProtect(fault_host_address", body);
+    const size_t read_callback = mmio.find("access_violation_callback_ && !is_write", body);
+    CHECK(callback != std::string::npos && callback < query && query < read_callback);
+    const std::string xmemory = ReadFile(sdk + "xmemory.cpp");
+    const size_t trigger = xmemory.find("physical_heap->TriggerCallbacks(");
+    const size_t host_query = xmemory.find("rex::memory::QueryProtect(host_address", trigger);
+    const size_t stale_repair = xmemory.find("rex::memory::Protect(reinterpret_cast<void*>(page_base)", trigger);
+    CHECK(trigger != std::string::npos && trigger < host_query && host_query < stale_repair);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -628,6 +668,7 @@ int main() {
   TestPerformanceSummary();
   TestStreamedPageRule();
   TestDrawFastPathPatches();
+  TestWriteFaultCallbackFirst();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
