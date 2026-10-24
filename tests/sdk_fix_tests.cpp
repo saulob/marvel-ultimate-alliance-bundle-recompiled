@@ -1,13 +1,18 @@
 // Generic fixes in the patched ReXGlue source: the guest clock, XMA context updates, the SDL audio credit, ImGui mouse
-// events, content results, in-place overwrites and the dot product codegen. Reads the staged source; skipped when it
-// is not there.
+// events, content results, in-place overwrites, the dot product codegen and zero-size profile settings. Reads the
+// staged source; skipped when it is not there.
 // Run: mua_sdk_fix_tests
 
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -154,11 +159,71 @@ void TestDotProductCodegen(const fs::path& source) {
 
 }  // namespace
 
+// The buffer of patches/rexglue-sdk/0142-xam-zero-size-profile-settings.patch.
+std::vector<uint8_t> ProfileSettingBytes(const uint8_t* data, size_t size) {
+  std::vector<uint8_t> bytes(size);
+  if (data && size) {
+    std::memcpy(bytes.data(), data, size);
+  }
+  return bytes;
+}
+
+struct DestructionProbe {
+  explicit DestructionProbe(int* destroyed) : destroyed(destroyed) {}
+  virtual ~DestructionProbe() = default;
+  int* destroyed;
+};
+
+struct DerivedProbe : DestructionProbe {
+  using DestructionProbe::DestructionProbe;
+  ~DerivedProbe() override { ++*destroyed; }
+};
+
+void TestZeroSizeProfileSettings(const fs::path& patches, const fs::path& source) {
+  std::printf("zero-size binary profile settings skip the memcpy and settings have a virtual destructor\n");
+  const uint8_t guest[4] = {1, 2, 3, 4};
+  CHECK(ProfileSettingBytes(guest, 0).empty());
+  CHECK(ProfileSettingBytes(nullptr, 0).empty());
+  CHECK((ProfileSettingBytes(guest, 4) == std::vector<uint8_t>{1, 2, 3, 4}));
+  CHECK((ProfileSettingBytes(nullptr, 3) == std::vector<uint8_t>(3, 0)));
+
+  static_assert(std::has_virtual_destructor_v<DestructionProbe>);
+  int destroyed = 0;
+  std::unique_ptr<DestructionProbe> setting = std::make_unique<DerivedProbe>(&destroyed);
+  setting = std::make_unique<DerivedProbe>(&destroyed);
+  CHECK(destroyed == 1);
+  setting.reset();
+  CHECK(destroyed == 2);
+
+  const std::string patch = Read(patches / "0142-xam-zero-size-profile-settings.patch");
+  CHECK(!patch.empty());
+  CHECK(Has(patch, "\ndiff --git a/src/kernel/xam/xam_user.cpp b/") &&
+        Has(patch, "\ndiff --git a/include/rex/system/xam/user_profile.h b/"));
+  CHECK(Has(patch, "+        std::vector<uint8_t> bytes(binary_size);\n"));
+  CHECK(Has(patch, "+        if (setting.data.binary.ptr && binary_size) {\n           std::memcpy(bytes.data(), binary_ptr, binary_size);"));
+  CHECK(Has(patch, "-          bytes.resize(binary_size);\n"));
+  CHECK(Has(patch, "+    virtual ~Setting() = default;\n"));
+
+  const std::string header = Read(source / "include/rex/system/xam/user_profile.h");
+  if (Has(header, "virtual ~Setting() = default;")) {
+    const std::string user = Read(source / "src/kernel/xam/xam_user.cpp");
+    const size_t write = user.find("case UserProfile::Setting::Type::BINARY: {");
+    const size_t sized = user.find("std::vector<uint8_t> bytes(binary_size);", write);
+    const size_t guard = user.find("if (setting.data.binary.ptr && binary_size) {", sized);
+    const size_t copy = user.find("std::memcpy(bytes.data(), binary_ptr, binary_size);", guard);
+    const size_t add = user.find("AddSetting(", copy);
+    CHECK(write != std::string::npos && write < sized && sized < guard && guard < copy && copy < add);
+    CHECK(header.find("virtual ~Setting()") < header.find("virtual void Append(", header.find("struct Setting {")));
+  }
+}
+
 int main() {
   const fs::path source = MUA_SDK_SOURCE_DIR;
+  TestZeroSizeProfileSettings(source / "../../patches/rexglue-sdk", source);
   if (!fs::exists(source / "src/core/clock.cpp")) {
     std::printf("skipped: the patched ReXGlue source is not staged (%s)\n", source.string().c_str());
-    return 0;
+    std::printf("%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
   }
   TestGuestClock(source);
   TestXmaContext(source);

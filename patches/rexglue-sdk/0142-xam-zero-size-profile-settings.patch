@@ -1,0 +1,37 @@
+Port of rexglue-sdk#503: XamUserWriteProfileSettings builds the BINARY/CONTENT buffer at its guest size and copies
+only when the guest pointer is non-null and the size is non-zero, so a zero-size setting no longer calls memcpy on the
+null data() of an empty vector. UserProfile::Setting gets a virtual destructor, so AddSetting replacing a derived
+setting through unique_ptr<Setting> destroys the derived object.
+
+diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
+--- a/include/rex/system/xam/user_profile.h
++++ b/include/rex/system/xam/user_profile.h
+@@ -113,6 +113,7 @@ class UserProfile {
+     uint32_t loaded_title_id;
+     Setting(uint32_t setting_id, Type type, size_t size, bool is_set)
+         : setting_id(setting_id), type(type), size(size), is_set(is_set), loaded_title_id(0) {}
++    virtual ~Setting() = default;
+     virtual void Append(X_USER_PROFILE_SETTING_DATA* data, SettingByteStream* stream) {
+       (void)stream;
+       data->type = static_cast<uint8_t>(type);
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -339,14 +339,10 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
+       case UserProfile::Setting::Type::BINARY: {
+         uint8_t* binary_ptr = REX_KERNEL_MEMORY()->TranslateVirtual(setting.data.binary.ptr);
+         size_t binary_size = setting.data.binary.size;
+-        std::vector<uint8_t> bytes;
+-        if (setting.data.binary.ptr) {
+-          // Copy provided data
+-          bytes.resize(binary_size);
++        std::vector<uint8_t> bytes(binary_size);
++        // memcpy into the null data() of an empty vector is undefined even for size 0.
++        if (setting.data.binary.ptr && binary_size) {
+           std::memcpy(bytes.data(), binary_ptr, binary_size);
+-        } else {
+-          // Data pointer was NULL, so just fill with zeroes
+-          bytes.resize(binary_size, 0);
+         }
+         user_profile->AddSetting(
+             std::make_unique<xam::UserProfile::BinarySetting>(setting.setting_id, bytes));
