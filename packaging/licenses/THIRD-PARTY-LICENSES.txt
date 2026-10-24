@@ -3,7 +3,9 @@ THIRD-PARTY LICENSES
 
 The licenses of the other components this project is built with (ReXGlue SDK 0.10.0, whose license is in
 ReXGlue-LICENSE.txt, and the libraries it bundles) are listed with their own releases. This file holds the notice for the
-code adapted from Unowa001/crackdown-recomp, which has to travel with every distribution.
+code adapted from Unowa001/crackdown-recomp, which has to travel with every distribution. patches/rexglue-sdk/0134 is
+adapted from the ReXGlue SDK tree in YesterMester/TheSimpsonsGameRecomp, and 0137 follows the XMA packet continuity
+fix in the ReXGlue SDK tree of codepdbh/nfsmw-android; both trees keep the SDK's license in ReXGlue-LICENSE.txt.
 
 ========================================================================
 Unowa001/crackdown-recomp, vector multiply-add and dot products, XMA context guards, audio event reset

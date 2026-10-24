@@ -1,0 +1,853 @@
+DEBUG_SAULO, temporary: a fixed ring of 65536 compact audio events (packets and frames the XMA contexts decode, FFmpeg
+errors by kind, buffer advances and swaps, waits for the other input buffer, guest input buffer changes, loop jumps,
+decoder reopens, stalls, full or starved output, context allocate/clear/release, slow XMADisableContext, late guest
+submits, late or empty output callbacks and the output queue depth every 100 ms). Writers take a slot with one
+fetch_add and publish it with a sequence number, without locks. history::Dump() starts a thread that logs the last
+5 seconds between "DEBUG_SAULO AUDIO SNAPSHOT BEGIN" and "... END", waits 2 seconds and logs what followed between
+"DEBUG_SAULO AUDIO SNAPSHOT POST" and "... POST END". The port calls it on F9.
+
+diff --git a/include/rex/audio/audio_history.h b/include/rex/audio/audio_history.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/audio/audio_history.h
+@@ -0,0 +1,70 @@
++/**
++ * DEBUG_SAULO, temporary: a bounded in-memory history of audio events. Dump() logs the last five seconds of it and,
++ * two seconds later, what came after the request.
++ */
++
++#pragma once
++
++#include <cstdint>
++#include <string_view>
++
++namespace rex::audio::history {
++
++enum class Event : uint16_t {
++  kPacket,
++  kFrame,
++  kDecodeError,
++  kAdvance,
++  kSwap,
++  kContinuationWait,
++  kPendingPacket,
++  kInputBuffers,
++  kLoop,
++  kCodecOpen,
++  kNoProgress,
++  kOutputInvalid,
++  kStarved,
++  kAllocate,
++  kRelease,
++  kClear,
++  kDisableWait,
++  kQueueEmpty,
++  kCallbackGap,
++  kSubmitGap,
++  kQueueDepth,
++};
++
++enum FrameFlags : uint32_t {
++  kFrameSplitHeader = 1,
++  kFrameCrossesPacket = 2,
++  kFrameNextFromOtherBuffer = 4,
++  kFrameDecoded = 8,
++  kFrameLoopEnd = 16,
++  kFrameLoopStart = 32,
++};
++
++enum class SwapReason : uint32_t {
++  kCurrentInvalid = 1,
++  kSplitHeaderOutOfRange,
++  kNoBitsToCopy,
++};
++
++// Error kinds from FFmpeg's XMA decoder; kOther for any other message.
++enum class ErrorKind : uint32_t {
++  kOther,
++  kSkipBits,
++  kScaleFactor,
++  kSpectralRle,
++  kVecCoeffs,
++  kReservedBit,
++  kFillBits,
++};
++
++void Record(Event event, uint32_t context, uint32_t a = 0, uint32_t b = 0, uint32_t c = 0, uint32_t d = 0,
++            uint32_t e = 0);
++void RecordDecodeError(uint32_t context, std::string_view message, uint32_t location, uint32_t read_offset);
++
++void Dump(std::string_view reason);
++void Shutdown();
++
++}  // namespace rex::audio::history
+diff --git a/src/audio/audio_history.cpp b/src/audio/audio_history.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/audio/audio_history.cpp
+@@ -0,0 +1,353 @@
++// DEBUG_SAULO, temporary: see audio_history.h.
++
++#include <rex/audio/audio_history.h>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <rex/chrono/clock.h>
++#include <rex/logging.h>
++#include <rex/perf/counter.h>
++
++namespace rex::audio::history {
++namespace {
++
++constexpr uint64_t kCapacity = uint64_t(1) << 16;
++constexpr int64_t kBeforeNs = 5'000'000'000;
++constexpr int64_t kAfterNs = 2'000'000'000;
++constexpr uint32_t kNone = 0xFFFFFFFF;
++
++// Writers claim a slot with one fetch_add and publish it with a sequence number, so the reader can drop a slot that
++// was overwritten while it was copied instead of making writers wait.
++struct Slot {
++  std::atomic<uint64_t> sequence{0};
++  std::atomic<uint64_t> words[4] = {};
++};
++
++struct Entry {
++  int64_t time_ns = 0;
++  Event event = Event::kPacket;
++  uint32_t context = 0;
++  uint32_t a = 0, b = 0, c = 0, d = 0, e = 0;
++};
++
++Slot g_slots[kCapacity];
++std::atomic<uint64_t> g_head{0};
++
++std::mutex g_dump_mutex;
++std::condition_variable g_dump_wake;
++bool g_dump_running = false;
++bool g_stopping = false;
++
++int64_t NowNs() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++// The entries recorded between from_ns and to_ns, in time order, and the time of the oldest entry still held.
++std::vector<Entry> Collect(int64_t from_ns, int64_t to_ns, int64_t* oldest_ns) {
++  const uint64_t head = g_head.load(std::memory_order_acquire);
++  const uint64_t first = head > kCapacity ? head - kCapacity : 0;
++  std::vector<Entry> entries;
++  entries.reserve(size_t(head - first));
++  *oldest_ns = to_ns;
++  for (uint64_t index = first; index < head; ++index) {
++    const Slot& slot = g_slots[index & (kCapacity - 1)];
++    const uint64_t sequence = slot.sequence.load(std::memory_order_acquire);
++    if (sequence != index * 2 + 2) {
++      continue;
++    }
++    uint64_t words[4];
++    for (int i = 0; i < 4; ++i) {
++      words[i] = slot.words[i].load(std::memory_order_relaxed);
++    }
++    std::atomic_thread_fence(std::memory_order_acquire);
++    if (slot.sequence.load(std::memory_order_relaxed) != sequence) {
++      continue;
++    }
++    Entry entry;
++    entry.time_ns = int64_t(words[0]);
++    entry.event = Event(words[1] & 0xFFFF);
++    entry.context = uint32_t(words[1] >> 16) & 0xFFFF;
++    entry.a = uint32_t(words[1] >> 32);
++    entry.b = uint32_t(words[2]);
++    entry.c = uint32_t(words[2] >> 32);
++    entry.d = uint32_t(words[3]);
++    entry.e = uint32_t(words[3] >> 32);
++    *oldest_ns = std::min(*oldest_ns, entry.time_ns);
++    if (entry.time_ns >= from_ns && entry.time_ns <= to_ns) {
++      entries.push_back(entry);
++    }
++  }
++  std::stable_sort(entries.begin(), entries.end(),
++                   [](const Entry& x, const Entry& y) { return x.time_ns < y.time_ns; });
++  return entries;
++}
++
++const char* ErrorKindName(uint32_t kind) {
++  switch (ErrorKind(kind)) {
++    case ErrorKind::kSkipBits:
++      return "skip-bits";
++    case ErrorKind::kScaleFactor:
++      return "invalid-scale-factor";
++    case ErrorKind::kSpectralRle:
++      return "spectral-rle-overflow";
++    case ErrorKind::kVecCoeffs:
++      return "num-vec-coeffs";
++    case ErrorKind::kReservedBit:
++      return "reserved-bit";
++    case ErrorKind::kFillBits:
++      return "fill-bits";
++    default:
++      return "other";
++  }
++}
++
++std::string FrameFlagsText(uint32_t flags) {
++  std::string text;
++  const auto add = [&](uint32_t flag, const char* name) {
++    if (flags & flag) {
++      text += text.empty() ? name : std::string(",") + name;
++    }
++  };
++  add(kFrameSplitHeader, "split-header");
++  add(kFrameCrossesPacket, "crosses-packet");
++  add(kFrameNextFromOtherBuffer, "other-buffer");
++  add(kFrameDecoded, "decoded");
++  add(kFrameLoopEnd, "loop-end");
++  add(kFrameLoopStart, "loop-start");
++  return text.empty() ? "-" : text;
++}
++
++std::string LocationText(uint32_t location) {
++  if (location == kNone) {
++    return "none";
++  }
++  return "b" + std::to_string(location & 1) + "p" + std::to_string(location >> 1);
++}
++
++std::string ValidText(uint32_t bits) {
++  return "valid=" + std::to_string(bits & 1) + std::to_string((bits >> 1) & 1) + " current=" +
++         std::to_string((bits >> 2) & 1);
++}
++
++void LogEntry(const char* section, const Entry& x, int64_t trigger_ns) {
++  const double ms = double(x.time_ns - trigger_ns) / 1e6;
++  const std::string ctx = x.context == 0xFFFF ? std::string("-") : std::to_string(x.context);
++  switch (x.event) {
++    case Event::kPacket:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} packet b{}p{} of {} header {:08X} @{:08X}", section, ms, ctx, x.a, x.b,
++                  x.c, x.d, x.e);
++      break;
++    case Event::kFrame:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} frame {} {}/{} bit {} size {} next {} [{}]", section, ms, ctx,
++                  LocationText(x.a), x.c & 0xFF, (x.c >> 8) & 0xFF, x.b, x.d, LocationText(x.e),
++                  FrameFlagsText(x.c >> 16));
++      break;
++    case Event::kDecodeError:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} FFMPEG ERROR {} values {} {} at {} bit {}", section, ms, ctx,
++                  ErrorKindName(x.a), int32_t(x.b), int32_t(x.c), LocationText(x.d), x.e);
++      break;
++    case Event::kAdvance:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} advance from {} buffers finished {} -> {} pending packet {} {}", section,
++                  ms, ctx, LocationText(x.a), x.b, x.c == kNone ? std::string("not found") : "bit " + std::to_string(x.c),
++                  x.d, ValidText(x.e));
++      break;
++    case Event::kSwap:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} swap reason {} -> buffer {} {} bit {}", section, ms, ctx,
++                  x.a == uint32_t(SwapReason::kCurrentInvalid)          ? "current-invalid"
++                  : x.a == uint32_t(SwapReason::kSplitHeaderOutOfRange) ? "split-header-out-of-range"
++                                                                        : "no-bits",
++                  x.b, ValidText(x.c), x.d);
++      break;
++    case Event::kContinuationWait:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} wait for other buffer: {} at {} next packet index {} of {}", section, ms,
++                  ctx, x.d == 1 ? "split header" : "frame tail", LocationText(x.a), x.b, x.c);
++      break;
++    case Event::kPendingPacket:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} carried skip applied: buffer {} packet {} -> {}", section, ms, ctx, x.a,
++                  x.b, x.c == kNone ? std::string("not found") : "bit " + std::to_string(x.c));
++      break;
++    case Event::kInputBuffers:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} input buffers {} b0 @{:08X} x{} b1 @{:08X} x{} read bit {}", section, ms,
++                  ctx, ValidText(x.a), x.b, x.d & 0xFFFF, x.c, x.d >> 16, x.e);
++      break;
++    case Event::kLoop:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} loop jump: count {} start {} end {} subframe skip {} end {}", section, ms,
++                  ctx, x.a, x.b, x.c, x.d & 0xFF, x.d >> 8);
++      break;
++    case Event::kCodecOpen:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} decoder reopened: {} Hz {} ch", section, ms, ctx, x.a, x.b);
++      break;
++    case Event::kNoProgress:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} no progress: {} read bit {} output read {} write {} blocks {} free {}",
++                  section, ms, ctx, ValidText(x.a), x.b, x.c & 0xFF, (x.c >> 8) & 0xFF, x.c >> 16, int32_t(x.d));
++      break;
++    case Event::kOutputInvalid:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} output buffer full: read {} write {} blocks {}", section, ms, ctx, x.a,
++                  x.b, x.c);
++      break;
++    case Event::kStarved:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} STARVED: no input, output read {} write {}", section, ms, ctx, x.a, x.b);
++      break;
++    case Event::kAllocate:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} allocated", section, ms, ctx);
++      break;
++    case Event::kRelease:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} released", section, ms, ctx);
++      break;
++    case Event::kClear:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} cleared", section, ms, ctx);
++      break;
++    case Event::kDisableWait:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} disable waited {:.2f} ms", section, ms, ctx, x.a / 1000.0);
++      break;
++    case Event::kQueueEmpty:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} OUTPUT QUEUE EMPTY: {} silent frame(s), {} queued", section, ms, ctx, x.a,
++                  x.b);
++      break;
++    case Event::kCallbackGap:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} output callback late: {:.2f} ms since the last, {} queued", section, ms,
++                  ctx, x.a / 1000.0, x.b);
++      break;
++    case Event::kSubmitGap:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} guest submit late: {:.2f} ms since the last, {} queued", section, ms, ctx,
++                  x.a / 1000.0, x.b);
++      break;
++    case Event::kQueueDepth:
++      REXAPU_INFO("{} {:+10.3f} ms ctx={} output queue {} (min {} max {})", section, ms, ctx, x.a, x.b, x.c);
++      break;
++  }
++}
++
++void LogSection(const char* section, const std::vector<Entry>& entries, int64_t trigger_ns) {
++  for (const Entry& entry : entries) {
++    LogEntry(section, entry, trigger_ns);
++  }
++}
++
++void DumpThread(std::string reason, int64_t trigger_ns, uint32_t guest_ms, int64_t guest_updates) {
++  int64_t oldest_ns = 0;
++  const std::vector<Entry> before = Collect(trigger_ns - kBeforeNs, trigger_ns, &oldest_ns);
++  REXAPU_INFO(
++      "DEBUG_SAULO AUDIO SNAPSHOT BEGIN reason={} guest uptime {} ms guest updates {} | {} event(s) from {:.0f} ms "
++      "before the request (history holds {:.0f} ms)",
++      reason, guest_ms, guest_updates, before.size(), kBeforeNs / 1e6, (trigger_ns - oldest_ns) / 1e6);
++  LogSection("DEBUG_SAULO AUDIO", before, trigger_ns);
++  REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT END reason={}", reason);
++
++  bool stopped;
++  {
++    std::unique_lock lock(g_dump_mutex);
++    stopped = g_dump_wake.wait_for(lock, std::chrono::nanoseconds(kAfterNs), [] { return g_stopping; });
++  }
++  const std::vector<Entry> after = Collect(trigger_ns + 1, trigger_ns + kAfterNs, &oldest_ns);
++  REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT POST reason={} | {} event(s) in the {:.0f} ms after the request{}", reason,
++              after.size(), kAfterNs / 1e6, stopped ? " (cut short by shutdown)" : "");
++  LogSection("DEBUG_SAULO AUDIO POST", after, trigger_ns);
++  REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT POST END reason={}", reason);
++
++  std::lock_guard lock(g_dump_mutex);
++  g_dump_running = false;
++  g_dump_wake.notify_all();
++}
++
++int32_t NumberAt(std::string_view text, size_t* position) {
++  while (*position < text.size()) {
++    const char ch = text[*position];
++    const bool negative = ch == '-' && *position + 1 < text.size() && text[*position + 1] >= '0' &&
++                          text[*position + 1] <= '9';
++    if ((ch >= '0' && ch <= '9') || negative) {
++      break;
++    }
++    ++*position;
++  }
++  if (*position >= text.size()) {
++    return 0;
++  }
++  const bool negative = text[*position] == '-';
++  if (negative) {
++    ++*position;
++  }
++  int64_t value = 0;
++  while (*position < text.size() && text[*position] >= '0' && text[*position] <= '9') {
++    value = std::min<int64_t>(value * 10 + (text[*position] - '0'), INT32_MAX);
++    ++*position;
++  }
++  return int32_t(negative ? -value : value);
++}
++
++ErrorKind ClassifyError(std::string_view message) {
++  if (message.find("would have to skip") != std::string_view::npos) {
++    return ErrorKind::kSkipBits;
++  }
++  if (message.find("scale factor") != std::string_view::npos) {
++    return ErrorKind::kScaleFactor;
++  }
++  if (message.find("spectral RLE") != std::string_view::npos) {
++    return ErrorKind::kSpectralRle;
++  }
++  if (message.find("num_vec_coeffs") != std::string_view::npos) {
++    return ErrorKind::kVecCoeffs;
++  }
++  if (message.find("Reserved bit") != std::string_view::npos) {
++    return ErrorKind::kReservedBit;
++  }
++  if (message.find("fill bits") != std::string_view::npos) {
++    return ErrorKind::kFillBits;
++  }
++  return ErrorKind::kOther;
++}
++
++}  // namespace
++
++void Record(Event event, uint32_t context, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
++  const uint64_t index = g_head.fetch_add(1, std::memory_order_relaxed);
++  Slot& slot = g_slots[index & (kCapacity - 1)];
++  slot.sequence.store(index * 2 + 1, std::memory_order_relaxed);
++  std::atomic_thread_fence(std::memory_order_release);
++  slot.words[0].store(uint64_t(NowNs()), std::memory_order_relaxed);
++  slot.words[1].store(uint64_t(event) | uint64_t(context & 0xFFFF) << 16 | uint64_t(a) << 32,
++                      std::memory_order_relaxed);
++  slot.words[2].store(uint64_t(b) | uint64_t(c) << 32, std::memory_order_relaxed);
++  slot.words[3].store(uint64_t(d) | uint64_t(e) << 32, std::memory_order_relaxed);
++  slot.sequence.store(index * 2 + 2, std::memory_order_release);
++}
++
++void RecordDecodeError(uint32_t context, std::string_view message, uint32_t location, uint32_t read_offset) {
++  size_t position = 0;
++  const int32_t first = NumberAt(message, &position);
++  const int32_t second = NumberAt(message, &position);
++  Record(Event::kDecodeError, context, uint32_t(ClassifyError(message)), uint32_t(first), uint32_t(second),
++         location, read_offset);
++}
++
++void Dump(std::string_view reason) {
++  const int64_t trigger_ns = NowNs();
++  {
++    std::lock_guard lock(g_dump_mutex);
++    if (g_dump_running || g_stopping) {
++      REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT SKIPPED reason={}: the previous snapshot is still being written", reason);
++      return;
++    }
++    g_dump_running = true;
++  }
++  std::thread(DumpThread, std::string(reason), trigger_ns, rex::chrono::Clock::QueryGuestUptimeMillis(),
++              rex::perf::GetCounter(rex::perf::CounterId::kGuestUpdates))
++      .detach();
++}
++
++void Shutdown() {
++  std::unique_lock lock(g_dump_mutex);
++  g_stopping = true;
++  g_dump_wake.notify_all();
++  g_dump_wake.wait_for(lock, std::chrono::seconds(1), [] { return !g_dump_running; });
++}
++
++}  // namespace rex::audio::history
+diff --git a/src/audio/CMakeLists.txt b/src/audio/CMakeLists.txt
+--- a/src/audio/CMakeLists.txt
++++ b/src/audio/CMakeLists.txt
+@@ -4,6 +4,7 @@
+ add_library(rexaudio OBJECT
+     
+     audio_driver.cpp
++    audio_history.cpp
+     audio_system.cpp
+     downmix.cpp
+     xma_context.cpp
+diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
+--- a/include/rex/audio/xma/context.h
++++ b/include/rex/audio/xma/context.h
+@@ -280,6 +280,7 @@
+   void UpdateLoopStatus(XMA_CONTEXT_DATA* data);
+   void ClearLocked(XMA_CONTEXT_DATA* data);
+   void ResetDecoderState();
++  void NoteInputBuffers(const XMA_CONTEXT_DATA& data);  // DEBUG_SAULO
+ 
+   memory::RingBuffer PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data);
+   int PrepareDecoder(int sample_rate, bool is_two_channel);
+@@ -329,6 +330,10 @@
+   uint32_t pending_packet_ = 0;
+   uint8_t pending_packet_buffer_ = 0;
+ 
++  // DEBUG_SAULO: last input buffers and packet put in the audio history.
++  uint64_t history_input_key_ = 0;
++  uint32_t history_packet_ = UINT32_MAX;
++
+   // Start-padding realignment state. Attributes belong to the frame whose
+   // samples are still being assembled, so they land one decode after the frame
+   // they describe.
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -19,6 +19,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include <rex/audio/audio_history.h>
+ #include <rex/audio/xma/context.h>
+ #include <rex/audio/xma/decoder.h>
+ #include <rex/audio/xma/helpers.h>
+@@ -226,6 +227,35 @@
+   int64_t start_ns_;
+ };
+ 
++uint32_t InputBufferBits(const XMA_CONTEXT_DATA& data) {
++  return data.input_buffer_0_valid | data.input_buffer_1_valid << 1 | data.current_buffer << 2;
++}
++
++uint64_t InputBuffersKey(const XMA_CONTEXT_DATA& data) {
++  return uint64_t(InputBufferBits(data)) | uint64_t(data.input_buffer_0_packet_count) << 3 |
++         uint64_t(data.input_buffer_1_packet_count) << 15 |
++         (uint64_t(data.input_buffer_0_ptr) ^ uint64_t(data.input_buffer_1_ptr) << 13) << 27;
++}
++
++void RecordFrame(uint32_t context, const XMA_CONTEXT_DATA& data, const DecodeTrace& trace, uint32_t next_packet_index,
++                 bool decoded, bool loop_end, bool loop_start) {
++  uint32_t flags = (trace.split_header ? history::kFrameSplitHeader : 0) |
++                   (trace.crosses_packet ? history::kFrameCrossesPacket : 0) |
++                   (trace.next_from_other_buffer ? history::kFrameNextFromOtherBuffer : 0) |
++                   (decoded ? history::kFrameDecoded : 0) | (loop_end ? history::kFrameLoopEnd : 0) |
++                   (loop_start ? history::kFrameLoopStart : 0);
++  uint32_t next = UINT32_MAX;
++  if (trace.split_header || trace.crosses_packet) {
++    const uint32_t packet_counts[2] = {data.input_buffer_0_packet_count, data.input_buffer_1_packet_count};
++    xma::StreamPacket location;
++    if (xma::LocateStreamPacket(uint8_t(trace.buffer), next_packet_index, packet_counts, &location)) {
++      next = location.buffer | location.packet << 1;
++    }
++  }
++  history::Record(history::Event::kFrame, context, trace.buffer | trace.packet_index << 1, trace.read_offset,
++                  trace.frame_in_packet | trace.frames_in_packet << 8 | flags << 16, trace.frame_size, next);
++}
++
+ }  // namespace
+ 
+ void DebugSauloSetInlineKick(bool inline_kick) {
+@@ -245,6 +275,9 @@
+     message.remove_suffix(1);
+   }
+   DecodeTrace* trace = t_trace;
++  if (trace) {
++    history::RecordDecodeError(trace->context, message, trace->buffer | trace->packet_index << 1, trace->read_offset);
++  }
+   if (!trace) {
+     if (g_error_lines.fetch_add(1) < kMaxErrorLines) {
+       REXAPU_INFO("DEBUG_SAULO XMA error outside a traced decode: '{}'", message);
+@@ -271,6 +304,15 @@
+       XMA_CONTEXT_DATA::LoadWord(trace->context_ptr, 0), t_inline_kick ? "inline" : "worker");
+ }
+ 
++void XmaContext::NoteInputBuffers(const XMA_CONTEXT_DATA& data) {
++  if (const uint64_t key = InputBuffersKey(data); key != history_input_key_) {
++    history_input_key_ = key;
++    history::Record(history::Event::kInputBuffers, id(), InputBufferBits(data), data.input_buffer_0_ptr,
++                    data.input_buffer_1_ptr, data.input_buffer_0_packet_count | data.input_buffer_1_packet_count << 16,
++                    data.input_buffer_read_offset);
++  }
++}
++
+ const uint32_t XmaContext::kBitsPerPacketHeader;
+ const uint32_t XmaContext::kOutputMaxSizeBytes;
+ 
+@@ -339,6 +381,7 @@
+   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
+   XMA_CONTEXT_DATA data(context_ptr);
+   const XMA_CONTEXT_DATA initial_data = data;
++  NoteInputBuffers(data);  // DEBUG_SAULO
+ 
+   if (!data.output_buffer_valid) {
+     return true;
+@@ -393,6 +436,10 @@
+     // subframes Decode skips on purpose while Consume drains).
+     if (pre_remaining_subframes == 0 && data.input_buffer_read_offset == pre_decode_offset &&
+         current_frame_remaining_subframes_ == 0) {
++      history::Record(history::Event::kNoProgress, id(), InputBufferBits(data), data.input_buffer_read_offset,
++                      data.output_buffer_read_offset | data.output_buffer_write_offset << 8 |
++                          data.output_buffer_block_count << 16,
++                      uint32_t(remaining_subframe_blocks_in_output_buffer_));  // DEBUG_SAULO
+       break;
+     }
+   }
+@@ -403,6 +450,8 @@
+     // Starved on input: some titles use write_offset == read_offset as their
+     // stall detector, so make them equal.
+     g_starved.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO
++    history::Record(history::Event::kStarved, id(), data.output_buffer_read_offset,
++                    data.output_buffer_write_offset);  // DEBUG_SAULO
+     data.output_buffer_write_offset = data.output_buffer_read_offset;
+     data.output_buffer_valid = 0;
+   }
+@@ -414,6 +463,8 @@
+   // full buffer.
+   if (remaining_subframe_blocks_in_output_buffer_ == 0 && output_rb.empty()) {
+     data.output_buffer_valid = 0;
++    history::Record(history::Event::kOutputInvalid, id(), data.output_buffer_read_offset,
++                    data.output_buffer_write_offset, data.output_buffer_block_count);  // DEBUG_SAULO
+   }
+ 
+   StoreContextMerged(data, initial_data, context_ptr);
+@@ -439,6 +490,7 @@
+ void XmaContext::Clear() {
+   std::lock_guard<std::mutex> lock(lock_);
+   REXAPU_NOISY_DEBUG("XmaContext: reset context {}", id());
++  history::Record(history::Event::kClear, id());  // DEBUG_SAULO
+ 
+   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
+   XMA_CONTEXT_DATA data(context_ptr);
+@@ -479,6 +531,7 @@
+   loop_frame_output_limit_ = 0;
+   loop_start_skip_pending_ = false;
+   pending_packet_ = 0;
++  history_packet_ = UINT32_MAX;  // DEBUG_SAULO
+ }
+ 
+ void XmaContext::Disable() {
+@@ -491,6 +544,7 @@
+   assert_true(is_allocated());
+ 
+   set_is_allocated(false);
++  history::Record(history::Event::kRelease, id());  // DEBUG_SAULO
+   ResetDecoderState();
+   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
+   std::memset(context_ptr, 0, sizeof(XMA_CONTEXT_DATA));
+@@ -524,6 +578,8 @@
+   if (data->loop_count < 255) {
+     data->loop_count--;
+   }
++  history::Record(history::Event::kLoop, id(), data->loop_count, data->loop_start, data->loop_end,
++                  data->loop_subframe_skip | data->loop_subframe_end << 8);  // DEBUG_SAULO
+ }
+ 
+ int XmaContext::GetSampleRate(int id) {
+@@ -592,9 +648,13 @@
+                                          packet * kBytesPerPacket);
+       });
+ 
++  const uint32_t from_buffer = data->current_buffer;  // DEBUG_SAULO
+   for (uint32_t i = 0; i < next.buffers_finished; ++i) {
+     SwapInputBuffer(data);
+   }
++  history::Record(history::Event::kAdvance, id(), from_buffer | packet_index << 1, next.buffers_finished,
++                  next.found ? next.read_offset : UINT32_MAX, next.found ? 0 : next.pending_packet,
++                  InputBufferBits(*data));  // DEBUG_SAULO
+   if (next.found) {
+     data->input_buffer_read_offset = next.read_offset;
+     return;
+@@ -721,6 +781,7 @@
+   if (data.current_buffer != initial_data.current_buffer) {
+     XMA_CONTEXT_DATA::UpdateWord(context_ptr, 4, 1u << 31, uint32_t(data.current_buffer) << 31);
+   }
++  history_input_key_ = InputBuffersKey(data);  // DEBUG_SAULO
+ }
+ 
+ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
+@@ -788,6 +849,7 @@
+       REXAPU_ERROR("XmaContext: Failed to reopen FFmpeg context");
+       return -1;
+     }
++    history::Record(history::Event::kCodecOpen, id(), uint32_t(sample_rate), channels);  // DEBUG_SAULO
+     return 1;
+   }
+   return 0;
+@@ -839,6 +901,8 @@
+ 
+   if (!data->IsCurrentInputBufferValid()) {
+     SwapInputBuffer(data);
++    history::Record(history::Event::kSwap, id(), uint32_t(history::SwapReason::kCurrentInvalid),
++                    data->current_buffer, InputBufferBits(*data), data->input_buffer_read_offset);  // DEBUG_SAULO
+     if (!data->IsCurrentInputBufferValid()) {
+       return;
+     }
+@@ -849,6 +913,8 @@
+       pending_packet && data->current_buffer == pending_packet_buffer_ &&
+       data->input_buffer_read_offset == kBitsPerPacketHeader) {
+     AdvanceToPacket(data, pending_packet);
++    history::Record(history::Event::kPendingPacket, id(), data->current_buffer, pending_packet,
++                    data->input_buffer_read_offset);  // DEBUG_SAULO
+     return;
+   }
+ 
+@@ -886,6 +952,12 @@
+ 
+   uint8_t* packet = current_input_buffer + (packet_index * kBytesPerPacket);
+   const uint32_t packet_first_frame_offset = xma::GetPacketFrameOffset(packet);
++  // DEBUG_SAULO
++  if (const uint32_t location = data->current_buffer | uint32_t(packet_index) << 1; location != history_packet_) {
++    history_packet_ = location;
++    history::Record(history::Event::kPacket, id(), data->current_buffer, uint32_t(packet_index),
++                    current_input_packet_count, LoadBE32(packet), data->GetCurrentInputBufferAddress());
++  }
+   uint32_t relative_offset = data->input_buffer_read_offset % kBitsPerPacket;
+ 
+   if (relative_offset < packet_first_frame_offset) {
+@@ -932,9 +1004,13 @@
+     if (!next_packet) {
+       // The rest of the header comes with the other buffer; dropping this one would lose the frame.
+       if (IsContinuationPending(data, next_packet_index, current_input_packet_count)) {
++        history::Record(history::Event::kContinuationWait, id(), trace.buffer | trace.packet_index << 1,
++                        next_packet_index, current_input_packet_count, 1);  // DEBUG_SAULO
+         return;
+       }
+       SwapInputBuffer(data);
++      history::Record(history::Event::kSwap, id(), uint32_t(history::SwapReason::kSplitHeaderOutOfRange),
++                      data->current_buffer, InputBufferBits(*data), data->input_buffer_read_offset);  // DEBUG_SAULO
+       return;
+     }
+     std::memcpy(input_buffer_.data(), packet + kBytesPerPacketHeader, kBytesPerPacketData);
+@@ -963,6 +1039,8 @@
+   if (bits_to_copy == 0) {
+     REXAPU_ERROR("XmaContext {}: There are no bits to copy!", id());
+     SwapInputBuffer(data);
++    history::Record(history::Event::kSwap, id(), uint32_t(history::SwapReason::kNoBitsToCopy), data->current_buffer,
++                    InputBufferBits(*data), data->input_buffer_read_offset);  // DEBUG_SAULO
+     return;
+   }
+ 
+@@ -973,6 +1051,8 @@
+       if (!next_packet) {
+         // The frame's tail comes with the other buffer, which the guest has not refilled yet.
+         if (IsContinuationPending(data, next_packet_index, current_input_packet_count)) {
++          history::Record(history::Event::kContinuationWait, id(), trace.buffer | trace.packet_index << 1,
++                          next_packet_index, current_input_packet_count, 2);  // DEBUG_SAULO
+           return;
+         }
+         data->error_status = 4;
+@@ -1006,8 +1086,10 @@
+   trace.frame_size = packet_info.current_frame_size_;  // DEBUG_SAULO
+   g_decodes.fetch_add(1, std::memory_order_relaxed);
+   t_trace = &trace;
++  const bool loop_start_frame = loop_start_skip_pending_;  // DEBUG_SAULO
+   const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
+   t_trace = nullptr;
++  RecordFrame(id(), *data, trace, next_packet_index, decoded, is_loop_end_frame, loop_start_frame);  // DEBUG_SAULO
+   if (decoded) {
+     ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
+                  decoded_frame_.data());
+diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
+--- a/src/audio/xma_decoder.cpp
++++ b/src/audio/xma_decoder.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <rex/audio/xma/context.h>
+ #include <rex/audio/thread_priority.h>
++#include <rex/audio/audio_history.h>
+ #include <rex/audio/xma/decoder.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+@@ -185,6 +186,7 @@
+   }
+ 
+   worker_running_ = false;
++  history::Shutdown();  // DEBUG_SAULO
+ 
+   if (work_event_) {
+     work_event_->Set();
+@@ -228,6 +230,7 @@
+   XmaContext& context = contexts_[index];
+   assert_false(context.is_allocated());
+   context.set_is_allocated(true);
++  history::Record(history::Event::kAllocate, uint32_t(index));  // DEBUG_SAULO
+   return context.guest_ptr();
+ }
+ 
+@@ -340,6 +343,9 @@
+         context.Block(false);
+         const double lock_ms =
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lock_start).count();
++        if (lock_ms >= 1.0) {
++          history::Record(history::Event::kDisableWait, context_id, uint32_t(lock_ms * 1000.0));
++        }
+         if (lock_ms >= 5.0) {
+           DebugSauloNoteLockWait(context_id, lock_ms);
+         }
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -16,6 +16,7 @@
+ #include <cstring>
+ 
+ #include <rex/assert.h>
++#include <rex/audio/audio_history.h>
+ #include <rex/audio/conversion.h>
+ #include <rex/audio/downmix.h>
+ #include <rex/audio/flags.h>
+@@ -140,6 +141,49 @@
+   }
+ }
+ 
++constexpr uint32_t kHistoryContext = 0xFFFF;
++constexpr int64_t kLateSubmitUs = 12000;
++constexpr int64_t kLateCallbackUs = 25000;
++constexpr int64_t kDepthSampleUs = 100000;
++
++int64_t NowUs() {
++  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++void NoteSubmit(size_t queued) {
++  static std::atomic<int64_t> last_us{0};
++  const int64_t now = NowUs();
++  const int64_t last = last_us.exchange(now, std::memory_order_relaxed);
++  if (last && now - last >= kLateSubmitUs) {
++    history::Record(history::Event::kSubmitGap, kHistoryContext, uint32_t(now - last), uint32_t(queued));
++  }
++}
++
++// Runs on SDL's audio thread only.
++void NoteCallback(size_t queued, uint32_t silent_frames) {
++  static int64_t last_us = 0;
++  static int64_t depth_window_us = 0;
++  static uint32_t depth_min = UINT32_MAX;
++  static uint32_t depth_max = 0;
++  const int64_t now = NowUs();
++  if (last_us && now - last_us >= kLateCallbackUs) {
++    history::Record(history::Event::kCallbackGap, kHistoryContext, uint32_t(now - last_us), uint32_t(queued));
++  }
++  last_us = now;
++  if (silent_frames) {
++    history::Record(history::Event::kQueueEmpty, kHistoryContext, silent_frames, uint32_t(queued));
++  }
++  depth_min = std::min(depth_min, uint32_t(queued));
++  depth_max = std::max(depth_max, uint32_t(queued));
++  if (now - depth_window_us >= kDepthSampleUs) {
++    history::Record(history::Event::kQueueDepth, kHistoryContext, uint32_t(queued), depth_min, depth_max);
++    depth_window_us = now;
++    depth_min = UINT32_MAX;
++    depth_max = 0;
++  }
++}
++
+ }  // namespace
+ 
+ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+@@ -169,6 +213,7 @@
+     frames_queued_.push(output_frame);
+     PROFILE_BUFFER_QUEUE_DEPTH(static_cast<int64_t>(frames_queued_.size()));
+     NoteQueuedFrames(frames_queued_.size());  // DEBUG_SAULO
++    NoteSubmit(frames_queued_.size());        // DEBUG_SAULO
+   }
+ }
+ 
+@@ -212,11 +257,17 @@
+   const StereoFold fold = GetStereoFold();
+   const SurroundMix mix = GetSurroundMix();
+   const float gain = GetOutputGain();
++  size_t queued_at_start = SIZE_MAX;  // DEBUG_SAULO
++  uint32_t silent_frames = 0;
+   while (additional_amount > 0) {
+     static uint32_t sdl_callback_count = 0;
+     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
++    if (queued_at_start == SIZE_MAX) {
++      queued_at_start = driver->frames_queued_.size();  // DEBUG_SAULO
++    }
+     if (driver->frames_queued_.empty()) {
+       g_underruns.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO
++      ++silent_frames;
+       if (sdl_callback_count < 10) {
+         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
+         sdl_callback_count++;
+@@ -264,6 +315,7 @@
+   }
+   SDL_stack_free(data);
+   MaybeLogUnderruns();  // DEBUG_SAULO
++  NoteCallback(queued_at_start == SIZE_MAX ? 0 : queued_at_start, silent_frames);
+ }
+ 
+ }  // namespace rex::audio::sdl

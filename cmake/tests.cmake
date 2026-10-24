@@ -81,6 +81,10 @@ mua_add_test(save_diagnostics_tests headless
             MUA_GENERATED_DIR_MUA1="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1"
             MUA_GENERATED_DIR_MUA2="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua2")
 mua_add_test(sdk_fix_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
+mua_add_test(xma_packet_continuity_tests headless
+    DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
+# The staged SDK source, not the installed headers, so the test checks the patched helpers before a runtime build.
+target_include_directories(mua_xma_packet_continuity_tests BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src/include")
 mua_add_test(runtime_config_tests headless
     DEFINES MUA_STAGED_CONFIG="$<TARGET_FILE_DIR:marvel_ultimate_alliance>/marvel_ultimate_alliance.toml"
             MUA_GPU_PLUGIN_NAME="$<TARGET_FILE_NAME:rex::gpu-xenos>"

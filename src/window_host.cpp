@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 
+#include <rex/audio/audio_history.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc.h>
@@ -196,6 +197,10 @@ class WindowHost final : public rex::ui::WindowListener, public rex::ui::WindowI
       REXLOG_INFO("Window mode: {}", fullscreen ? "borderless fullscreen" : "windowed");
       UpdateCursor();
       return;
+    }
+    // DEBUG_SAULO: the key still reaches the game, so a binding on F9 keeps working.
+    if (e.virtual_key() == rex::ui::VirtualKey::kF9 && !e.prev_state()) {
+      rex::audio::history::Dump("F9");
     }
     if (e.prev_state() || g_cursor.overlay_open()) {
       return;
