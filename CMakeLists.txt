@@ -196,6 +196,7 @@ set(MUA_HOST_SOURCES
     src/shader_storage_repair.cpp
     src/system_info.cpp
     src/user_data.cpp
+    src/visual_trace.cpp
     src/window_host.cpp
     src/xex_identity.cpp
     src/hang_watchdog.cpp
@@ -213,8 +214,10 @@ set(MUA_RUNTIME_SOURCES
     src/guest_hook_report.cpp
     src/indirect_tail_calls.cpp
     src/save_diagnostics.cpp
+    src/skip_intro.cpp
     src/sound_stream_ring.cpp
     src/swap_hooks.cpp
+    src/visual_trace_mua1.cpp
     src/xaudio_worker_barrier.cpp
 )
 

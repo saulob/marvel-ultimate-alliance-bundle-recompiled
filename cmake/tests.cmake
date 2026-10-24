@@ -35,6 +35,8 @@ mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
 mua_add_test(guest_map_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
+mua_add_test(skip_intro_tests headless
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(gpu_perf_patches_tests headless)
 mua_add_test(d3d12_async_submission_tests headless)
 mua_add_test(d3d12_sampler_memo_tests headless)

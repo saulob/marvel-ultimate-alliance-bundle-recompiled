@@ -17,6 +17,7 @@ REXCVAR_DECLARE(bool, mua_launcher);
 REXCVAR_DECLARE(std::string, mua_game);
 REXCVAR_DECLARE(std::string, mua_games_root);
 REXCVAR_DECLARE(bool, mua_skip_launcher);
+REXCVAR_DECLARE(bool, mua_skip_intro);
 REXCVAR_DECLARE(int32_t, mua_frame_rate);
 REXCVAR_DECLARE(bool, mua_show_fps);
 REXCVAR_DECLARE(bool, mua_show_render_resolution);

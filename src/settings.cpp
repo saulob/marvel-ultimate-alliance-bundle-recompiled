@@ -38,6 +38,7 @@ REXCVAR_DEFINE_STRING(mua_games_root, "", "Marvel Ultimate Alliance",
                       "Folder holding the game folders and disc images (default: game next to the program)");
 REXCVAR_DEFINE_BOOL(mua_skip_launcher, false, "Marvel Ultimate Alliance",
                     "Skip the launcher once (set when the launcher restarts the game)");
+REXCVAR_DEFINE_BOOL(mua_skip_intro, false, "Marvel Ultimate Alliance", "Start directly at the title screen");
 REXCVAR_DEFINE_INT32(mua_frame_rate, mua::kFrameRateDefault, "Marvel Ultimate Alliance",
                      "Frame rate: 30, 60 (original), 90, 120, 144, 165, 240 or 0 for unlimited");
 REXCVAR_DEFINE_BOOL(mua_show_fps, true, "Marvel Ultimate Alliance", "Show the frame rate in the window title");
@@ -91,6 +92,7 @@ std::vector<std::string> GameSettingKeys() {
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
+      "mua_skip_intro",
       "mua_frame_rate",
       "mua_show_fps",
       "mua_show_render_resolution",
@@ -106,8 +108,8 @@ std::vector<std::string> GameSettingKeys() {
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
-constexpr std::string_view kGameScopedKeys[] = {"mua_frame_rate", "mua_aspect_ratio", "mua_upscaler",
-                                                 "mua_upscale_quality"};
+constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro", "mua_frame_rate", "mua_aspect_ratio",
+                                                 "mua_upscaler", "mua_upscale_quality"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);

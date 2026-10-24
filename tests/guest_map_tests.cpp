@@ -68,10 +68,22 @@ const MapFile kMaps[] = {
     {"mua2", "guest_map_mua2.h", "MUA_RUNTIME_MUA2", "mua2"},
 };
 
-// The hooks a game's code can lack because its codegen output or its audio engine does not need them.
-const std::set<std::string> kOptionalHooks = {"MUA_GUEST_INDIRECT_TAIL_CALL", "MUA_GUEST_AUDIO_BARRIER",
-                                              "MUA_GUEST_RESET_EVENT", "MUA_GUEST_MEMMOVE"};
-const std::set<std::string> kOptionalConstants = {"kIndirectTailTable"};
+// Hooks a game's code can lack: because its codegen output or its audio engine does not need them, or (the skip
+// intro functions) because MUA 2 skips its intro through a midasm_hook instead.
+const std::set<std::string> kOptionalHooks = {
+    "MUA_GUEST_INDIRECT_TAIL_CALL", "MUA_GUEST_AUDIO_BARRIER", "MUA_GUEST_RESET_EVENT", "MUA_GUEST_MEMMOVE",
+    "MUA_GUEST_INTRO_GATE", "MUA_GUEST_MOVIE_MENU_UPDATE", "MUA_GUEST_OPEN_MENU", "MUA_GUEST_MENU_MANAGER",
+    "MUA_GUEST_MOVIE_PLAYING", "MUA_GUEST_STOP_MOVIE", "MUA_GUEST_SET_ACTIVE_PAD", "MUA_GUEST_USER_MANAGER",
+    "MUA_GUEST_USER_SET_CONTROLLER", "MUA_GUEST_USER_REFRESH", "MUA_GUEST_USER_GET_SLOT", "MUA_GUEST_USER_SET_SLOT",
+    "MUA_GUEST_INPUT_MANAGER", "MUA_GUEST_INPUT_SET_NAME", "MUA_GUEST_INPUT_SET_FLAGS", "MUA_GUEST_INPUT_CLEAR_FLAGS",
+    "MUA_GUEST_PROFILE_MANAGER", "MUA_GUEST_PROFILE_REFRESH_PAD", "MUA_GUEST_PROFILE_RESET_ALL",
+    "MUA_GUEST_PROFILE_QUERY_ALL", "MUA_GUEST_PROFILE_SIGNED_IN", "MUA_GUEST_PROFILE_ONLINE",
+    "MUA_GUEST_PROFILE_NAME", "MUA_GUEST_SIGNIN_PUMP", "MUA_GUEST_SIGNIN_PUMP_SET_FLAG_A",
+    "MUA_GUEST_SIGNIN_PUMP_SET_FLAG_B", "MUA_GUEST_CONSOLE", "MUA_GUEST_CONSOLE_QUEUE", "MUA_GUEST_PAD_MANAGER",
+    "MUA_GUEST_PAD_CONNECTED", "MUA_GUEST_UI_UPDATE", "MUA_GUEST_MAIN_MENU_EXIT",
+    "MUA_GUEST_RESET_GAME", "MUA_GUEST_SCRIPT_DISPATCH"};
+const std::set<std::string> kOptionalConstants = {"kIndirectTailTable", "kInputUserSlotOffset",
+                                                  "kMainMenuExitCommand"};
 
 // sub_8248A0A0 holds the swap for another vblank while the interval in the high half of its argument has not passed
 // since the last flip, or while the scanline has passed the threshold in the low half.
@@ -140,7 +152,10 @@ void TestMapsCarryTheSameHooks() {
       reference_hooks.insert(hook);
     }
   }
-  const std::set<std::string> reference_constants = Matches(reference_map, constants);
+  std::set<std::string> reference_constants = Matches(reference_map, constants);
+  for (const std::string& name : kOptionalConstants) {
+    reference_constants.erase(name);
+  }
   for (const MapFile& map : kMaps) {
     const std::string text = ReadSource(kSources / map.file);
     std::set<std::string> hooks = Matches(text, macros);

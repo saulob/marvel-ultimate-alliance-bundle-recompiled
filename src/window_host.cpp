@@ -37,6 +37,7 @@
 #include "hang_watchdog.h"
 #include "input_activity.h"
 #include "settings.h"
+#include "visual_trace.h"
 #include "window_title.h"
 
 namespace {
@@ -184,6 +185,9 @@ class WindowHost final : public rex::ui::WindowListener, public rex::ui::WindowI
   void OnKeyDown(rex::ui::KeyEvent& e) override {
     if (e.target() != g_window || !g_window->HasFocus()) {
       return;
+    }
+    if (e.virtual_key() == rex::ui::VirtualKey::kF9 && !e.prev_state()) {
+      mua::visual_trace::Marker();
     }
     if (e.virtual_key() == rex::ui::VirtualKey::kF11) {
       e.set_handled(true);

@@ -732,6 +732,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   }
 
   void PageGameplay(trg::Ui& ui) {
+    ui.Toggle("Skip intro", "Start directly at the title screen", "mua_skip_intro", false, "Off", "On");
     std::vector<trg::Option> frame_rates;
     const FramePolicy& policy = Selected().game->frame_policy;
     for (auto& [value, label] : FrameRateChoices(policy)) {

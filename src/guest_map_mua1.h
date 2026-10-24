@@ -26,6 +26,40 @@
 #define MUA_GUEST_CONTENT_CLOSE sub_82466A80
 #define MUA_GUEST_CONTENT_ENUMERATE sub_82466A88
 #define MUA_GUEST_DEVICE_SELECTOR sub_82467240
+#define MUA_GUEST_INTRO_GATE sub_82111868
+#define MUA_GUEST_MOVIE_MENU_UPDATE sub_823F51E8
+#define MUA_GUEST_OPEN_MENU sub_8240DC10
+#define MUA_GUEST_MENU_MANAGER sub_82409678
+#define MUA_GUEST_MOVIE_PLAYING sub_82402150
+#define MUA_GUEST_STOP_MOVIE sub_82403A98
+#define MUA_GUEST_SET_ACTIVE_PAD sub_82408A20
+#define MUA_GUEST_USER_MANAGER sub_821E7070
+#define MUA_GUEST_USER_SET_CONTROLLER sub_821E8CC8
+#define MUA_GUEST_USER_REFRESH sub_821E6708
+#define MUA_GUEST_USER_GET_SLOT sub_821E6E20
+#define MUA_GUEST_USER_SET_SLOT sub_82619520
+#define MUA_GUEST_INPUT_MANAGER sub_82456B48
+#define MUA_GUEST_INPUT_SET_NAME sub_82454558
+#define MUA_GUEST_INPUT_SET_FLAGS sub_82454420
+#define MUA_GUEST_INPUT_CLEAR_FLAGS sub_82454450
+#define MUA_GUEST_PROFILE_MANAGER sub_82355F50
+#define MUA_GUEST_PROFILE_REFRESH_PAD sub_82355F60
+#define MUA_GUEST_PROFILE_RESET_ALL sub_823556B0
+#define MUA_GUEST_PROFILE_QUERY_ALL sub_82355708
+#define MUA_GUEST_PROFILE_SIGNED_IN sub_82355768
+#define MUA_GUEST_PROFILE_ONLINE sub_82355788
+#define MUA_GUEST_PROFILE_NAME sub_82355E70
+#define MUA_GUEST_SIGNIN_PUMP sub_82356E58
+#define MUA_GUEST_SIGNIN_PUMP_SET_FLAG_A sub_82356D68
+#define MUA_GUEST_SIGNIN_PUMP_SET_FLAG_B sub_82356D70
+#define MUA_GUEST_CONSOLE sub_823453A8
+#define MUA_GUEST_CONSOLE_QUEUE sub_82344CB0
+#define MUA_GUEST_PAD_MANAGER sub_8233C588
+#define MUA_GUEST_PAD_CONNECTED sub_8233AD90
+#define MUA_GUEST_UI_UPDATE sub_8240E3E0
+#define MUA_GUEST_SCRIPT_DISPATCH sub_82344378
+#define MUA_GUEST_MAIN_MENU_EXIT sub_82438F78
+#define MUA_GUEST_RESET_GAME sub_82439D48
 
 namespace mua::guest {
 
@@ -35,6 +69,8 @@ inline constexpr uint32_t kDeviceFenceOffset = 10768;
 inline constexpr uint32_t kDeviceFlagsOffset = 10809;
 inline constexpr uint32_t kRepeatPresentSite = 0x82484914;
 inline constexpr uint32_t kWorldDeltaOffset = 1000;
+inline constexpr uint32_t kInputUserSlotOffset = 1488;
+inline constexpr uint32_t kMainMenuExitCommand = 0x82015DE8;
 
 // The callback's argument: swap interval in the high half, scanline threshold in percent in the low half. No
 // interval and a threshold the scanline never passes release the swap at once.

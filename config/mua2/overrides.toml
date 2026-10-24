@@ -54,6 +54,14 @@ name = "mua_aspect_display_aspect"
 registers = ["f13"]
 after_instruction = false
 
+# Decides whether to RunScript("menus/intro_normal") in sub_8252A550; r31 is 0 when the publisher/startup
+# presentation script has not run yet, read right after a cvar lookup keyed by a per-profile string.
+[[midasm_hook]]
+address = 0x8252A72C
+name = "mua_skip_intro_mua2"
+registers = ["r31"]
+after_instruction = false
+
 # Keeps the Upscaling back buffer for the device presentation params in sub_82271DF8's display-mode scan, where a
 # back buffer matching no supported mode falls back to the video mode in r7 and r8; same shape as MUA1/Gold, just
 # with different register allocation (r8/r9 there).
