@@ -1,0 +1,165 @@
+Port of rexglue-sdk#382: FPSCRRegister::setcsr applies Platform::InitHostExceptions to the value it writes, so a zeroed or guest-derived csr (storeFromGuest, enableFlushMode, ...) cannot unmask host FP exceptions. Guest rounding and flush bits are unchanged. Adds the upstream fpscr_test cases.
+
+diff --git a/include/rex/ppc/context.h b/include/rex/ppc/context.h
+index 5a16575..6f74df4 100644
+--- a/include/rex/ppc/context.h
++++ b/include/rex/ppc/context.h
+@@ -158,7 +158,11 @@ struct FPSCRRegister {
+   static constexpr uint32_t GuestMask = uint32_t(RoundMaskVal) | uint32_t(FlushMask);
+ 
+   inline uint32_t getcsr() noexcept { return Platform::getcsr(); }
+-  inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }
++  inline void setcsr(uint32_t csr) noexcept {
++    // A zeroed or guest-derived csr must not unmask host FP exceptions.
++    Platform::InitHostExceptions(csr);
++    Platform::setcsr(csr);
++  }
+ 
+   // Restoring the whole word would unmask every FP exception when csr is 0.
+   inline void restoreGuestBits(uint32_t saved) noexcept {
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index 6918c48..4152575 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -12,6 +12,7 @@ add_executable(unit_tests
+     core/chrono_test.cpp
+     ppc/import_function_test.cpp
+     ppc/stack_test.cpp
++    ppc/fpscr_test.cpp
+     system/guest_path_test.cpp
+     system/achievement_manager_test.cpp
+     system/function_dispatcher_test.cpp
+diff --git a/tests/unit/ppc/fpscr_test.cpp b/tests/unit/ppc/fpscr_test.cpp
+new file mode 100644
+index 0000000..d179d4c
+--- /dev/null
++++ b/tests/unit/ppc/fpscr_test.cpp
+@@ -0,0 +1,128 @@
++/**
++ * Tests for PPCFPSCRRegister host control-word handling.
++ */
++
++#include <cfloat>
++#include <cstdint>
++
++#include <catch2/catch_test_macros.hpp>
++
++#include <rex/ppc/context.h>
++
++using namespace rex::ppc;
++
++namespace {
++
++using Platform = PPCFPSCRRegister::Platform;
++
++#if defined(__x86_64__) || defined(_M_X64)
++constexpr uint32_t ArmTraps(uint32_t csr) {
++  return csr & ~Platform::ExceptionMask;
++}
++constexpr bool TrapsMasked(uint32_t csr) {
++  return (csr & Platform::ExceptionMask) == Platform::ExceptionMask;
++}
++#else
++constexpr uint32_t ArmTraps(uint32_t csr) {
++  return csr | Platform::ExceptionMask;
++}
++constexpr bool TrapsMasked(uint32_t csr) {
++  return (csr & Platform::ExceptionMask) == 0;
++}
++#endif
++
++struct HostCsrGuard {
++  uint32_t saved = Platform::getcsr();
++  ~HostCsrGuard() { Platform::setcsr(saved); }
++};
++
++double Div(double a, double b) {
++  volatile double x = a, y = b;
++  return x / y;
++}
++
++float Mul(float a, float b) {
++  volatile float x = a, y = b;
++  return x * y;
++}
++
++}  // namespace
++
++TEST_CASE("fpscr: guest rounding modes round host arithmetic correctly", "[ppc][fpscr]") {
++  HostCsrGuard guard;
++  PPCContext ctx{};
++  ctx.fpscr.InitHost();
++
++  ctx.fpscr.storeFromGuest(kRoundNearest);
++  const double rn_pos = Div(1.0, 3.0);
++  const double rn_neg = Div(-1.0, 3.0);
++
++  ctx.fpscr.storeFromGuest(kRoundUp);
++  const double up_pos = Div(1.0, 3.0);
++  const double up_neg = Div(-1.0, 3.0);
++
++  ctx.fpscr.storeFromGuest(kRoundDown);
++  const double dn_pos = Div(1.0, 3.0);
++  const double dn_neg = Div(-1.0, 3.0);
++
++  ctx.fpscr.storeFromGuest(kRoundTowardZero);
++  const double tz_pos = Div(1.0, 3.0);
++  const double tz_neg = Div(-1.0, 3.0);
++
++  ctx.fpscr.storeFromGuest(kRoundNearest);
++
++  CHECK(up_pos > dn_pos);
++  CHECK(up_neg > dn_neg);
++  CHECK(tz_pos == dn_pos);
++  CHECK(tz_neg == up_neg);
++  CHECK(rn_pos == dn_pos);
++  CHECK(rn_neg == up_neg);
++}
++
++TEST_CASE("fpscr: flush mode toggles denormal flushing", "[ppc][fpscr]") {
++  HostCsrGuard guard;
++  PPCContext ctx{};
++  ctx.fpscr.InitHost();
++
++  const float tiny = FLT_MIN / 4.0f;
++
++  ctx.fpscr.disableFlushModeUnconditional();
++  CHECK(Mul(tiny, 1.0f) != 0.0f);
++
++  ctx.fpscr.enableFlushModeUnconditional();
++  CHECK(Mul(tiny, 1.0f) == 0.0f);
++  CHECK(Mul(FLT_MIN, 0.5f) == 0.0f);
++
++  ctx.fpscr.disableFlushMode();
++  CHECK(Mul(tiny, 1.0f) != 0.0f);
++}
++
++TEST_CASE("fpscr: setcsr keeps host traps masked and preserves guest bits", "[ppc][fpscr]") {
++  HostCsrGuard guard;
++  PPCContext ctx{};
++  ctx.fpscr.InitHost();
++  ctx.fpscr.storeFromGuest(kRoundTowardZero);
++  ctx.fpscr.enableFlushModeUnconditional();
++
++  const uint32_t before = ctx.fpscr.getcsr();
++  ctx.fpscr.setcsr(ArmTraps(before));
++  const uint32_t after = ctx.fpscr.getcsr();
++
++  CHECK(TrapsMasked(after));
++  CHECK((after & PPCFPSCRRegister::GuestMask) == (before & PPCFPSCRRegister::GuestMask));
++  CHECK(ctx.fpscr.loadFromHost() == kRoundTowardZero);
++
++  CHECK(Div(0.0, 0.0) != Div(0.0, 0.0));
++  CHECK(Div(1.0, 0.0) > DBL_MAX);
++}
++
++TEST_CASE("fpscr: storeFromGuest on a zeroed csr does not arm traps", "[ppc][fpscr]") {
++  HostCsrGuard guard;
++  PPCContext ctx{};
++  ctx.fpscr.csr = ArmTraps(0);
++
++  ctx.fpscr.storeFromGuest(kRoundUp);
++
++  CHECK(TrapsMasked(ctx.fpscr.getcsr()));
++  CHECK(Div(0.0, 0.0) != Div(0.0, 0.0));
++}

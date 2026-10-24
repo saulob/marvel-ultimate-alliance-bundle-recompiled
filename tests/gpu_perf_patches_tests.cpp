@@ -266,6 +266,16 @@ void TestPortedReferenceFixes() {
   CHECK(Has(fp, "+  thread_state_->context()->fpscr.InitHost();"));
   CHECK(Has(fp, "+  ctx->fpscr.InitHost();"));
 
+  const std::string host_thread_fp = ReadFile(dir + "0139-xhostthread-fpscr-init.patch");
+  CHECK(Has(host_thread_fp, "+TEST_CASE(\"XHostThread initializes host floating-point exception masks\""));
+  CHECK(Has(host_thread_fp, "+add_executable(xthread_tests"));
+  CHECK(!Has(host_thread_fp, "src/system/xthread.cpp"));
+
+  const std::string setcsr = ReadFile(dir + "0140-fpscr-mask-host-exceptions.patch");
+  CHECK(Has(setcsr, "-  inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }"));
+  CHECK(Has(setcsr, "+    Platform::InitHostExceptions(csr);\n+    Platform::setcsr(csr);"));
+  CHECK(Has(setcsr, "+TEST_CASE(\"fpscr: storeFromGuest on a zeroed csr does not arm traps\""));
+
   const std::string wake = ReadFile(dir + "0100-command-processor-progress-wake.patch");
   CHECK(Has(wake, "+      WakeGuestWordWaiters(memory_->TranslatePhysical(read_ptr_writeback_ptr_));"));
   CHECK(Has(wake, "+      WakeGuestWordWaiters(memory_->TranslatePhysical(mem_addr));"));
