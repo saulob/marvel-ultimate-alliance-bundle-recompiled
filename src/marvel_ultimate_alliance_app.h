@@ -39,6 +39,8 @@
 #include "graphics_adapters.h"
 #include "guest_functions.h"
 #include "hang_watchdog.h"
+#include "hd_text.h"
+#include "hd_text_vfs.h"
 #include "input_summary.h"
 #include "launcher.h"
 #include "log_filter.h"
@@ -254,6 +256,12 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
 
   void OnPostSetup() override {
     REXLOG_INFO("Scheduling: {}", trg::TuneProcessScheduling());
+    // The game volume is mounted and the title has not opened its archive yet.
+    if (const auto game = mua::GetRecompiledImage().game) {
+      mua::hd_text::InstallHdText(runtime()->file_system(), *game,
+                                  std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()),
+                                  mua::hd_text::ParseSetting(rex::cvar::GetFlagByName(mua::hd_text::kSettingKey)));
+    }
     if (window()) {
       mua::CheckWindowDisplay(window()->GetNativeWindowHandle(), REXCVAR_GET(monitor));
       mua::StartHangWatchdog(window()->GetNativeWindowHandle());

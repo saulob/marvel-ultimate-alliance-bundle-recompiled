@@ -483,6 +483,46 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   fs::remove(scratch.player);
 }
 
+void TestHdTextIsShared(const Scratch& scratch) {
+  std::printf("HD Text is On by default, one setting for every game, saved in settings.toml\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::LoadConfig(scratch.shipped);
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.Get("mua_hd_text") == "true");
+  CHECK(settings.GetBool("mua_hd_text", true));
+
+  settings.Set("mua_hd_text", "false");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(!settings.GetBool("mua_hd_text", true));
+  CHECK(settings.Save());
+  const toml::table shared = toml::parse_file(scratch.player.string());
+  CHECK(shared["mua_hd_text"].value<bool>() == false);
+  for (const char* game : {"mua1", "mua1_gold"}) {
+    const fs::path file = root / game / "game_settings.toml";
+    CHECK(!fs::exists(file) || !toml::parse_file(file.string()).contains("mua_hd_text"));
+  }
+
+  rex::cvar::LoadConfig(scratch.player);
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  for (const mua::GameId game : {mua::GameId::kMua1, mua::GameId::kMua1Gold}) {
+    reopened.SelectGame(game);
+    CHECK(!reopened.GetBool("mua_hd_text", true));
+  }
+
+  reopened.Set("mua_hd_text", "maybe");
+  CHECK(reopened.GetBool("mua_hd_text", true));
+  reopened.ResetToDefaults();
+  CHECK(reopened.Get("mua_hd_text") == "true");
+
+  rex::cvar::SetFlagByName("mua_hd_text", "true");
+  fs::remove_all(root / "mua1");
+  fs::remove_all(root / "mua1_gold");
+  fs::remove(scratch.player);
+}
+
 void TestPlayerNamesAreShared(const Scratch& scratch) {
   std::printf("the player names are shared by the three games, saved once in settings.toml\n");
   const fs::path root = scratch.player.parent_path();
@@ -593,6 +633,7 @@ int main() {
   TestAspectRatioVideoMode();
   TestUpscalingPerGame(scratch);
   TestPlayerNamesAreShared(scratch);
+  TestHdTextIsShared(scratch);
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

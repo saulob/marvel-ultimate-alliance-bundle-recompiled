@@ -99,6 +99,7 @@ mua_add_test(game_data_tests headless
 mua_add_test(achievement_metadata_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(shader_storage_repair_tests headless SOURCES src/shader_storage_repair.cpp)
+mua_add_test(hd_text_tests headless SOURCES ${MUA_HD_TEXT_SOURCES})
 mua_add_test(resolve_order_tests headless DEFINES MUA_SDK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src")
 mua_add_test(audio_pcm_firewall_tests headless)
 mua_add_test(xaudio_barrier_tests headless)

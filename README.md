@@ -46,6 +46,16 @@ The Graphics page also has Upscaling: AMD FSR 1 scales the game's picture to the
 Performance choices make the game draw a smaller back buffer, 1.5, 1.7 and 2 times smaller along each axis than the
 Render resolution, which costs less GPU time. Off, the default, keeps the plain scaling.
 
+The Graphics page's HD Text (Marvel Ultimate Alliance and Gold Edition, On by default) rebuilds the game's text and
+controller icons at higher resolution: the games draw them from font atlases sized for 720p. At Render resolution 2x the
+atlases are rebuilt twice as large, at 3x and 4x four times as large, when the game starts; the font tables, layout,
+colours and animation stay the game's. They are served through an in-memory overlay of the game's asset archive
+(`z\assetsfb.wad`, Gold Edition `z\assetsfb.zip`); the game files are not changed and nothing taken from the game ships
+with the port. They take about 6 MB of memory at 2x and 24 MB at 3x and 4x. At 1x, or with HD Text Off
+(`mua_hd_text`), the game reads its own atlases. `hd_text_preview <game folder> <output folder> [render scale]
+[mua1|mua1-gold]` (CMake target `hd_text_preview`) writes the original and rebuilt atlases as PNG files without starting
+the game.
+
 While playing, F2 shows or hides the frame counter, and the window title shows the frame rate (Gameplay page). F10 and F12
 are reserved and do nothing yet; F9 is unassigned.
 

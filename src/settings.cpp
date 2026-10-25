@@ -53,6 +53,9 @@ REXCVAR_DEFINE_BOOL(mua_show_frame_counter, false, "Marvel Ultimate Alliance",
 REXCVAR_DEFINE_BOOL(mua_msaa_compatibility, false, "Marvel Ultimate Alliance",
                     "Draw the game's 2x MSAA render targets with 4x MSAA, for GPUs or drivers whose "
                     "native 2x MSAA misrenders (sets native_2x_msaa; unused with rasterizer-ordered views)");
+REXCVAR_DEFINE_BOOL(mua_hd_text, true, "Marvel Ultimate Alliance",
+                    "Rebuild in-game text and controller icons at higher resolution (MUA1 and Gold Edition, "
+                    "applied at start)");
 REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
                       "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
 REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance",
@@ -104,6 +107,7 @@ std::vector<std::string> GameSettingKeys() {
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
+      "mua_hd_text",
       "mua_skip_intro",
       "mua_frame_rate",
       "mua_show_fps",

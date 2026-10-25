@@ -41,6 +41,7 @@
 #include "game_library.h"
 #include "game_theme.h"
 #include "graphics_adapters.h"
+#include "hd_text.h"
 #include "multisampling.h"
 #include "imgui_gamepad.h"
 #include "keybinds.h"
@@ -1006,9 +1007,17 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
                {"4", "8\xC3\x97"},
                {"5", "16\xC3\x97"}},
               6);
+    if (HdTextApplies()) {
+      ui.Toggle("HD Text",
+                "Rebuilds in-game text and controller icons at higher resolution. Uses additional memory at higher "
+                "render resolutions.",
+                hd_text::kSettingKey, true);
+    }
   }
 
   bool UpscalingApplies() const { return Selected().game != nullptr; }
+
+  bool HdTextApplies() const { return Selected().game && hd_text::AssetsFor(Selected().game->id); }
 
   // The choice only matters when the GPU cannot run the rasterizer-ordered views EDRAM path.
   bool MultisamplingApplies() {

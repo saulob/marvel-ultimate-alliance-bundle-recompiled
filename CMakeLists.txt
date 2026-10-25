@@ -180,10 +180,14 @@ set(MUA_HOST_SOURCES
     src/game_library.cpp
     src/game_profile.cpp
     src/graphics_adapters.cpp
+    src/font_atlas_hd.cpp
     src/frame_counter.cpp
     src/frame_wait.cpp
     src/game_data.cpp
     src/guest_functions.cpp
+    src/hd_text.cpp
+    src/hd_text_vfs.cpp
+    src/igb_image.cpp
     src/imgui_gamepad.cpp
     src/input_summary.cpp
     src/launcher.cpp
@@ -212,6 +216,8 @@ set(MUA_HOST_SOURCES
     src/user_data.cpp
     src/window_host.cpp
     src/xex_identity.cpp
+    src/xmlb.cpp
+    src/zip_overlay.cpp
     src/hang_watchdog.cpp
 )
 set_source_files_properties(src/updater/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "-w")
@@ -360,6 +366,19 @@ target_link_libraries(extract_disc PRIVATE trg::launcher rex::runtime)
 add_custom_command(TARGET extract_disc POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:extract_disc> $<TARGET_FILE_DIR:extract_disc>
     COMMAND_EXPAND_LISTS)
+
+# Builds the HD text overlay from a game folder and writes the rebuilt atlases: cmake --build <dir> --target
+# hd_text_preview, then hd_text_preview <game folder> <output folder> [render scale]
+set(MUA_HD_TEXT_SOURCES
+    src/font_atlas_hd.cpp
+    src/hd_text.cpp
+    src/igb_image.cpp
+    src/xmlb.cpp
+    src/zip_overlay.cpp
+    src/updater/third_party/miniz/miniz.c
+)
+add_executable(hd_text_preview EXCLUDE_FROM_ALL tools/hd_text_preview/main.cpp ${MUA_HD_TEXT_SOURCES})
+target_include_directories(hd_text_preview PRIVATE src)
 
 # Writes the decompressed guest image for offline analysis: cmake --build <dir> --target dump_image
 add_executable(dump_image EXCLUDE_FROM_ALL tools/dump_image/main.cpp)
