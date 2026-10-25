@@ -219,6 +219,7 @@ set(MUA_RUNTIME_SOURCES
     src/indirect_tail_calls.cpp
     src/main_menu.cpp
     src/main_menu_mua2.cpp
+    src/player_name_hooks.cpp
     src/save_diagnostics.cpp
     src/skip_intro.cpp
     src/sound_stream_ring.cpp

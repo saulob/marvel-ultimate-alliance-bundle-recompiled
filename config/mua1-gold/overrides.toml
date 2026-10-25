@@ -56,3 +56,10 @@ address = 0x8251891C
 name = "mua_upscale_device_back_buffer"
 registers = ["r8", "r9"]
 after_instruction = false
+
+# Gives the Players list row of an active controller its user's name in sub_82410C18; r1 holds the row's port digit and text.
+[[midasm_hook]]
+address = 0x82410D68
+name = "mua_player_list_name"
+registers = ["r1"]
+after_instruction = false

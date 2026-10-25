@@ -4,9 +4,11 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <format>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -46,6 +48,7 @@
 #include "launcher_shortcuts.h"
 #include "log_filter.h"
 #include "platform.h"
+#include "player_names.h"
 #include "render_scale.h"
 #include "settings.h"
 #include "upscaling.h"
@@ -748,6 +751,48 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
               "mua_show_render_resolution", false, "Off", "On");
     ui.Toggle("Frame counter", "Shows the game's frame rate in the corner. F2 toggles it while playing.",
               "mua_show_frame_counter", false, "Hidden", "Shown");
+    if (ui.Section("Player names", true)) {
+      ui.Help(kPlayerNamesHelp);
+      for (const PlayerNameSetting& player : kPlayerNames) {
+        PlayerNameRow(ui, player);
+      }
+    }
+  }
+
+  static void PlayerNameRow(trg::Ui& ui, const PlayerNameSetting& player) {
+    static std::map<std::string, PlayerNameResult> blocked;
+    struct Edit {
+      std::string previous;
+      PlayerNameResult blocked = PlayerNameResult::Ok;
+    } edit{ui.settings().Get(player.key)};
+    const auto reject_invalid = [](ImGuiInputTextCallbackData* data) {
+      auto* state = static_cast<Edit*>(data->UserData);
+      const std::string kept = rex::system::xam::AcceptUserDisplayNameEdit(
+          state->previous, {data->Buf, size_t(data->BufTextLen)}, &state->blocked);
+      if (state->blocked != PlayerNameResult::Ok) {
+        data->DeleteChars(0, data->BufTextLen);
+        data->InsertChars(0, kept.c_str());
+      }
+      return 0;
+    };
+    ui.Row(player.label, kPlayerNameHint);
+    char text[64];
+    std::snprintf(text, sizeof text, "%s", edit.previous.c_str());
+    ImGui::PushID(player.key);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::InputTextWithHint("##text", player.default_name, text, sizeof text, ImGuiInputTextFlags_CallbackEdit,
+                                 reject_invalid, &edit)) {
+      ui.settings().Set(player.key, text);
+      blocked[player.key] = edit.blocked;
+    }
+    ImGui::PopID();
+    PlayerNameResult shown = blocked[player.key];
+    if (shown == PlayerNameResult::Ok) {
+      shown = CheckPlayerName(ui.settings().Get(player.key));
+    }
+    if (shown != PlayerNameResult::Ok) {
+      ui.Help(PlayerNameMessage(shown));
+    }
   }
 
   const MonitorInfo* SelectedMonitor() const {

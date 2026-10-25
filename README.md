@@ -38,6 +38,10 @@ loaded after the shipped `marvel_ultimate_alliance.toml`; settings that belong t
 `user_data\<game>\game_settings.toml` and fall back to `settings.toml`. F11 switches between windowed and borderless fullscreen in
 the launcher and in the game. Hold Shift while starting to open the launcher when it is turned off.
 
+The Gameplay page's Player names (`mua_player_1_name` .. `mua_player_4_name` in `settings.toml`) are shared by the three
+games: player N is local user N - 1, the controller in port N. They only change the names the games show; the profile,
+XUID, saves and achievements stay where they are.
+
 The Graphics page also has Upscaling: AMD FSR 1 scales the game's picture to the window, and its Quality, Balanced and
 Performance choices make the game draw a smaller back buffer, 1.5, 1.7 and 2 times smaller along each axis than the
 Render resolution, which costs less GPU time. Off, the default, keeps the plain scaling.

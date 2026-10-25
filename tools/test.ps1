@@ -115,7 +115,7 @@ try {
     }
 
     $headless = @('achievements_overlay', 'aspect_ratio','audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'game_data', 'game_install', 'game_library', 'gpu_perf_patches', 'graphics_adapter', 'guest_map', 'render_scale', 'keyboard', 'launcher_handoff', 'launcher_quit',
-                  'lifecycle', 'log_path', 'multisampling', 'relaunch', 'resolve_order', 'runtime_config',
+                  'lifecycle', 'log_path', 'multisampling', 'player_names', 'relaunch', 'resolve_order', 'runtime_config',
                   'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'skip_intro_notice', 'sound_stream_ring', 'user_data', 'window_host',
                   'window_placement', 'xaudio_barrier', 'xma_packet_continuity', 'd3d12_async_submission', 'd3d12_sampler_memo',
                   'd3d12_copy_validation') | ForEach-Object { "mua_$($_)_tests" }

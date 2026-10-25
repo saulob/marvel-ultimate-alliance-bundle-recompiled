@@ -1,0 +1,303 @@
+Port of the Geometry Wars and Hard Corps local user display names: local_player_1_name .. local_player_4_name set
+the name XamUserGetName, XamUserGetGamerTag and XamUserGetSigninInfo return for local users 0..3 (valid UTF-8, no
+control characters, at most 15 characters and 15 bytes; otherwise ignored). Users 1..3 only have a name when one is
+set. The XUID, the sign-in state and the content directory (UserProfile::profile_id()) never follow the display name.
+
+diff --git a/include/rex/system/xam/user_display_name.h b/include/rex/system/xam/user_display_name.h
+new file mode 100644
+index 0000000..f281a29
+--- /dev/null
++++ b/include/rex/system/xam/user_display_name.h
+@@ -0,0 +1,132 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++namespace rex {
++namespace system {
++namespace xam {
++
++// XamUserGetName, XamUserGetGamerTag and X_USER_SIGNIN_INFO all hold 16 bytes including the NUL.
++inline constexpr size_t kUserNameBufferSize = 16;
++inline constexpr size_t kUserDisplayNameMaxBytes = kUserNameBufferSize - 1;
++inline constexpr uint32_t kLocalUserCount = 4;
++
++// Length of the UTF-8 sequence at the start of text, or 0 when it is malformed, overlong,
++// a surrogate or beyond U+10FFFF.
++inline size_t Utf8SequenceLength(std::string_view text, uint32_t* code_point) {
++  if (text.empty()) {
++    return 0;
++  }
++  const auto byte = [&](size_t i) { return static_cast<uint8_t>(text[i]); };
++  size_t length;
++  uint32_t value;
++  uint32_t minimum;
++  if (byte(0) < 0x80) {
++    *code_point = byte(0);
++    return 1;
++  } else if ((byte(0) & 0xE0) == 0xC0) {
++    length = 2, value = byte(0) & 0x1F, minimum = 0x80;
++  } else if ((byte(0) & 0xF0) == 0xE0) {
++    length = 3, value = byte(0) & 0x0F, minimum = 0x800;
++  } else if ((byte(0) & 0xF8) == 0xF0) {
++    length = 4, value = byte(0) & 0x07, minimum = 0x10000;
++  } else {
++    return 0;
++  }
++  if (text.size() < length) {
++    return 0;
++  }
++  for (size_t i = 1; i < length; ++i) {
++    if ((byte(i) & 0xC0) != 0x80) {
++      return 0;
++    }
++    value = (value << 6) | (byte(i) & 0x3F);
++  }
++  if (value < minimum || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
++    return 0;
++  }
++  *code_point = value;
++  return length;
++}
++
++// The longest prefix of text that fits in max_bytes without splitting a UTF-8 sequence.
++inline size_t Utf8PrefixLength(std::string_view text, size_t max_bytes) {
++  size_t length = 0;
++  while (length < text.size()) {
++    uint32_t code_point;
++    size_t step = Utf8SequenceLength(text.substr(length), &code_point);
++    if (!step || length + step > max_bytes) {
++      break;
++    }
++    length += step;
++  }
++  return length;
++}
++
++inline constexpr size_t kUserDisplayNameMaxCharacters = 15;
++
++enum class UserDisplayNameResult { Ok, Empty, BadCharacter, TooManyCharacters, TooManyBytes };
++
++// Checks already-trimmed text: valid UTF-8 without control characters, at most 15 characters and 15 bytes.
++inline UserDisplayNameResult MeasureUserDisplayName(std::string_view text) {
++  if (text.empty()) {
++    return UserDisplayNameResult::Empty;
++  }
++  size_t characters = 0;
++  for (size_t i = 0; i < text.size(); ++characters) {
++    uint32_t code_point;
++    size_t step = Utf8SequenceLength(text.substr(i), &code_point);
++    if (!step || code_point < 0x20 || (code_point >= 0x7F && code_point <= 0x9F)) {
++      return UserDisplayNameResult::BadCharacter;
++    }
++    i += step;
++  }
++  if (characters > kUserDisplayNameMaxCharacters) {
++    return UserDisplayNameResult::TooManyCharacters;
++  }
++  return text.size() > kUserDisplayNameMaxBytes ? UserDisplayNameResult::TooManyBytes
++                                                : UserDisplayNameResult::Ok;
++}
++
++inline std::string_view TrimUserDisplayName(std::string_view raw) {
++  while (!raw.empty() && raw.front() == ' ') {
++    raw.remove_prefix(1);
++  }
++  while (!raw.empty() && raw.back() == ' ') {
++    raw.remove_suffix(1);
++  }
++  return raw;
++}
++
++// Trims spaces and accepts a name that passes MeasureUserDisplayName. Anything else is rejected, never
++// truncated; out is only written on success.
++inline bool NormalizeUserDisplayName(std::string_view raw, std::string* out) {
++  raw = TrimUserDisplayName(raw);
++  if (MeasureUserDisplayName(raw) != UserDisplayNameResult::Ok) {
++    return false;
++  }
++  if (out) {
++    out->assign(raw);
++  }
++  return true;
++}
++
++// The text after an edit of a name field: the proposed text when it can still become a valid name, otherwise
++// the previous text. An empty proposal is allowed so the field can be cleared. Padding spaces are allowed
++// while typing and counted, so the stored text never exceeds the limits.
++inline std::string AcceptUserDisplayNameEdit(std::string_view previous, std::string_view proposed,
++                                             UserDisplayNameResult* result = nullptr) {
++  const UserDisplayNameResult measured =
++      proposed.empty() ? UserDisplayNameResult::Ok : MeasureUserDisplayName(proposed);
++  if (result) {
++    *result = measured;
++  }
++  return std::string(measured == UserDisplayNameResult::Ok ? proposed : previous);
++}
++
++}  // namespace xam
++}  // namespace system
++}  // namespace rex
+diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
+index ec8067e..2220d8c 100644
+--- a/include/rex/system/xam/user_profile.h
++++ b/include/rex/system/xam/user_profile.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ #include <unordered_map>
+@@ -218,7 +219,11 @@ class UserProfile {
+   UserProfile();
+ 
+   uint64_t xuid() const { return xuid_; }
+-  std::string name() const { return name_; }
++  // Stable identity of the local profile; the title's content directory is named after it.
++  const std::string& profile_id() const { return name_; }
++  // The name titles see for a local user. Only user 0 always has one; the other users have
++  // one when local_player_<n>_name is set.
++  bool display_name(uint32_t user_index, std::string* name) const;
+   uint32_t signin_state() const { return 1; }
+   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+ 
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index ca3c38e..d2edbf0 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -22,6 +22,7 @@
+ #include <rex/types.h>
+ #include <rex/string.h>
+ #include <rex/system/kernel_state.h>
++#include <rex/system/xam/user_display_name.h>
+ #include <rex/system/xam/user_profile.h>
+ #include <rex/system/xenumerator.h>
+ #include <rex/system/xio.h>
+@@ -99,7 +100,9 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
+   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+   info->xuid = user_profile->xuid();
+   info->signin_state = user_profile->signin_state();
+-  rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
++  std::string name;
++  user_profile->display_name(user_index, &name);
++  rex::string::copy_truncating(info->name, name, rex::countof(info->name));
+   return X_E_SUCCESS;
+ }
+ 
+@@ -108,13 +111,18 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+     return X_E_INVALIDARG;
+   }
+ 
+-  if (user_index) {
++  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
++  std::string user_name;
++  if (!user_profile->display_name(user_index, &user_name)) {
+     return X_E_NO_SUCH_USER;
+   }
+ 
+-  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+-  const auto& user_name = user_profile->name();
+-  rex::string::copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
++  const size_t capacity = std::min(buffer_len, uint32_t(kUserNameBufferSize));
++  if (!capacity) {
++    return X_E_SUCCESS;
++  }
++  user_name.resize(Utf8PrefixLength(user_name, capacity - 1));
++  rex::string::copy_truncating(buffer, user_name, capacity);
+   return X_E_SUCCESS;
+ }
+ 
+@@ -123,16 +131,16 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
+     return X_E_INVALIDARG;
+   }
+ 
+-  if (user_index) {
+-    return X_E_NO_SUCH_USER;
+-  }
+-
+   if (!buffer || buffer_len < 16) {
+     return X_E_INVALIDARG;
+   }
+ 
+   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+-  auto user_name = rex::string::to_utf16(user_profile->name());
++  std::string name;
++  if (!user_profile->display_name(user_index, &name)) {
++    return X_E_NO_SUCH_USER;
++  }
++  auto user_name = rex::string::to_utf16(name);
+   rex::string::copy_and_swap_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
+   return X_E_SUCCESS;
+ }
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index d0c7bfd..1ac25a7 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -444,7 +444,7 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+ 
+ std::filesystem::path ContentManager::ResolveGameUserContentPath() {
+   auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
+-  auto user_name = rex::to_path(kernel_state_->user_profile()->name());
++  auto user_name = rex::to_path(kernel_state_->user_profile()->profile_id());
+ 
+   // Per-game per-profile data location:
+   // content_root/title_id/profile/user_name
+diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
+index a77f5e6..88eaae9 100644
+--- a/src/system/xam/user_profile.cpp
++++ b/src/system/xam/user_profile.cpp
+@@ -13,14 +13,49 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/system/kernel_state.h>
++#include <rex/system/xam/user_display_name.h>
+ #include <rex/system/xam/user_profile.h>
+ 
++REXCVAR_DEFINE_STRING(local_player_1_name, "", "Kernel", "Name shown for local user 1, empty for the default");
++REXCVAR_DEFINE_STRING(local_player_2_name, "", "Kernel", "Name shown for local user 2, empty for none");
++REXCVAR_DEFINE_STRING(local_player_3_name, "", "Kernel", "Name shown for local user 3, empty for none");
++REXCVAR_DEFINE_STRING(local_player_4_name, "", "Kernel", "Name shown for local user 4, empty for none");
++
+ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++bool UserProfile::display_name(uint32_t user_index, std::string* name) const {
++  std::string configured;
++  switch (user_index) {
++    case 0:
++      configured = REXCVAR_GET(local_player_1_name);
++      break;
++    case 1:
++      configured = REXCVAR_GET(local_player_2_name);
++      break;
++    case 2:
++      configured = REXCVAR_GET(local_player_3_name);
++      break;
++    case 3:
++      configured = REXCVAR_GET(local_player_4_name);
++      break;
++    default:
++      return false;
++  }
++  if (NormalizeUserDisplayName(configured, name)) {
++    return true;
++  }
++  if (user_index != 0) {
++    return false;
++  }
++  *name = name_;
++  return true;
++}
++
+ UserProfile::UserProfile() {
+   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
+   // if non-zero, it prevents the user from playing the game.

@@ -1,5 +1,6 @@
 // Launcher settings: defaults from the shipped file, pending edits, saving to the player's settings.toml, reading
-// them back, reset, applying to the running cvars, the window-change rule and the guest video mode pin.
+// them back, reset, applying to the running cvars, the window-change rule, the guest video mode pin and the player
+// names every game shares.
 // Scratch folders only. Run: mua_settings_tests
 
 #include <cstdio>
@@ -482,6 +483,96 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   fs::remove(scratch.player);
 }
 
+void TestPlayerNamesAreShared(const Scratch& scratch) {
+  std::printf("the player names are shared by the three games, saved once in settings.toml\n");
+  const fs::path root = scratch.player.parent_path();
+  const char* const keys[] = {"mua_player_1_name", "mua_player_2_name", "mua_player_3_name", "mua_player_4_name"};
+  const mua::GameId games[] = {mua::GameId::kMua1, mua::GameId::kMua1Gold, mua::GameId::kMua2};
+  const auto names_in_every_game = [&](mua::GameSettings& settings, const std::vector<std::string>& expected) {
+    for (const mua::GameId game : games) {
+      settings.SelectGame(game);
+      for (size_t i = 0; i < 4; ++i) {
+        CHECK(settings.Get(keys[i]) == expected[i]);
+      }
+    }
+  };
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.SelectedGame() == mua::GameId::kMua1);
+  names_in_every_game(settings, {"Player 1", "Player 2", "Player 3", "Player 4"});
+
+  settings.SelectGame(mua::GameId::kMua1);
+  settings.Set("mua_player_1_name", "Saulo");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_player_1_name") == "Saulo");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_player_1_name") == "Saulo");
+  settings.Set("mua_player_2_name", "Jo\xC3\xA3o");
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Get("mua_player_2_name") == "Jo\xC3\xA3o");
+  settings.Set("mua_player_3_name", "Peter");
+  settings.Set("mua_player_4_name", "Logan");
+  CHECK(settings.Save());
+
+  const toml::table shared = toml::parse_file(scratch.player.string());
+  CHECK(shared["mua_player_1_name"].value<std::string>() == "Saulo");
+  CHECK(shared["mua_player_2_name"].value<std::string>() == "Jo\xC3\xA3o");
+  CHECK(shared["mua_player_3_name"].value<std::string>() == "Peter");
+  CHECK(shared["mua_player_4_name"].value<std::string>() == "Logan");
+  for (const char* folder : {"mua1", "mua1_gold", "mua2"}) {
+    const fs::path own = root / folder / "game_settings.toml";
+    if (fs::exists(own)) {
+      const toml::table table = toml::parse_file(own.string());
+      for (const char* key : keys) {
+        CHECK(!table.contains(key));
+      }
+    }
+  }
+
+  rex::cvar::LoadConfig(scratch.player);
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  names_in_every_game(reopened, {"Saulo", "Jo\xC3\xA3o", "Peter", "Logan"});
+
+  reopened.SelectGame(mua::GameId::kMua2);
+  reopened.Set("mua_player_2_name", "Tony");
+  CHECK(reopened.Save());
+  names_in_every_game(reopened, {"Saulo", "Tony", "Peter", "Logan"});
+  CHECK(toml::parse_file(scratch.player.string())["mua_player_2_name"].value<std::string>() == "Tony");
+
+  // A game's own program starts from the saved file alone.
+  rex::cvar::ResetToDefault("mua_player_2_name");
+  mua::LoadPlayerSettings(scratch.player);
+  CHECK(rex::cvar::GetFlagByName("mua_player_2_name") == "Tony");
+  mua::ApplyPlayerNames();
+  if (rex::cvar::GetFlagInfo("local_player_1_name")) {
+    CHECK(rex::cvar::GetFlagByName("local_player_1_name") == "Saulo");
+    CHECK(rex::cvar::GetFlagByName("local_player_2_name") == "Tony");
+    CHECK(rex::cvar::GetFlagByName("local_player_3_name") == "Peter");
+    CHECK(rex::cvar::GetFlagByName("local_player_4_name") == "Logan");
+  } else {
+    std::printf("  local_player_<n>_name: not in this runtime, skipped\n");
+  }
+
+  reopened.Set("mua_player_3_name", std::string(16, 'a'));
+  CHECK(reopened.Save());
+  CHECK(toml::parse_file(scratch.player.string())["mua_player_3_name"].value<std::string>() == "Player 3");
+  CHECK(reopened.Get("mua_player_3_name") == "Player 3");
+
+  reopened.ResetToDefaults();
+  names_in_every_game(reopened, {"Player 1", "Player 2", "Player 3", "Player 4"});
+
+  for (const char* key : keys) {
+    rex::cvar::ResetToDefault(key);
+  }
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  fs::remove_all(root / "mua1");
+  fs::remove_all(root / "mua1_gold");
+  fs::remove_all(root / "mua2");
+  fs::remove(scratch.player);
+}
+
 }  // namespace
 
 int main() {
@@ -501,6 +592,7 @@ int main() {
   TestAspectRatioPerGame(scratch);
   TestAspectRatioVideoMode();
   TestUpscalingPerGame(scratch);
+  TestPlayerNamesAreShared(scratch);
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

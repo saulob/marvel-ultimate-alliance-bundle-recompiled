@@ -28,6 +28,7 @@
 #include "keybinds.h"
 #include "multisampling.h"
 #include "platform.h"
+#include "player_names.h"
 #include "system_info.h"
 #include "upscaling.h"
 
@@ -60,6 +61,14 @@ REXCVAR_DEFINE_STRING(mua_upscale_quality, "native", "Marvel Ultimate Alliance",
                       "With an upscaler, draw below the Render resolution: native, quality, balanced or performance");
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
                       "Graphics card: the index d3d12_adapter takes; anything else uses the first (applied at start)");
+REXCVAR_DEFINE_STRING(mua_player_1_name, "Player 1", "Marvel Ultimate Alliance",
+                      "Name shown for local player 1 in every game; save data is not affected");
+REXCVAR_DEFINE_STRING(mua_player_2_name, "Player 2", "Marvel Ultimate Alliance",
+                      "Name shown for local player 2 in every game; save data is not affected");
+REXCVAR_DEFINE_STRING(mua_player_3_name, "Player 3", "Marvel Ultimate Alliance",
+                      "Name shown for local player 3 in every game; save data is not affected");
+REXCVAR_DEFINE_STRING(mua_player_4_name, "Player 4", "Marvel Ultimate Alliance",
+                      "Name shown for local player 4 in every game; save data is not affected");
 REXCVAR_DEFINE_INT32(mua_launcher_x, 0, "Marvel Ultimate Alliance",
                      "Launcher window left edge, written by the launcher");
 REXCVAR_DEFINE_INT32(mua_launcher_y, 0, "Marvel Ultimate Alliance",
@@ -105,6 +114,9 @@ std::vector<std::string> GameSettingKeys() {
   };
   for (const KeyboardAction& action : kKeyboardActions) {
     keys.emplace_back(action.key);
+  }
+  for (const PlayerNameSetting& player : kPlayerNames) {
+    keys.emplace_back(player.key);
   }
   return keys;
 }
@@ -402,6 +414,12 @@ const std::string* GameSettings::GameValue(std::string_view key) const {
 }
 
 bool GameSettings::Save() {
+  for (const PlayerNameSetting& player : kPlayerNames) {
+    const auto name = pending_.find(player.key);
+    if (name != pending_.end() && !IsValidPlayerName(name->second)) {
+      name->second = player.default_name;
+    }
+  }
   const auto changes = ChangedValues(saved_, pending_);
   std::vector<GameId> changed_games;
   for (const auto& [game, values] : game_pending_) {
@@ -494,6 +512,7 @@ void GameSettings::Apply() const {
     rex::cvar::SetFlagByName(key, value);
   }
   ApplyGameSettings();
+  ApplyPlayerNames();
   ApplyShaderWait();
   ApplyMultisampling();
 }
@@ -540,6 +559,16 @@ bool HostRenderTargetsActive() {
 void ApplyMultisampling() {
   if (const auto native = Native2xMsaaToApply(HostRenderTargetsActive(), REXCVAR_GET(mua_msaa_compatibility))) {
     rex::cvar::SetFlagByName("native_2x_msaa", *native ? "true" : "false");
+  }
+}
+
+void ApplyPlayerNames() {
+  for (const PlayerNameSetting& player : kPlayerNames) {
+    if (!rex::cvar::GetFlagInfo(player.sdk_key)) {
+      REXLOG_WARN("Player names: {} is not in this runtime", player.sdk_key);
+      continue;
+    }
+    rex::cvar::SetFlagByName(player.sdk_key, SdkPlayerName(player, rex::cvar::GetFlagByName(player.key)));
   }
 }
 

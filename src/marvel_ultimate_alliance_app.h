@@ -179,6 +179,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       }
       ActivateGame(selected);
       game_settings_.ApplyGameSettings();
+      mua::ApplyPlayerNames();
       mua::ApplyShaderWait();
       mua::ApplyMultisampling();
       mua::ApplyDynamicPageStreaming(mua::GetRecompiledImage().game);

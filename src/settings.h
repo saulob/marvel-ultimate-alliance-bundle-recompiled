@@ -67,6 +67,11 @@ void ApplyMultisampling();
 // Sets async_shader_wait_ms for the Frame rate choice. Call with ApplyMultisampling.
 void ApplyShaderWait();
 
+// Sets the SDK's local_player_N_name from the shared Player names, so XAM answers with them. Presentation only: the
+// XUID, sign-in state, profile and save folders never follow it. Call once the settings are loaded, before the guest
+// starts.
+void ApplyPlayerNames();
+
 // Turns on gpu_stream_dynamic_pages for the one game it is qualified on, unless the config sets it. Call with
 // ApplyMultisampling.
 void ApplyDynamicPageStreaming(std::optional<GameId> game);
