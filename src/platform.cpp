@@ -16,6 +16,7 @@
 #include "active_log.h"
 #include "crash_report.h"
 #include "dpi.h"
+#include "game_handoff.h"
 #include "path_utf8.h"
 #include "session_log.h"
 
@@ -94,6 +95,8 @@ LRESULT CALLBACK PreShowProc(int code, WPARAM wparam, LPARAM lparam) {
   }
   return CallNextHookEx(g_hook, code, wparam, lparam);
 }
+
+static_assert(kHandoffShowCommand == SW_SHOWNORMAL);
 
 }  // namespace
 
@@ -249,9 +252,13 @@ bool RelaunchExecutable(const std::filesystem::path& executable, std::wstring_vi
   std::wstring command_line = GetCommandLineW();
   command_line += L' ';
   command_line += extra_args;
+  command_line += L' ';
+  command_line += kHandoffArgument;
   const wchar_t* exe = executable.c_str();
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = kHandoffShowCommand;
   PROCESS_INFORMATION process{};
   if (!CreateProcessW(exe, command_line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
                       &process)) {
@@ -259,9 +266,27 @@ bool RelaunchExecutable(const std::filesystem::path& executable, std::wstring_vi
     CancelSessionLogHandoff();
     return false;
   }
+  const bool foreground_granted = AllowSetForegroundWindow(process.dwProcessId) != FALSE;
+  REXLOG_INFO("Launcher handoff: {} pid={} show=normal foreground_granted={}", Utf8(executable.filename()),
+              process.dwProcessId, foreground_granted);
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
   return true;
+}
+
+void CompleteLauncherHandoff(void* native_handle) {
+  const HWND window = static_cast<HWND>(native_handle);
+  if (!window || !IsWindow(window)) {
+    return;
+  }
+  const std::optional<WindowState> state = QueryWindowState(native_handle);
+  const bool restored = state && StartupNeedsRestore(*state);
+  if (restored) {
+    ShowWindow(window, SW_RESTORE);
+  }
+  BringWindowToTop(window);
+  const bool foreground = SetForegroundWindow(window) != FALSE;
+  REXLOG_INFO("Launcher handoff: game window restored={} foreground={}", restored, foreground);
 }
 
 void HideNativeWindow(void* native_handle) {

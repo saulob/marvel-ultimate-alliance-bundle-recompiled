@@ -18,6 +18,7 @@ REXCVAR_DECLARE(bool, mua_launcher);
 REXCVAR_DECLARE(std::string, mua_game);
 REXCVAR_DECLARE(std::string, mua_games_root);
 REXCVAR_DECLARE(bool, mua_skip_launcher);
+REXCVAR_DECLARE(bool, mua_launcher_handoff);
 REXCVAR_DECLARE(bool, mua_skip_intro);
 REXCVAR_DECLARE(int32_t, mua_frame_rate);
 REXCVAR_DECLARE(bool, mua_show_fps);
@@ -106,6 +107,9 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
 // The launcher window placement loaded from the player file.
 WindowPlacement SavedLauncherPlacement();
 bool SavedLauncherFullscreen();
+
+// Whether the launcher's Play started this program. Consumed on the first call, so the handoff happens once.
+bool TakeLauncherHandoff();
 
 // Edits stay pending until Save() or Apply(), so nothing reaches the window while the launcher is open.
 class GameSettings final : public trg::SettingsStore {

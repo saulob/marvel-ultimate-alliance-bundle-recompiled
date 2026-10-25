@@ -73,8 +73,11 @@ void InstallPreShowPlacement(const PreShowPlan& plan, const WindowPlacement& sav
 // Set once the window has been shown; empty when no window was placed.
 std::optional<PreShowResult> TakePreShowResult();
 
-// Starts `executable` with this run's command line plus `extra_args`.
+// Starts `executable` with this run's command line plus `extra_args`, restored and allowed to take the foreground.
 bool RelaunchExecutable(const std::filesystem::path& executable, std::wstring_view extra_args);
+
+// In a program the launcher started: brings its window forward once.
+void CompleteLauncherHandoff(void* native_handle);
 
 // Hides the window at once, so nothing is left on screen while a started program prepares its own.
 void HideNativeWindow(void* native_handle);

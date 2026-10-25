@@ -174,6 +174,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     game_settings_.CaptureLateRegistered();
     const mua::GameState selected = library_->State(game_settings_.SelectedGame());
     if (!IsLauncher()) {
+      if (mua::TakeLauncherHandoff() && window()) {
+        mua::CompleteLauncherHandoff(window()->GetNativeWindowHandle());
+      }
       ActivateGame(selected);
       game_settings_.ApplyGameSettings();
       mua::ApplyShaderWait();

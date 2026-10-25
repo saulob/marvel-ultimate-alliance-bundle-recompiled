@@ -22,6 +22,7 @@
 #include "diagnostics.h"
 #include "frame_limiter.h"
 #include "game_files.h"
+#include "game_handoff.h"
 #include "graphics_adapters.h"
 #include "input_summary.h"
 #include "keybinds.h"
@@ -38,6 +39,8 @@ REXCVAR_DEFINE_STRING(mua_games_root, "", "Marvel Ultimate Alliance",
                       "Folder holding the game folders and disc images (default: game next to the program)");
 REXCVAR_DEFINE_BOOL(mua_skip_launcher, false, "Marvel Ultimate Alliance",
                     "Skip the launcher once (set when the launcher restarts the game)");
+REXCVAR_DEFINE_BOOL(mua_launcher_handoff, false, "Marvel Ultimate Alliance",
+                    "Bring the window forward once (set by the launcher's Play)");
 REXCVAR_DEFINE_BOOL(mua_skip_intro, false, "Marvel Ultimate Alliance", "Start directly at the title screen");
 REXCVAR_DEFINE_INT32(mua_frame_rate, mua::kFrameRateDefault, "Marvel Ultimate Alliance",
                      "Frame rate: 30, 60 (original), 90, 120, 144, 165, 240 or 0 for unlimited");
@@ -317,6 +320,12 @@ WindowPlacement SavedLauncherPlacement() {
 
 bool SavedLauncherFullscreen() {
   return REXCVAR_GET(mua_launcher_fullscreen);
+}
+
+bool TakeLauncherHandoff() {
+  const bool handoff = REXCVAR_GET(mua_launcher_handoff);
+  rex::cvar::ResetToDefault(kLauncherHandoffKey);
+  return handoff;
 }
 
 void GameSettings::Capture(const std::filesystem::path& player_file, const std::filesystem::path& shipped_config) {

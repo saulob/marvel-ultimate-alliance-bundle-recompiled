@@ -15,6 +15,7 @@
 #include <rex/cvar.h>
 
 #include "graphics_adapters.h"
+#include "platform.h"
 #include "settings.h"
 
 namespace fs = std::filesystem;
@@ -205,6 +206,37 @@ void TestDisplayModeStartup(const Scratch& scratch) {
     CHECK(rex::cvar::GetFlagByName("fullscreen") == saved);
     fs::remove(scratch.player);
   }
+}
+
+void TestLauncherHandoffIsOneShot(const Scratch& scratch) {
+  std::printf("the launcher handoff is consumed once and never saved\n");
+  CHECK(!mua::TakeLauncherHandoff());  // a program started directly has no launcher
+  rex::cvar::SetFlagByName("mua_launcher_handoff", "true");
+  CHECK(mua::TakeLauncherHandoff());
+  CHECK(!mua::TakeLauncherHandoff());
+  CHECK(rex::cvar::GetFlagByName("mua_launcher_handoff") == "false");
+
+  fs::create_directories(scratch.player.parent_path());
+  rex::cvar::SetFlagByName("mua_launcher_handoff", "true");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  settings.Set("mua_show_fps", "false");
+  CHECK(settings.Save());
+  std::string text;
+  {
+    std::ifstream saved(scratch.player);
+    text.assign((std::istreambuf_iterator<char>(saved)), std::istreambuf_iterator<char>());
+  }
+  CHECK(text.find("mua_show_fps") != std::string::npos);
+  CHECK(text.find("mua_launcher_handoff") == std::string::npos);
+  rex::cvar::ResetToDefault("mua_launcher_handoff");
+  rex::cvar::ResetToDefault("mua_show_fps");
+  fs::remove(scratch.player);
+}
+
+void TestFailedStartReportsError() {
+  std::printf("a program that cannot start reports it\n");
+  CHECK(!mua::RelaunchExecutable(fs::temp_directory_path() / "mua_missing_program.exe", L"--mua_skip_launcher=true"));
 }
 
 void TestSelectedGamePersists(const Scratch& scratch) {
@@ -461,6 +493,8 @@ int main() {
   TestWindowChange(scratch);
   TestApply();
   TestDisplayModeStartup(scratch);
+  TestLauncherHandoffIsOneShot(scratch);
+  TestFailedStartReportsError();
   TestSelectedGamePersists(scratch);
   TestGameSettings(scratch);
   TestGuestVideoModePin();
