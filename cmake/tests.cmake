@@ -31,6 +31,7 @@ mua_add_test(aspect_ratio_tests headless
 mua_add_test(dpi_tests headless)
 mua_add_test(window_placement_tests headless)
 mua_add_test(launcher_quit_tests headless)
+mua_add_test(launcher_header_art_tests headless)
 mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
 mua_add_test(guest_map_tests headless

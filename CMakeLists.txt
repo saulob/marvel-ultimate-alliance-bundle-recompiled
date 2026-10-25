@@ -257,6 +257,12 @@ add_custom_target(mua_rexglue_check COMMAND ${MUA_REXGLUE_CHECK} VERBATIM)
 
 # One program per game: it carries that game's recompiled module (generated/<key>), its guest hooks and the host code
 # every program shares. The launcher is the program without a module: it only starts the game's own program.
+set(MUA_HEADER_ART_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/launcher")
+set(MUA_HEADER_ART_FILES
+    "${MUA_HEADER_ART_DIR}/header-art-mua1.png"
+    "${MUA_HEADER_ART_DIR}/header-art-mua1-gold.png"
+    "${MUA_HEADER_ART_DIR}/header-art-mua2.png")
+
 function(mua_add_game_executable target module_key icon_key)
     # Resource 1 is the first icon in the executable: Explorer, the taskbar and SDL's window class use it.
     set(_app_rc "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/${target}.rc")
@@ -297,6 +303,12 @@ function(mua_add_game_executable target module_key icon_key)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/config/marvel_ultimate_alliance.toml"
             "$<TARGET_FILE_DIR:${target}>"
+        VERBATIM
+    )
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/assets/launcher"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MUA_HEADER_ART_FILES}
+            "$<TARGET_FILE_DIR:${target}>/assets/launcher"
         VERBATIM
     )
 endfunction()

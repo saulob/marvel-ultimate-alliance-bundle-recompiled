@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 180" preserveAspectRatio="xMidYMid meet">
+  <style>
+    .deep { fill: #3C1010; }
+    .mid { fill: #D73A3A; }
+    .light { fill: #EDA6A6; }
+    .hot { fill: #F9E1E1; }
+    .mid-line { fill: none; stroke: #D73A3A; }
+    .light-line { fill: none; stroke: #EDA6A6; }
+    .hot-line { fill: none; stroke: #F9E1E1; }
+    .deep-stop { stop-color: #3C1010; }
+    .mid-stop { stop-color: #D73A3A; }
+    .light-stop { stop-color: #EDA6A6; }
+    .hot-stop { stop-color: #F9E1E1; }
+  </style>
+
+  <defs>
+    <linearGradient id="fadeIn" x1="640" y1="0" x2="1240" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="fade" maskUnits="userSpaceOnUse" x="0" y="0" width="1600" height="180">
+      <rect width="1600" height="180" fill="url(#fadeIn)"/>
+    </mask>
+    <linearGradient id="slab" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" class="deep-stop"/>
+      <stop offset="1" class="mid-stop"/>
+    </linearGradient>
+    <linearGradient id="slabHot" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" class="mid-stop"/>
+      <stop offset="1" class="hot-stop"/>
+    </linearGradient>
+    <linearGradient id="brush" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" class="mid-stop" stop-opacity=".35"/>
+      <stop offset=".55" class="light-stop" stop-opacity=".9"/>
+      <stop offset="1" class="hot-stop"/>
+    </linearGradient>
+    <linearGradient id="streak" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" class="hot-stop" stop-opacity="0"/>
+      <stop offset="1" class="hot-stop" stop-opacity=".95"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="1400" cy="62" r="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" class="hot-stop" stop-opacity=".55"/>
+      <stop offset=".35" class="mid-stop" stop-opacity=".28"/>
+      <stop offset="1" class="mid-stop" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="5" height="5" patternUnits="userSpaceOnUse">
+      <circle cx="2.5" cy="2.5" r=".9" class="deep" fill-opacity=".55"/>
+    </pattern>
+  </defs>
+
+  <g mask="url(#fade)">
+    <polygon class="deep" points="880,180 1100,0 1600,0 1600,180"/>
+    <polygon fill="url(#glow)" points="880,180 1100,0 1600,0 1600,180"/>
+
+    <polygon fill="url(#brush)" points="790,180 842,168 874,150 912,146 952,118 996,116 1040,84 1084,86 1130,52 1178,48 1226,18 1262,0 1352,0 1262,180"/>
+    <polygon fill="url(#dots)" points="790,180 842,168 874,150 912,146 952,118 996,116 1040,84 1084,86 1130,52 1178,48 1226,18 1262,0 1352,0 1262,180"/>
+
+    <polygon fill="url(#slab)" points="1230,180 1388,46 1600,46 1600,180"/>
+    <polygon fill="url(#dots)" points="1230,180 1388,46 1600,46 1600,180"/>
+    <polygon fill="url(#slab)" points="1100,180 1210,98 1470,98 1360,180"/>
+    <polygon fill="url(#slabHot)" points="1330,0 1412,0 1292,180 1210,180"/>
+    <polygon class="deep" points="1412,0 1480,0 1360,180 1292,180"/>
+    <polygon fill="url(#slab)" points="1480,0 1600,0 1600,120 1540,180 1420,180"/>
+    <polygon fill="url(#dots)" points="1480,0 1600,0 1600,120 1540,180 1420,180"/>
+
+    <path class="hot-line" d="M1000 146L1600 8" stroke-width="2.2" stroke-linecap="round"/>
+    <path class="light-line" d="M1160 172L1600 70" stroke-width="1.4" stroke-linecap="round"/>
+    <path class="hot-line" d="M1290 180L1600 108" stroke-width="1.8" stroke-linecap="round"/>
+    <path class="hot-line" d="M1396 180L1600 133" stroke-width="1" stroke-linecap="round"/>
+    <path d="M700 168L1180 56" fill="none" stroke="url(#streak)" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M760 150L1050 82" fill="none" stroke="url(#streak)" stroke-width="1" stroke-linecap="round"/>
+    <path d="M900 176L1320 78" fill="none" stroke="url(#streak)" stroke-width="1" stroke-linecap="round"/>
+    <path class="hot-line" d="M1210 98L1470 98" stroke-width="1.2"/>
+    <path class="light-line" d="M1330 0L1210 180" stroke-width="1.4"/>
+
+    <polygon class="deep" points="978,126 992,122 998,134 986,142"/>
+    <polygon class="deep" points="1060,100 1070,96 1076,106 1066,110"/>
+    <polygon class="deep" points="1148,64 1158,62 1160,72 1150,74"/>
+    <polygon class="mid" points="1236,112 1248,108 1254,120 1242,124"/>
+    <polygon class="hot" points="1318,70 1326,66 1332,76 1322,80"/>
+    <polygon class="mid" points="1436,38 1446,34 1452,44 1442,48"/>
+    <polygon class="light" points="1506,150 1516,146 1522,156 1512,160"/>
+    <polygon class="hot" points="1566,86 1574,82 1580,92 1570,96"/>
+    <circle cx="1260" cy="146" r="2.4" class="hot"/>
+    <circle cx="1384" cy="152" r="1.8" class="light"/>
+    <circle cx="1470" cy="120" r="2" class="hot"/>
+    <circle cx="1548" cy="30" r="1.6" class="light"/>
+    <circle cx="1112" cy="30" r="1.8" class="mid"/>
+    <circle cx="1024" cy="140" r="1.6" class="light"/>
+  </g>
+</svg>

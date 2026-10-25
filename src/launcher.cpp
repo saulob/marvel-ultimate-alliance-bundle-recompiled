@@ -1,6 +1,7 @@
 #include "launcher.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
@@ -44,6 +45,7 @@
 #include "imgui_gamepad.h"
 #include "keybinds.h"
 #include "launcher_achievements.h"
+#include "launcher_header_art.h"
 #include "launcher_quit.h"
 #include "launcher_shortcuts.h"
 #include "log_filter.h"
@@ -107,12 +109,12 @@ trg::HeaderPainter LauncherHeader(ImTextureID art, float art_aspect) {
   };
 }
 
-std::unique_ptr<rex::ui::ImmediateTexture> LoadHeaderArt(rex::ui::ImmediateDrawer* drawer) {
+std::unique_ptr<rex::ui::ImmediateTexture> LoadHeaderArt(rex::ui::ImmediateDrawer* drawer, GameId game) {
   if (!drawer) {
     return nullptr;
   }
   const std::filesystem::path path =
-      rex::filesystem::GetExecutableFolder() / "assets" / "launcher" / "header-art.png";
+      rex::filesystem::GetExecutableFolder() / "assets" / "launcher" / HeaderArtFile(game);
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     return nullptr;
@@ -269,7 +271,6 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         selected_(settings.SelectedGame()),
         monitors_(ListMonitors()),
         graphics_adapters_(ListGraphicsAdapters()) {
-    header_art_ = LoadHeaderArt(paths_.immediate_drawer);
     if (SelectedAspectRatio() != AspectRatio::k16x9) {
       SelectWindowSizeForAspect();
     }
@@ -551,6 +552,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     install_failure_text_.clear();
     selected_ = game;
     launcher_->config().theme = LauncherTheme(game);
+    launcher_->config().branding.background = MakeHeaderPainter(game);
     settings_.SelectGame(game);
     SelectWindowSizeForAspect();
     achievements_.reset();
@@ -563,6 +565,19 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   std::function<bool()> PageShown(LauncherPage page) {
     return [this, page] { return Selected().game->HasPage(page); };
+  }
+
+  trg::HeaderPainter MakeHeaderPainter(GameId game) {
+    HeaderArt& art = header_art_[size_t(game)];
+    if (!art.tried) {
+      art.tried = true;
+      art.texture = LoadHeaderArt(paths_.immediate_drawer, game);
+    }
+    if (!art.texture) {
+      return LauncherHeader(ImTextureID{}, kHeaderArtAspect);
+    }
+    return LauncherHeader(reinterpret_cast<ImTextureID>(art.texture.get()),
+                          float(art.texture->width) / float(art.texture->height));
   }
 
   trg::TabStrip MakeTabStrip() {
@@ -590,11 +605,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         {"v" MUA_PORT_VERSION "   \xC2\xB7   ", ""},
         {"BY SAULOB", kAuthorUrl},
     };
-    const float art_aspect =
-        header_art_ ? float(header_art_->width) / float(header_art_->height) : kHeaderArtAspect;
-    c.branding.background = LauncherHeader(header_art_ ? reinterpret_cast<ImTextureID>(header_art_.get())
-                                                       : ImTextureID{},
-                                           art_aspect);
+    c.branding.background = MakeHeaderPainter(selected_);
     c.header_height = kHeaderHeight;
     c.tab_strip = MakeTabStrip();
     c.pages = {
@@ -1093,7 +1104,11 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   std::string host_render_targets_adapter_;
   bool host_render_targets_checked_ = false;
   bool host_render_targets_ = true;
-  std::unique_ptr<rex::ui::ImmediateTexture> header_art_;
+  struct HeaderArt {
+    std::unique_ptr<rex::ui::ImmediateTexture> texture;
+    bool tried = false;
+  };
+  std::array<HeaderArt, 3> header_art_;
   std::unique_ptr<trg::Launcher> launcher_;
   ImGuiGamepad gamepad_;
   bool nav_taken_ = false;
