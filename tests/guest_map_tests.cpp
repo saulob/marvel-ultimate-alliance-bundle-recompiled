@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -33,6 +34,9 @@ namespace gold_d3d {
 }
 namespace mua1_d3d {
 #include "d3d_state_setters_mua1.h"
+}
+namespace mua2_d3d {
+#include "d3d_state_setters_mua2.h"
 }
 
 namespace {
@@ -80,8 +84,8 @@ const MapFile kMaps[] = {
     {"mua2", "guest_map_mua2.h", "MUA_RUNTIME_MUA2", "mua2"},
 };
 
-// Hooks a game's code can lack: because its codegen output or its audio engine does not need them, or (the skip
-// intro functions) because MUA 2 skips its intro through a midasm_hook instead.
+// Hooks a game's code can lack: because its codegen output, its audio engine or its Alchemy build does not need them,
+// or (the skip intro functions) because MUA 2 skips its intro through a midasm_hook instead.
 const std::set<std::string> kOptionalHooks = {
     "MUA_GUEST_INDIRECT_TAIL_CALL", "MUA_GUEST_AUDIO_BARRIER", "MUA_GUEST_RESET_EVENT", "MUA_GUEST_MEMMOVE",
     "MUA_GUEST_INTRO_GATE", "MUA_GUEST_MOVIE_MENU_UPDATE", "MUA_GUEST_OPEN_MENU", "MUA_GUEST_MENU_MANAGER",
@@ -94,22 +98,19 @@ const std::set<std::string> kOptionalHooks = {
     "MUA_GUEST_SIGNIN_PUMP_SET_FLAG_B", "MUA_GUEST_CONSOLE", "MUA_GUEST_CONSOLE_QUEUE", "MUA_GUEST_PAD_MANAGER",
     "MUA_GUEST_PAD_CONNECTED", "MUA_GUEST_SCRIPT_DISPATCH", "MUA_GUEST_MENU_ITEM_CREATE",
     "MUA_GUEST_ITEM_USE", "MUA_GUEST_STRING_DATA", "MUA_GUEST_TEXT_INFLATE", "MUA_GUEST_MENU_SIGNIN",
-    "MUA_GUEST_SET_VERTEX_DECLARATION", "MUA_GUEST_SET_VERTEX_SHADER", "MUA_GUEST_SET_PIXEL_SHADER",
-    "MUA_GUEST_SET_STREAM_SOURCE", "MUA_GUEST_SET_TEXTURE", "MUA_GUEST_SET_VERTEX_SHADER_CONSTANTS",
-    "MUA_GUEST_SET_PIXEL_SHADER_CONSTANTS", "MUA_GUEST_UPLOAD_REGISTERS", "MUA_GUEST_UPLOAD_ALU_CONSTANTS",
-    "MUA_GUEST_UPLOAD_FETCH_CONSTANTS", "MUA_GUEST_WRITE_PACKETS", "MUA_GUEST_RESERVE_COMMANDS",
-    "MUA_GUEST_ADD_REF", "MUA_GUEST_RELEASE", "MUA_GUEST_ASSIGN_REF", "MUA_GUEST_ASSIGN_ADOPTED_REF",
-    "MUA_GUEST_DESTROY_OBJECT", "MUA_GUEST_MATRIX_NEARLY_EQUAL", "MUA_GUEST_AND_MASKS", "MUA_GUEST_INDEX_ALLOWED",
+    "MUA_GUEST_ASSIGN_ADOPTED_REF", "MUA_GUEST_AND_MASKS", "MUA_GUEST_INDEX_ALLOWED",
     "MUA_GUEST_IS_OF_TYPE", "MUA_GUEST_MATRIX_MULTIPLY", "MUA_GUEST_MATRIX_COPY", "MUA_GUEST_RELEASE_STRING",
     "MUA_GUEST_ASSIGN_STRING", "MUA_GUEST_RELEASE_RESOURCE", "MUA_GUEST_APPEND_REF", "MUA_GUEST_FREE_STRING",
-    "MUA_GUEST_STRING_PREPARE", "MUA_GUEST_STRING_INTERN", "MUA_GUEST_DESTROY_RESOURCE", "MUA_GUEST_RESIZE_ARRAY"};
+    "MUA_GUEST_STRING_PREPARE", "MUA_GUEST_STRING_INTERN", "MUA_GUEST_DESTROY_RESOURCE", "MUA_GUEST_RESIZE_ARRAY",
+    "MUA_GUEST_ADD_REF_IF_ANY", "MUA_GUEST_SWAP_REF", "MUA_GUEST_HANDLE_MANAGER", "MUA_GUEST_RELEASE_HANDLE"};
 const std::set<std::string> kOptionalConstants = {
     "kIndirectTailTable",         "kInputUserSlotOffset",     "kMainMenuExitCommand",
     "kMainMenuVtable",            "kMainMenuLiveNameEntry",   "kEmptyString",
-    "kMatrixEpsilon",             "kIsOfTypeMetaSite",        "kAssignStringPrepareSite",
-    "kAssignStringInternSite",    "kAssignStringFreeSite",    "kReleaseResourceParentSite",
-    "kReleaseResourceDestroySite", "kAppendRefResizeSite",    "kImageSize",
-    "kCodeBase",                  "kCodeSize"};
+    "kIsOfTypeMetaSite",          "kAssignStringPrepareSite", "kAssignStringInternSite",
+    "kAssignStringFreeSite",      "kReleaseResourceParentSite", "kReleaseResourceDestroySite",
+    "kAppendRefResizeSite",       "kImageSize",               "kCodeBase",
+    "kCodeSize",                  "kObjectHandleFlag",        "kObjectHandleManager",
+    "kReleaseHandleManagerSite",  "kReleaseHandleSite"};
 
 // sub_8248A0A0 holds the swap for another vblank while the interval in the high half of its argument has not passed
 // since the last flip, or while the scanline has passed the threshold in the low half.
@@ -226,13 +227,24 @@ void TestMapsCarryTheSameHooks() {
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_MEMMOVE) sub_82A65700").size() == 1);
   CHECK(Matches(mua1_map, "#define (MUA_GUEST_SET_VERTEX_DECLARATION) sub_824766D8").size() == 1);
   CHECK(Matches(gold_map, "#define (MUA_GUEST_SET_VERTEX_DECLARATION) sub_8248F378").size() == 1);
-  for (const std::string& text : {gold_map, mua1_map}) {
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_SET_VERTEX_DECLARATION) sub_829C1DB8").size() == 1);
+  for (const std::string& text : {gold_map, mua1_map, mua2_map}) {
     CHECK(Matches(text, "#define (MUA_GUEST_HAS_D3D_STATE_FILTER) 1").size() == 1);
-    CHECK(Matches(text, "#define (MUA_GUEST_HAS_ALCHEMY_HELPERS) 1").size() == 1);
+    CHECK(Matches(text, "#define (MUA_GUEST_HAS_ALCHEMY_CORE) 1").size() == 1);
   }
-  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_D3D_STATE_FILTER) 0").size() == 1);
+  for (const std::string& text : {gold_map, mua1_map}) {
+    CHECK(Matches(text, "#define (MUA_GUEST_HAS_ALCHEMY_HELPERS) 1").size() == 1);
+    CHECK(Matches(text, "#define (MUA_GUEST_HAS_OBJECT_HANDLES) 0").size() == 1);
+    CHECK(Matches(text, "inline constexpr uint32_t (kRefCountMask) = 0x3FFFFF;").size() == 1);
+    CHECK(Matches(text, "inline constexpr bool (kAssignRefReturnsSlot) = false;").size() == 1);
+    CHECK(Matches(text, "#define (MUA_GUEST_(ADD_REF_IF_ANY|SWAP_REF|HANDLE_MANAGER|RELEASE_HANDLE)) ").empty());
+  }
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_ALCHEMY_HELPERS) 0").size() == 1);
-  CHECK(Matches(mua2_map, "#define (MUA_GUEST_(SET_(VERTEX|PIXEL|STREAM|TEXTURE)|UPLOAD|WRITE_PACKETS|RESERVE)\\w*) ")
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_OBJECT_HANDLES) 1").size() == 1);
+  CHECK(Matches(mua2_map, "inline constexpr uint32_t (kRefCountMask) = 0x7FFFF;").size() == 1);
+  CHECK(Matches(mua2_map, "inline constexpr bool (kAssignRefReturnsSlot) = true;").size() == 1);
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_(ASSIGN_ADOPTED_REF|AND_MASKS|INDEX_ALLOWED|IS_OF_TYPE|MATRIX_MULTIPLY|"
+                          "MATRIX_COPY|\\w+_STRING|\\w+_RESOURCE|APPEND_REF|RESIZE_ARRAY|STRING_\\w+)) ")
             .empty());
 
   // Gold Edition carries every hook, constant and feature MUA1 has; only its indirect tail call table is its own.
@@ -295,8 +307,18 @@ void TestOptionalHooksFollowTheirFlags() {
   CHECK(watchdog.find("mua_debug_render_profile, false") != std::string::npos);
   CHECK(ReadSource(kSources / "gpu_producer_counters.cpp").find("mua_debug_gpu_producers, false") != std::string::npos);
   const std::string alchemy = ReadSource(kSources / "alchemy_native.cpp");
-  CHECK(alchemy.find("#if MUA_GUEST_HAS_ALCHEMY_HELPERS") != std::string::npos);
-  CHECK(report.find("#if MUA_GUEST_HAS_ALCHEMY_HELPERS") != std::string::npos);
+  for (const char* flag : {"#if MUA_GUEST_HAS_ALCHEMY_CORE", "#if MUA_GUEST_HAS_ALCHEMY_HELPERS",
+                           "#if MUA_GUEST_HAS_OBJECT_HANDLES"}) {
+    CHECK(alchemy.find(flag) != std::string::npos);
+    CHECK(report.find(flag) != std::string::npos);
+  }
+  // MUA1's own helpers and MUA 2's handle-aware reference helpers sit inside the shared core.
+  const size_t core = alchemy.find("#if MUA_GUEST_HAS_ALCHEMY_CORE");
+  CHECK(core < alchemy.find("REX_HOOK_RAW(MUA_GUEST_ADD_REF)") &&
+        alchemy.find("#if MUA_GUEST_HAS_OBJECT_HANDLES\n\n// r3 object (null allowed).") <
+            alchemy.find("REX_HOOK_RAW(MUA_GUEST_SWAP_REF)") &&
+        alchemy.find("#if MUA_GUEST_HAS_ALCHEMY_HELPERS") < alchemy.find("REX_HOOK_RAW(MUA_GUEST_ASSIGN_ADOPTED_REF)") &&
+        alchemy.rfind("#endif  // MUA_GUEST_HAS_ALCHEMY_CORE") > alchemy.find("REX_HOOK_RAW(MUA_GUEST_APPEND_REF)"));
   const std::filesystem::path root = std::filesystem::path(MUA_SRC_DIR).parent_path();
   for (const char* manifest : {"mua1.manifest.toml", "mua1-gold.manifest.toml", "mua2.manifest.toml"}) {
     const std::string text = ReadSource(root / manifest);
@@ -430,6 +452,12 @@ bool Has(const std::string& text, const std::string& needle) {
 
 /// The device fields a D3D build's setter table header gives.
 struct D3DFields {
+  uint32_t shader_constants;
+  uint32_t fetch_constants;
+  uint32_t vertex_fetch_constants;
+  uint32_t vs_alu_constants;
+  uint32_t ps_alu_constants;
+  uint32_t current_fence;
   uint32_t command_cursor;
   uint32_t command_end;
   uint32_t command_reserve_limit;
@@ -449,7 +477,9 @@ struct D3DFields {
 
 #define MUA_D3D_FIELDS(ns)                                                                                       \
   D3DFields {                                                                                                    \
-    ns::mua::d3d::kCommandCursor, ns::mua::d3d::kCommandEnd, ns::mua::d3d::kCommandReserveLimit,                 \
+    ns::mua::d3d::kShaderConstants, ns::mua::d3d::kFetchConstants, ns::mua::d3d::kVertexFetchConstants,          \
+        ns::mua::d3d::kVsAluConstants, ns::mua::d3d::kPsAluConstants, ns::mua::d3d::kCurrentFence,               \
+        ns::mua::d3d::kCommandCursor, ns::mua::d3d::kCommandEnd, ns::mua::d3d::kCommandReserveLimit,             \
         ns::mua::d3d::kTextureDirty, ns::mua::d3d::kFlags, ns::mua::d3d::kVertexDeclaration,                     \
         ns::mua::d3d::kCommittedStrides, ns::mua::d3d::kStreamSources, ns::mua::d3d::kStreamStrides,             \
         ns::mua::d3d::kTextures, ns::mua::d3d::kPixelShader, ns::mua::d3d::kVertexShader,                        \
@@ -487,6 +517,14 @@ const D3DBuild kD3DBuilds[] = {
      "ctx.r11.u64 = ctx.r11.u64 | 524288;",
      "// or r11,r6,r11",
      {{{"// or r11,r11,r7", "// std r11,0(r3)"}, {"// or r11,r7,r11", "// std r11,8(r3)"}}}},
+    {"mua2",
+     "guest_map_mua2.h",
+     "d3d_state_setters_mua2.h",
+     MUA_D3D_FIELDS(mua2_d3d),
+     "sub_829D9C98",
+     "ctx.r11.u64 = ctx.r11.u64 | 524288;",
+     "// or r9,r8,r6",
+     {{{"// or r11,r11,r7", "// std r11,0(r3)"}, {"// or r11,r7,r11", "// std r11,8(r3)"}}}},
 };
 
 std::string N(uint32_t value) {
@@ -508,6 +546,29 @@ std::string BranchTarget(const std::string& function) {
   return target;
 }
 
+// Whether the body has the guest instruction, where "r?" stands for any general purpose register: the builds
+// allocate registers differently around the same operation.
+bool HasInstruction(const std::string& body, const std::string& instruction) {
+  std::string pattern = "\t// ";
+  for (size_t i = 0; i < instruction.size(); ++i) {
+    if (instruction.compare(i, 2, "r?") == 0) {
+      pattern += R"(r\d+)";
+      ++i;
+      continue;
+    }
+    if (std::string_view(".^$|()[]{}*+?\\").find(instruction[i]) != std::string_view::npos) {
+      pattern += '\\';
+    }
+    pattern += instruction[i];
+  }
+  return std::regex_search(body, std::regex(pattern + "\n"));
+}
+
+// Vector stores, with or without the VMX128 encoding a later compiler chose.
+size_t VectorStores(const std::string& body) {
+  return Count(body, "// stvx ") + Count(body, "// stvx128 ");
+}
+
 // The D3D state filters drop a repeated set only while each setter still does what they compare against: merge its
 // value into one field and mark it dirty, or (shaders and stream sources) refresh the replaced object's fence, store
 // it and apply what the filter checks is already applied. Each build's device fields are the ones its own setters use.
@@ -521,6 +582,7 @@ void CheckD3DBuild(const D3DBuild& build) {
   const std::string map = ReadSource(kSources / build.map);
   const auto hooked = [&](const char* hook) { return GeneratedBody(module, Hooked(map, hook)); };
   const D3DFields& fields = build.fields;
+  const std::regex indexed_store(R"(REX_STORE_U\d+\(ctx\.r(\d+)\.u32 \+ ctx\.r(\d+)\.u32, )");
 
   const std::string declaration = hooked("MUA_GUEST_SET_VERTEX_DECLARATION");
   CHECK(Count(declaration, "REX_STORE_") == 2);
@@ -528,10 +590,11 @@ void CheckD3DBuild(const D3DBuild& build) {
   CHECK(Has(declaration, build.commit_request));
   CHECK(!Has(declaration, "(ctx, base);"));
   const std::string binding = GeneratedBody(module, build.binding);
-  CHECK(Has(binding, "ctx.r11.u64 = REX_LOAD_U32(ctx.r30.u32 + 48);"));
-  CHECK(Has(binding, "REX_STORE_U32(ctx.r30.u32 + 48, ctx.r11.u32);"));
-  CHECK(Has(binding, "ctx.r29.s64 = ctx.r31.s64 + " + N(fields.stream_strides) + ";"));
-  CHECK(Has(binding, "REX_STORE_U64(ctx.r31.u32 + " + N(fields.committed_strides) + ", ctx.r11.u64);"));
+  CHECK(HasInstruction(binding, "lwz r11,48(r?)"));
+  CHECK(HasInstruction(binding, "stw r11,48(r?)"));
+  CHECK(HasInstruction(binding, "addi r29,r?," + N(fields.stream_strides)));
+  CHECK(HasInstruction(binding, "std r11," + N(fields.committed_strides) + "(r?)"));
+  CHECK(HasInstruction(binding, "lwz r?," + N(fields.current_fence) + "(r?)"));
 
   // Every listed render state setter is a leaf whose only stores are its listed fields, the dirty masks and its stack.
   const std::string tables = ReadSource(kSources / build.table);
@@ -552,6 +615,7 @@ void CheckD3DBuild(const D3DBuild& build) {
     const std::string body = GeneratedBody(module, "sub_" + address);
     CHECK(!body.empty());
     CHECK(!Has(body, "\tsub_") && !Has(body, "REX_CALL_INDIRECT") && !std::regex_search(body, assigns_r3));
+    CHECK(!std::regex_search(body, indexed_store));
     size_t dirty_stores = 0;
     for (std::sregex_iterator s(body.begin(), body.end(), store); s != end; ++s) {
       const int size = std::stoi((*s)[1].str()) / 8;
@@ -568,10 +632,16 @@ void CheckD3DBuild(const D3DBuild& build) {
   CHECK(leaves == 76);
 
   // Every listed sampler state setter only stores into the slot's fetch constant (r3 + 24 * slot, with or without
-  // the 1024 shadow offset folded in), the slot's bytes (r3 + slot), the texture dirty mask and its stack.
-  std::set<int> slot_offsets = {0, 4, 8, 12, 16, 20, 1024, 1028, 1032, 1036, 1040, 1044};
+  // the fetch constant offset folded in), the slot's bytes (r3 + slot), the texture dirty mask and its stack. A build
+  // that folds the offset into the slot index (addi r11,r4,48; mulli r11,r11,24) may store the first word indexed.
+  std::set<int> slot_offsets;
+  for (int word = 0; word < 24; word += 4) {
+    slot_offsets.insert(word);
+    slot_offsets.insert(int(fields.fetch_constants) + word);
+  }
   slot_offsets.insert(fields.sampler_bytes.begin(), fields.sampler_bytes.end());
   const int texture_dirty = int(fields.texture_dirty);
+  const std::string fetch_slot = N(fields.fetch_constants / 24);
   const std::regex sampler(R"(X\(([0-9A-F]{8})\))");
   size_t samplers = 0;
   for (std::sregex_iterator it(tables.begin(), tables.end(), sampler), end; it != end; ++it) {
@@ -581,8 +651,14 @@ void CheckD3DBuild(const D3DBuild& build) {
     const std::string body = GeneratedBody(module, "sub_" + address);
     CHECK(!body.empty());
     CHECK(!Has(body, "\tsub_") && !Has(body, "REX_CALL_INDIRECT") && !std::regex_search(body, assigns_r3));
-    CHECK(std::regex_search(body, std::regex(R"(// mulli r\d+,r4,24\n)")));
+    std::smatch fold;
+    const bool folded = std::regex_search(
+        body, fold, std::regex(R"(// addi r(\d+),r4,)" + fetch_slot + R"(\n[\s\S]*?// mulli r\1,r\1,24\n)"));
+    CHECK(std::regex_search(body, std::regex(R"(// mulli r\d+,r4,24\n)")) || folded);
     CHECK(Has(body, "REX_STORE_U64(ctx.r3.u32 + " + N(fields.texture_dirty) + ", "));
+    for (std::sregex_iterator s(body.begin(), body.end(), indexed_store); s != end; ++s) {
+      CHECK(folded && (*s)[1].str() == fold[1].str() && (*s)[2].str() == "3");
+    }
     for (std::sregex_iterator s(body.begin(), body.end(), store); s != end; ++s) {
       const int reg = std::stoi((*s)[2].str());
       const int offset = std::stoi((*s)[3].str());
@@ -596,24 +672,26 @@ void CheckD3DBuild(const D3DBuild& build) {
 
   const std::string texture = hooked("MUA_GUEST_SET_TEXTURE");
   CHECK(Has(texture, "// addi r11,r4," + N(fields.textures / 4) + "\n"));
-  CHECK(Has(texture, "// mulli r11,r4,24"));
-  CHECK(Has(texture, "// addi r11,r11,1024"));
+  CHECK((Has(texture, "// mulli r11,r4,24\n") && Has(texture, "// addi r11,r11," + N(fields.fetch_constants) + "\n")) ||
+        (Has(texture, "// addi r11,r4," + fetch_slot + "\n") && Has(texture, "// mulli r11,r11,24\n")));
   CHECK(Has(texture, build.texture_dirty_merge));
-  CHECK(Has(texture, "// std r11," + N(fields.texture_dirty) + "(r31)"));
-  CHECK(Has(texture, "// lbz r9," + N(fields.sampler_bytes[1]) + "(r8)"));
-  CHECK(Has(texture, "// lbz r8," + N(fields.sampler_bytes[2]) + "(r8)"));
+  CHECK(HasInstruction(texture, "std r?," + N(fields.texture_dirty) + "(r31)"));
+  CHECK(HasInstruction(texture, "lbz r?," + N(fields.sampler_bytes[1]) + "(r?)"));
+  CHECK(HasInstruction(texture, "lbz r?," + N(fields.sampler_bytes[2]) + "(r?)"));
   CHECK(Has(texture, "// stwx r5,r29,r31"));
+  CHECK(Has(texture, "// lwz r11," + N(fields.current_fence) + "(r31)"));
   CHECK(Has(texture, "// stw r11,8(r28)"));
 
-  const std::array<std::pair<const char*, const char*>, 2> constants = {
-      {{"MUA_GUEST_SET_VERTEX_SHADER_CONSTANTS", "// addi r10,r4,112"},
-       {"MUA_GUEST_SET_PIXEL_SHADER_CONSTANTS", "// addi r10,r4,368"}}};
+  const std::array<std::pair<const char*, uint32_t>, 2> constants = {
+      {{"MUA_GUEST_SET_VERTEX_SHADER_CONSTANTS", fields.vs_alu_constants},
+       {"MUA_GUEST_SET_PIXEL_SHADER_CONSTANTS", fields.ps_alu_constants}}};
   for (size_t i = 0; i < constants.size(); ++i) {
     const std::string body = hooked(constants[i].first);
-    CHECK(Has(body, constants[i].second));
+    CHECK(Has(body, "// addi r10,r4," + N(constants[i].second / 16) + "\n"));
+    CHECK(Has(body, "// rlwinm r10,r10,4,0,27\n"));
     CHECK(Has(body, build.constant_dirty[i].first));
     CHECK(Has(body, build.constant_dirty[i].second));
-    CHECK(Count(body, "// stvx ") == 5);
+    CHECK(VectorStores(body) == 5);
     CHECK(!Has(body, "\tsub_"));
   }
 
@@ -623,39 +701,42 @@ void CheckD3DBuild(const D3DBuild& build) {
   const std::string command_end = N(fields.command_end);
   const std::string packets = hooked("MUA_GUEST_WRITE_PACKETS");
   CHECK(Has(packets, "// rlwinm r10,r10,16,0,15"));
-  CHECK(Has(packets, "// lwzu r9,4(r27)"));
+  CHECK(HasInstruction(packets, "lwzu r?,4(r27)"));
   CHECK(Has(packets, "// bl " + reserve + "\n"));
   CHECK(Has(packets, "// lwz r11," + command_end + "(r29)") && Has(packets, "// stw r4," + cursor + "(r29)"));
+  const std::string reserved = hooked("MUA_GUEST_RESERVE_COMMANDS");
+  CHECK(Has(reserved, "// lwz r3," + cursor + "(r31)\n") && Has(reserved, "// blr \n"));
   const std::string registers = hooked("MUA_GUEST_UPLOAD_REGISTERS");
   CHECK(Has(registers, "// addi r29,r6,-4"));
   CHECK(Has(registers, "// add r10,r27,r4"));
   CHECK(Has(registers, "// li r8,1"));
   CHECK(Has(registers, "// lwzu r10,4(r29)"));
   CHECK(Has(registers, "// bl " + write_packets + "\n"));
-  CHECK(Has(registers, "// lwz r4," + cursor + "(r26)") && Has(registers, "// lwz r9," + command_end + "(r26)") &&
+  CHECK(HasInstruction(registers, "lwz r4," + cursor + "(r?)") && Has(registers, "// lwz r9," + command_end + "(r26)") &&
         Has(registers, "// stw r4," + cursor + "(r26)"));
   const std::string alu = hooked("MUA_GUEST_UPLOAD_ALU_CONSTANTS");
-  CHECK(Has(alu, "// lis r25,-32768"));
+  CHECK(HasInstruction(alu, "lis r?,-32768"));
   CHECK(Has(alu, "// clrlwi r11,r4,28"));
   CHECK(Has(alu, "// addi r11,r29,3"));
   CHECK(Has(alu, "// li r8,16"));
-  CHECK(Count(alu, "// stvx ") == 4);
+  CHECK(VectorStores(alu) == 4);
   CHECK(Has(alu, "// bl " + write_packets + "\n"));
-  CHECK(Has(alu, "// lwz r4," + cursor + "(r26)") && Has(alu, "// lwz r9," + command_end + "(r26)") &&
+  CHECK(HasInstruction(alu, "lwz r4," + cursor + "(r?)") && Has(alu, "// lwz r9," + command_end + "(r26)") &&
         Has(alu, "// stw r4," + cursor + "(r26)"));
   const std::string fetch = hooked("MUA_GUEST_UPLOAD_FETCH_CONSTANTS");
-  CHECK(Has(fetch, "// li r10,18432"));
-  CHECK(Has(fetch, "// mulli r9,r11,24"));
+  CHECK(HasInstruction(fetch, "li r?,18432"));
+  CHECK(HasInstruction(fetch, "addi r?,r?," + N(fields.fetch_constants)));
+  CHECK(HasInstruction(fetch, "mulli r?,r?,24"));
   CHECK(Has(fetch, "// addi r11,r29,5"));
   CHECK(Has(fetch, "// clrlwi r11,r4,29"));
-  CHECK(Has(fetch, "// ori r10,r10,20480"));
+  CHECK(HasInstruction(fetch, "ori r?,r?,20480"));
   CHECK(Has(fetch, "// li r11,37"));
   CHECK(Has(fetch, "// rldicr r11,r11,44,19"));
   CHECK(Has(fetch, "// li r8,6"));
   CHECK(Has(fetch, "// bl " + write_packets + "\n") && Has(fetch, "// bl " + reserve + "\n"));
-  CHECK(Has(fetch, "// lwz r4," + cursor + "(r28)") && Has(fetch, "// lwz r8," + command_end + "(r28)") &&
-        Has(fetch, "// lwz r10," + N(fields.command_reserve_limit) + "(r28)") &&
-        Has(fetch, "// stw r4," + cursor + "(r28)"));
+  CHECK(HasInstruction(fetch, "lwz r4," + cursor + "(r?)") && HasInstruction(fetch, "lwz r8," + command_end + "(r?)") &&
+        HasInstruction(fetch, "lwz r?," + N(fields.command_reserve_limit) + "(r?)") &&
+        HasInstruction(fetch, "stw r?," + cursor + "(r?)"));
 
   struct Shader {
     const char* hook;
@@ -671,10 +752,10 @@ void CheckD3DBuild(const D3DBuild& build) {
     CHECK(Has(body, "REX_STORE_U32(ctx.r30.u32 + " + N(shader.slot) + ", ctx.r29.u32);"));
     CHECK(Has(body, shader.header));
     CHECK(Has(body, "ctx.r31.s64 = ctx.r11.s64 + " + N(fields.literal_entries) + ";"));
-    CHECK(Has(body, "ctx.r11.u64 = REX_LOAD_U32(ctx.r11.u32 + " + N(fields.literal_bytes) + ");"));
-    CHECK(Has(body, "ctx.r11.u64 = REX_LOAD_U32(ctx.r30.u32 + 10780);"));
+    CHECK(HasInstruction(body, "lwz r?," + N(fields.literal_bytes) + "(r11)"));
+    CHECK(HasInstruction(body, "lwz r11," + N(fields.current_fence) + "(r?)"));
     CHECK(Has(body, "REX_STORE_U32(ctx.r31.u32 + 8, ctx.r11.u32);"));
-    CHECK(Has(body, "ctx.r28.s64 = ctx.r30.s64 + 1024;"));
+    CHECK(Has(body, "ctx.r28.s64 = ctx.r30.s64 + " + N(fields.shader_constants) + ";"));
     CHECK(Has(body, "ctx.r10.s64 = ctx.r10.s64 + 65536;"));
     CHECK(Has(body, "ctx.r10.s64 = ctx.r10.s64 + -2;"));
     CHECK(Has(body, "ctx.r9.u64 = ctx.r9.u64 | ctx.r7.u64;"));
@@ -686,16 +767,17 @@ void CheckD3DBuild(const D3DBuild& build) {
   CHECK(Has(vertex_shader, "REX_STORE_U8(ctx.r30.u32 + " + N(fields.flags) + ", ctx.r11.u8);"));
 
   const std::string stream = hooked("MUA_GUEST_SET_STREAM_SOURCE");
-  CHECK(Has(stream, "REX_STORE_U32(ctx.r11.u32 + 1652, ctx.r9.u32);"));
-  CHECK(Has(stream, "ctx.r5.s64 = ctx.r11.s64 + 206;"));
-  CHECK(Has(stream, "ctx.r10.s64 = ctx.r6.s64 + 512;"));
-  CHECK(Has(stream, "ctx.r7.u64 = ctx.r10.u32 & 0x1FFFFFFF;"));
+  CHECK(HasInstruction(stream, "stw r?," + N(fields.vertex_fetch_constants + 4) + "(r?)"));
+  CHECK(HasInstruction(stream, "subfic r?,r?,17"));
+  CHECK(HasInstruction(stream, "addi r?,r?," + N(fields.vertex_fetch_constants / 8)));
+  CHECK(HasInstruction(stream, "addi r?,r?,512"));
+  CHECK(HasInstruction(stream, "clrlwi r?,r?,3"));
   CHECK(Has(stream, "ctx.r11.s64 = ctx.r29.s64 + " + N(fields.stream_sources / 4) + ";"));
-  CHECK(Has(stream, "ctx.r11.u64 = REX_LOAD_U32(ctx.r31.u32 + 10780);"));
+  CHECK(Has(stream, "ctx.r11.u64 = REX_LOAD_U32(ctx.r31.u32 + " + N(fields.current_fence) + ");"));
   CHECK(Has(stream, "REX_STORE_U32(ctx.r28.u32 + 8, ctx.r11.u32);"));
-  CHECK(Has(stream, "REX_STORE_U8(ctx.r10.u32 + " + N(fields.stream_strides) + ", ctx.r11.u8);"));
-  CHECK(Has(stream, "ctx.r10.u64 = REX_LOAD_U8(ctx.r10.u32 + " + N(fields.committed_strides) + ");"));
-  CHECK(Has(stream, "// std r11," + N(fields.texture_dirty) + "(r31)"));
+  CHECK(HasInstruction(stream, "stb r?," + N(fields.stream_strides) + "(r?)"));
+  CHECK(HasInstruction(stream, "lbz r?," + N(fields.committed_strides) + "(r?)"));
+  CHECK(HasInstruction(stream, "std r11," + N(fields.texture_dirty) + "(r?)"));
 }
 
 void TestD3DStateSettersMatchFilters() {
@@ -1053,6 +1135,140 @@ void TestGoldHooksMatchMua1() {
 #endif
 }
 
+size_t CountMatches(const std::string& text, const char* pattern) {
+  const std::regex re(pattern);
+  return size_t(std::distance(std::sregex_iterator(text.begin(), text.end(), re), std::sregex_iterator()));
+}
+
+// The guest instructions of a function, joined as "instruction;".
+std::string Instructions(const std::filesystem::path& module, const std::string& function) {
+  std::string text;
+  std::istringstream lines(GeneratedBody(module, function));
+  for (std::string line; std::getline(lines, line);) {
+    if (line.starts_with("\t// ")) {
+      text += line.substr(4) + ";";
+    }
+  }
+  return text;
+}
+
+// MUA 2's later Alchemy build: the reference helpers its native copies replace, the count mask, handle flag, handle
+// manager and handle path calls its release uses, and its matrix compare with the epsilon it loads.
+void TestMua2AlchemyHelpers() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("MUA 2 Alchemy helpers match their native copies\n");
+  const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / "mua2";
+  if (ReadSource(module / "marvel_ultimate_alliance_register.cpp").empty()) {
+    std::printf("  mua2: module not generated, skipped\n");
+    return;
+  }
+  const std::string map = ReadSource(kSources / "guest_map_mua2.h");
+  const auto instructions = [&](const char* hook) { return Instructions(module, Hooked(map, hook)); };
+  CHECK(instructions("MUA_GUEST_ADD_REF") ==
+        std::string("addi r11,r3,4;mfmsr r9;mtmsrd r13,1;lwarx r10,0,r11;addi r10,r10,1;stwcx. r10,0,r11;mtmsrd r9,1;bne "
+                    "0x8228f704;blr ;"));
+  CHECK(instructions("MUA_GUEST_ADD_REF_IF_ANY") ==
+        std::string("cmplwi cr6,r3,0;beqlr cr6;addi r11,r3,4;mfmsr r9;mtmsrd r13,1;lwarx r10,0,r11;addi r10,r10,1;stwcx. "
+                    "r10,0,r11;mtmsrd r9,1;bne 0x8228f734;blr ;"));
+  CHECK(instructions("MUA_GUEST_SWAP_REF") ==
+        std::string("cmplwi cr6,r4,0;beq cr6,0x82291208;addi r11,r4,4;mfmsr r9;mtmsrd r13,1;lwarx r10,0,r11;addi r10,r10,1"
+                    ";stwcx. r10,0,r11;mtmsrd r9,1;bne 0x822911ec;cmplwi cr6,r3,0;beqlr cr6;b 0x8228f638;"));
+  CHECK(instructions("MUA_GUEST_ASSIGN_REF") ==
+        std::string("mflr r12;stw r12,-8(r1);std r30,-24(r1);std r31,-16(r1);stwu r1,-112(r1);mr r31,r3;lwz r3,0(r3);mr r"
+                    "30,r4;cmplwi cr6,r4,0;beq cr6,0x82216430;addi r11,r4,4;mfmsr r9;mtmsrd r13,1;lwarx r10,0,r11;addi r10"
+                    ",r10,1;stwcx. r10,0,r11;mtmsrd r9,1;bne 0x82216414;cmplwi cr6,r3,0;beq cr6,0x8221643c;bl 0x8228f638;s"
+                    "tw r30,0(r31);mr r3,r31;addi r1,r1,112;lwz r12,-8(r1);mtlr r12;ld r30,-24(r1);ld r31,-16(r1);blr ;"));
+  CHECK(instructions("MUA_GUEST_RELEASE") ==
+        std::string("mflr r12;stw r12,-8(r1);std r31,-16(r1);stwu r1,-112(r1);lwz r10,4(r3);mr r31,r3;addi r11,r3,4;rlwinm"
+                    " r10,r10,11,31,31;mfmsr r8;mtmsrd r13,1;lwarx r9,0,r11;addi r9,r9,-1;stwcx. r9,0,r11;mtmsrd r8,1;bne 0"
+                    "x8228f658;addi r7,r9,1;mr r11,r9;clrlwi r11,r7,13;cmplwi cr6,r11,1;bne cr6,0x8228f6a4;mr r3,r31;bl 0x8"
+                    "228f440;addi r1,r1,112;lwz r12,-8(r1);mtlr r12;ld r31,-16(r1);blr ;clrlwi r10,r10,24;cmplwi cr6,r10,0;"
+                    "beq cr6,0x8228f6dc;cmplwi cr6,r11,2;bne cr6,0x8228f6dc;lis r11,-31945;lwz r11,-13324(r11);cmplwi cr6,r"
+                    "11,0;beq cr6,0x8228f6dc;bl 0x82261a00;mr r4,r3;addi r3,r1,80;mr r5,r31;bl 0x82286d78;addi r1,r1,112;lw"
+                    "z r12,-8(r1);mtlr r12;ld r31,-16(r1);blr ;"));
+  // clrlwi r11,r7,13 keeps 19 bits; rlwinm r10,r10,11,31,31 takes bit 21; lis -31945 / lwz -13324 is the manager.
+  CHECK(mua2::mua::guest::kRefCountMask == (uint32_t(1) << 19) - 1);
+  CHECK(mua2::mua::guest::kObjectHandleFlag == uint32_t(1) << 21);
+  CHECK(mua2::mua::guest::kObjectHandleManager == (uint32_t(-31945) << 16) - 13324u);
+  CHECK(Hooked(map, "MUA_GUEST_DESTROY_OBJECT") == "sub_8228F440");
+  const std::string release = GeneratedBody(module, Hooked(map, "MUA_GUEST_RELEASE"));
+  CHECK(Has(release, "ctx.lr = 0x" + Hex(mua2::mua::guest::kReleaseHandleManagerSite) + ";\n\t" +
+                         Hooked(map, "MUA_GUEST_HANDLE_MANAGER") + "(ctx, base);"));
+  CHECK(Has(release, "ctx.lr = 0x" + Hex(mua2::mua::guest::kReleaseHandleSite) + ";\n\t" +
+                         Hooked(map, "MUA_GUEST_RELEASE_HANDLE") + "(ctx, base);"));
+  CHECK(Has(release, "\t" + Hooked(map, "MUA_GUEST_DESTROY_OBJECT") + "(ctx, base);"));
+  const std::string manager = instructions("MUA_GUEST_HANDLE_MANAGER");
+  CHECK(Has(manager, "lis r30,-31945;lwz r3,-13324(r30);cmplwi cr6,r3,0;bne cr6,0x82261af4;"));
+
+  const std::string compare = GeneratedBody(module, Hooked(map, "MUA_GUEST_MATRIX_NEARLY_EQUAL"));
+  CHECK(Count(compare, "// fsubs ") == 16);
+  CHECK(CountMatches(compare, R"(// clrlwi r\d+,r\d+,1\n)") == 16);
+  CHECK(CountMatches(compare, R"(// fcmpu cr6,f\d+,f0\n)") == 16);
+  std::smatch epsilon;
+  CHECK(std::regex_search(compare, epsilon,
+                          std::regex(R"(// lis r11,(-?\d+)\n[\s\S]*?// addi r10,r11,(-?\d+)\n[\s\S]*?// lfs f0,(-?\d+)\(r10\)\n)")));
+  if (!epsilon.empty()) {
+    const uint32_t address = (uint32_t(std::stoi(epsilon[1].str())) << 16) + uint32_t(std::stoi(epsilon[2].str())) +
+                             uint32_t(std::stoi(epsilon[3].str()));
+    CHECK(address == mua2::mua::guest::kMatrixEpsilon);
+  }
+  CHECK(Has(compare, "// clrlwi r3,r11,24\n") && !Has(compare, "\tsub_"));
+  CHECK(Count(compare, "(r3)\n") == 16 && Count(compare, "(r4)\n") == 16);
+#endif
+}
+
+// The function of the module whose generated code has the needle.
+std::string BodyContaining(const std::filesystem::path& module, const std::string& needle) {
+  for (const auto& entry : std::filesystem::directory_iterator(module)) {
+    if (entry.path().extension() != ".cpp") {
+      continue;
+    }
+    const std::string text = ReadSource(entry.path());
+    const size_t at = text.find(needle);
+    if (at == std::string::npos) {
+      continue;
+    }
+    const size_t start = text.rfind("DEFINE_REX_FUNC(", at);
+    const size_t end = text.find("DEFINE_REX_FUNC(", at);
+    return start == std::string::npos ? std::string()
+                                      : text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+  }
+  return {};
+}
+
+// The ring waits gpu_fence_wait blocks: each mapped site returns from the fence poll into the D3D wait that polls the
+// writeback word it blocks on (the ring read pointer at +60, the progress word at +4 of the device's fence block).
+void TestGpuWaitSites() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("GPU wait sites poll their writeback words\n");
+  const std::filesystem::path root = MUA_GENERATED_ROOT;
+  for (const MapFile& map : kMaps) {
+    if (ReadSource(root / map.generated_dir / "marvel_ultimate_alliance_register.cpp").empty()) {
+      continue;
+    }
+    const std::string text = ReadSource(kSources / map.file);
+    const std::set<std::string> fence = Matches(text, R"(kDeviceFenceOffset = (\d+);)");
+    CHECK(fence.size() == 1);
+    if (fence.size() != 1) {
+      continue;
+    }
+    for (const auto& [name, word] : {std::pair{"kRingSpacePollSite", 60}, std::pair{"kRingProgressPollSite", 4}}) {
+      const std::set<std::string> site = Matches(text, (std::string(name) + R"( = 0x([0-9A-F]{8});)").c_str());
+      CHECK(site.size() == 1);
+      if (site.size() != 1) {
+        continue;
+      }
+      const std::string body = BodyContaining(root / map.generated_dir, "ctx.lr = 0x" + *site.begin() + ";\n\t" +
+                                                                            Hooked(text, "MUA_GUEST_FENCE_POLL") +
+                                                                            "(ctx, base);");
+      CHECK(HasInstruction(body, "lwz r?," + *fence.begin() + "(r?)"));
+      CHECK(HasInstruction(body, "lwz r11," + std::to_string(word) + "(r?)"));
+      CHECK(Has(body, "\t" + Hooked(text, "MUA_GUEST_FENCE_BEGIN") + "(ctx, base);"));
+    }
+  }
+#endif
+}
+
 // The lock-free reference count helpers rely on the game never using the recompiler's global interrupt lock for more
 // than one reservation pair: anything else between mtmsrd r13 and the next mtmsrd would need that lock's exclusion.
 void TestGlobalLockSectionsAreSingleAtomics() {
@@ -1061,7 +1277,7 @@ void TestGlobalLockSectionsAreSingleAtomics() {
   const std::set<std::string> allowed = {"lwarx",  "ldarx",  "stwcx.", "stdcx.", "addi",   "add",  "subf",
                                          "or",     "and",    "andc",   "mr",     "li",     "cmpw", "cmplw",
                                          "cmpd",   "cmpwi",  "cmplwi", "bne",    "beq",    "rlwinm", "clrlwi"};
-  for (const char* key : {"mua1", "mua1-gold"}) {
+  for (const char* key : {"mua1", "mua1-gold", "mua2"}) {
     const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / key;
     if (ReadSource(module / "marvel_ultimate_alliance_register.cpp").empty()) {
       std::printf("  %s: module not generated, skipped\n", key);
@@ -1120,6 +1336,8 @@ int main() {
   TestAlchemyModuleConstants();
   TestGoldAlchemyHelpersMatchMua1();
   TestGoldHooksMatchMua1();
+  TestMua2AlchemyHelpers();
+  TestGpuWaitSites();
   TestGlobalLockSectionsAreSingleAtomics();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

@@ -88,6 +88,12 @@ inline int PlayerListRowUser(const char* port_text) {
   return port_text[0] - '1';
 }
 
+// MUA 2 titles the pause menu's Statistics with a signed-in player's name, otherwise formats "Player <port>
+// Statistics" into a string object at r31 + 80 whose text pointer is at +8 and length at +0, over a 64-byte buffer.
+inline constexpr uint32_t kStatsTitleOffset = 80;
+inline constexpr uint32_t kStatsTitleTextOffset = 8;
+inline constexpr uint32_t kStatsTitleCapacity = 64;
+
 inline const char* PlayerNameMessage(PlayerNameResult result) {
   switch (result) {
     case PlayerNameResult::Empty:

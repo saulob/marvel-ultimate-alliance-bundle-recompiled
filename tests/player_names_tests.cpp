@@ -3,6 +3,7 @@
 // folders), and the guest hooks of MUA1, Gold Edition and MUA 2 at their verified addresses.
 // Run: mua_player_names_tests
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -99,12 +100,14 @@ struct GameHooks {
   const char* list_function;  // empty: the game has no Players list
   const char* list_site;
   const char* list_port_writer;
+  const char* stats_function;  // empty: the game has no formatted Statistics title
+  const char* stats_site;
 };
 
 const GameHooks kGames[] = {
-    {"mua1", "guest_map_mua1.h", "821EA3C8", "823FA3E8", "823FA52C", "8233B000"},
-    {"mua1-gold", "guest_map_mua1_gold.h", "821FB9F8", "82410C18", "82410D68", "8234F300"},
-    {"mua2", "guest_map_mua2.h", "8260BA78", "", "", ""},
+    {"mua1", "guest_map_mua1.h", "821EA3C8", "823FA3E8", "823FA52C", "8233B000", "", ""},
+    {"mua1-gold", "guest_map_mua1_gold.h", "821FB9F8", "82410C18", "82410D68", "8234F300", "", ""},
+    {"mua2", "guest_map_mua2.h", "8260BA78", "", "", "", "82919468", "82919550"},
 };
 
 void TestValidator() {
@@ -402,6 +405,14 @@ void TestHooks() {
   CHECK(Has(hooks, "void mua_player_list_name(PPCRegister& stack) {"));
   CHECK(Has(hooks, "mua::PlayerListRowUser(port)"));
   CHECK(Has(hooks, "std::memcpy(base + stack.u32 + mua::kPlayerListRowTextOffset, base + name, kNameSize);"));
+  CHECK(Has(hooks, "#else\n"));
+  CHECK(Has(hooks, "void mua_player_stats_name(PPCRegister& frame, PPCRegister& user) {"));
+  CHECK(Has(hooks, "std::memcpy(base + mua::LoadBE32(base, title + mua::kStatsTitleTextOffset), base + name, kNameSize);"));
+  CHECK(Has(hooks, "mua::StoreBE32(base, title, uint32_t(strnlen("));
+  CHECK(hooks.find("#if !defined(MUA_RUNTIME_MUA2)\n") < hooks.find("void mua_player_list_name(") &&
+        hooks.find("void mua_player_list_name(") < hooks.find("#else\n") &&
+        hooks.find("#else\n") < hooks.find("void mua_player_stats_name("));
+  CHECK(mua::kStatsTitleOffset == 80 && mua::kStatsTitleTextOffset == 8 && mua::kStatsTitleCapacity == 64);
   CHECK(!Has(hooks, "SetFlagByName"));
   CHECK(Has(ReadFile(kRoot / "CMakeLists.txt"), "    src/player_name_hooks.cpp\n"));
 
@@ -411,6 +422,7 @@ void TestHooks() {
       hooked += Count(ReadFile(entry.path()), "REX_HOOK_RAW(MUA_GUEST_PLAYER_NUMBER_NAME)");
       if (entry.path().filename() != "player_name_hooks.cpp") {
         CHECK(!Has(ReadFile(entry.path()), "mua_player_list_name"));
+        CHECK(!Has(ReadFile(entry.path()), "mua_player_stats_name"));
       }
     }
   }
@@ -446,11 +458,22 @@ void TestGuestAddresses() {
 
     const auto midasm = MidasmHooks(game.key);
     size_t list_hooks = 0;
+    size_t stats_hooks = 0;
     for (const auto& [address, names] : midasm) {
       CHECK(names.size() == 1);
       for (const std::string& name : names) {
         list_hooks += name == "mua_player_list_name";
+        stats_hooks += name == "mua_player_stats_name";
       }
+    }
+    if (*game.stats_site) {
+      CHECK(stats_hooks == 1);
+      const std::string overrides = ReadFile(kRoot / "config" / game.key / "overrides.toml");
+      CHECK(Has(overrides, std::string("address = 0x") + game.stats_site +
+                               "\nname = \"mua_player_stats_name\"\nregisters = [\"r31\", \"r28\"]\n"
+                               "after_instruction = false\n"));
+    } else {
+      CHECK(stats_hooks == 0);
     }
     if (*game.list_site) {
       CHECK(list_hooks == 1);
@@ -529,6 +552,42 @@ void TestGeneratedCode() {
     CHECK(Has(body, "// lwz r") && Has(body, ",8(r") && Has(body, "// bctrl"));
     CHECK(!std::regex_search(body, std::regex(R"(REX_STORE_U\d+\((?!ctx\.r1\.u32 \+ |ea, ))")));
     CHECK(CallsIn(module, number) == 1);
+
+    // The Statistics title: the primary port (vt+164 of the player state, its field +64) is formatted with
+    // "Player %d Statistics" into the 64-byte string object at r31 + 80, whose text pointer (+8) Lua then reads.
+    if (*game.stats_function) {
+      const uint32_t start = uint32_t(std::stoul(game.stats_function, nullptr, 16));
+      const uint32_t site = uint32_t(std::stoul(game.stats_site, nullptr, 16));
+      const std::string stats_body = GeneratedBody(module, std::string("sub_") + game.stats_function);
+      const auto code = Instructions(stats_body, start);
+      CHECK(code.contains(site - 72) && code.contains(site + 12));
+      if (code.contains(site - 72) && code.contains(site + 12)) {
+        CHECK(code.at(site - 64) == "lwz r10,164(r11)");
+        CHECK(code.at(site - 48) == "mr r28,r3");
+        CHECK(code.at(site - 44) == "li r5,64");
+        CHECK(code.at(site - 40) == "addi r3,r31,80");
+        CHECK(code.at(site - 32) == "addi r4,r1,80");
+        CHECK(code.at(site - 24) == "lis r8,-32244");
+        CHECK(code.at(site - 20) == "addi r6,r28,1");
+        CHECK(code.at(site - 16) == "addi r5,r8,22184");
+        CHECK(code.at(site - 8) == "addi r3,r31,80");
+        CHECK(code.at(site - 4) == "bl 0x822cbba0");
+        CHECK(code.at(site) == "lis r7,-31952");
+        CHECK(code.at(site + 12) == "lwz r28,88(r31)");
+      }
+      CHECK(Has(stats_body, "ctx.lr = 0x" + std::string(game.stats_site) + ";"));
+      std::string branch_target = std::string("0x") + game.stats_site + "\n";
+      for (char& c : branch_target) {
+        c = char(std::tolower(static_cast<unsigned char>(c)));
+      }
+      CHECK(!Has(stats_body, branch_target));
+      CHECK(Count(stats_body, "mua_player_stats_name(ctx.r31, ctx.r28);") <= 1);
+      CHECK(CallsIn(module, std::string("sub_") + game.stats_function) == 0);
+      const std::string string_object = GeneratedBody(module, "sub_822CB560");
+      CHECK(Has(string_object, "// stw r5,4(r3)\n") && Has(string_object, "// stw r4,8(r3)\n") &&
+            Has(string_object, "// stw r11,0(r3)\n"));
+      CHECK(Has(GeneratedBody(module, "sub_8244D958"), "// lwz r3,64(r3)\n"));
+    }
 
     if (!*game.list_function) {
       bool list_hook = false;

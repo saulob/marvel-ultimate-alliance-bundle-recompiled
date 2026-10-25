@@ -215,7 +215,8 @@ void TestCurrentReferencePatches() {
   const std::string mua2 = ReadFile(std::string(MUA_SRC_DIR) + "/guest_map_mua2.h");
   CHECK(Has(mua2, "#define MUA_GUEST_FENCE_BEGIN sub_829BB820"));
   CHECK(Has(mua2, "#define MUA_GUEST_FENCE_POLL sub_829BB918"));
-  CHECK(Has(mua2, "kRingSpacePollSite = 0;") && Has(mua2, "kRingProgressPollSite = 0;"));
+  CHECK(Has(mua2, "kRingSpacePollSite = 0x829C2604;"));
+  CHECK(Has(mua2, "kRingProgressPollSite = 0x829C2560;"));
   CHECK(Has(mua2, "kFencePollSite = 0x829C2CD8;"));
   CHECK(Has(mua2, "kDeviceFenceOffset = 10896;"));
   CHECK(Has(mua2, "kDeviceFlagsOffset = 10941;"));
@@ -539,10 +540,9 @@ void TestDrawFastPathPatches() {
   const std::string streamed = ReadFile(dir + "0134-gpu-streamed-dynamic-pages.windows.patch");
   CHECK(Has(streamed, "YesterMester/TheSimpsonsGameRecomp"));
   CHECK(Has(streamed, "+REXCVAR_DEFINE_BOOL(gpu_stream_dynamic_pages, false"));
-  // Only Marvel Ultimate Alliance and its Gold Edition turn it on, and not over a configured value.
+  // Every game runtime turns it on, the launcher does not, and never over a configured value.
   const std::string settings = ReadFile(std::string(MUA_SRC_DIR) + "/settings.cpp");
-  CHECK(Has(settings, "if ((game == GameId::kMua1 || game == GameId::kMua1Gold) && info->source == "
-                      "rex::cvar::Source::kDefault) {"));
+  CHECK(Has(settings, "if (game && info->source == rex::cvar::Source::kDefault) {"));
   CHECK(Has(settings, "rex::cvar::SetFlagByName(kKey, \"true\");"));
   CHECK(Count(settings, "SetFlagByName(kKey") == 1);
   const std::string app = ReadFile(std::string(MUA_SRC_DIR) + "/marvel_ultimate_alliance_app.h");

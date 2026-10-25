@@ -72,8 +72,7 @@ void ApplyShaderWait();
 // starts.
 void ApplyPlayerNames();
 
-// Turns on gpu_stream_dynamic_pages for the one game it is qualified on, unless the config sets it. Call with
-// ApplyMultisampling.
+// Turns on gpu_stream_dynamic_pages for a game runtime, unless the config sets it. Call with ApplyMultisampling.
 void ApplyDynamicPageStreaming(std::optional<GameId> game);
 
 // Sets present_effect for the game's Upscaling choice. Call before the presenter is created (OnPreSetup).

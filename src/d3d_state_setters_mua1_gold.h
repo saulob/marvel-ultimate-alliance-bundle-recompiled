@@ -3,12 +3,18 @@
 #include <array>
 #include <cstdint>
 
-// Gold Edition's D3D device fields that differ from MUA1's earlier D3D build, and its render state and sampler state
-// setters, in the order of MUA1's tables (both games' D3D state tables list them in the same order with the same
-// defaults). guest_map_tests checks them against the generated code.
+// Gold Edition's D3D device fields that differ between D3D builds, and its render state and sampler state setters, in
+// the order of MUA1's tables (both games' D3D state tables list them in the same order with the same defaults).
+// guest_map_tests checks them against the generated code.
 
 namespace mua::d3d {
 
+inline constexpr uint32_t kShaderConstants = 1024;
+inline constexpr uint32_t kFetchConstants = 1024;
+inline constexpr uint32_t kVertexFetchConstants = 1648;
+inline constexpr uint32_t kVsAluConstants = 1792;
+inline constexpr uint32_t kPsAluConstants = 5888;
+inline constexpr uint32_t kCurrentFence = 10780;
 inline constexpr uint32_t kCommandCursor = 48;
 inline constexpr uint32_t kCommandEnd = 52;
 inline constexpr uint32_t kCommandReserveLimit = 56;

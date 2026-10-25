@@ -39,7 +39,6 @@ double NowSeconds() {
 
 }  // namespace
 
-#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)
 namespace {
 
 #if defined(MUA_RUNTIME_MUA1)
@@ -74,18 +73,13 @@ void NoteWorldUpdateTime(std::chrono::steady_clock::duration elapsed) {
 }
 
 }  // namespace
-#endif
 
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE));
 REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
   const uint32_t world = ctx.r3.u32;
-#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)
   const auto update_start = std::chrono::steady_clock::now();
   MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
   NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);
-#else
-  MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
-#endif
   if (g_reports >= kMaxReports) {
     return;
   }

@@ -244,7 +244,7 @@ void TestWiring() {
   CHECK(!Has(limiter, "interpolat"));
   CHECK(!Has(limiter, "vsync"));
 
-  // MUA1 and Gold Edition time World::Update and publish it with the limiter and guest fence waits; MUA1 also logs it
+  // Every game times World::Update and publishes it with the limiter and guest fence waits; MUA1 also logs it
   // (DEBUG_SAULO).
   CHECK(Has(pacing, "const auto update_start = std::chrono::steady_clock::now();"));
   CHECK(Has(pacing, "NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);"));
@@ -254,10 +254,13 @@ void TestWiring() {
   const std::string fence = ReadSource("gpu_fence_wait.cpp");
   CHECK(Has(fence, "mua::AddGuestFrameTime(mua::GuestFrameTime::kFenceWait"));
   const std::string counters = ReadSource("guest_frame_counters.h");
-  CHECK(Has(counters, "#if (defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)) && defined(_WIN32)"));
-  const size_t timed = pacing.find("#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)",
-                                   pacing.find("REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE)"));
-  CHECK(timed != std::string::npos && pacing.find("const auto update_start", timed) == pacing.find('\n', timed) + 3);
+  CHECK(Has(counters, "#if defined(_WIN32)\n#define MUA_GUEST_FRAME_COUNTERS 1"));
+  CHECK(!Has(counters, "MUA_RUNTIME_"));
+  const size_t hook = pacing.find("REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE)");
+  const size_t timed = pacing.find("const auto update_start", hook);
+  CHECK(hook != std::string::npos && timed != std::string::npos &&
+        pacing.substr(hook, timed - hook).find("#if") == std::string::npos);
+  CHECK(pacing.find("#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)") == std::string::npos);
   CHECK(Has(counters, "rex::perf::IncrementCounter(CounterId::kGuestUpdates, 1);"));
   const std::string watchdog = ReadSource("hang_watchdog.cpp");
   CHECK(Has(watchdog, "std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();"));

@@ -16,7 +16,7 @@
 
 #include "guest_map.h"
 
-#if MUA_GUEST_HAS_ALCHEMY_HELPERS
+#if MUA_GUEST_HAS_ALCHEMY_CORE
 
 REXCVAR_DEFINE_BOOL(mua_lockfree_refcount, true, "Marvel Ultimate Alliance",
                     "Update Alchemy reference counts without the recompiler's global interrupt lock")
@@ -24,19 +24,16 @@ REXCVAR_DEFINE_BOOL(mua_lockfree_refcount, true, "Marvel Ultimate Alliance",
 REXCVAR_DEFINE_BOOL(mua_native_alchemy_helpers, true, "Marvel Ultimate Alliance",
                     "Run small Alchemy matrix compare, mask and index helpers natively")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
-REXCVAR_DEFINE_BOOL(mua_native_alchemy_matrix_and_type, false, "Marvel Ultimate Alliance",
-                    "Run the Alchemy matrix multiply, matrix copy and type check natively")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-REXCVAR_DEFINE_BOOL(mua_lockfree_string_and_resource_refs, false, "Marvel Ultimate Alliance",
-                    "Update Alchemy string, D3D resource and object list reference counts without the global lock")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REX_EXTERN(MUA_GUEST_DESTROY_OBJECT);
+#if MUA_GUEST_HAS_OBJECT_HANDLES
+REX_EXTERN(MUA_GUEST_HANDLE_MANAGER);
+REX_EXTERN(MUA_GUEST_RELEASE_HANDLE);
+#endif
 
 namespace {
 
 constexpr uint32_t kRefCountOffset = 4;
-constexpr uint32_t kRefCountMask = 0x3FFFFF;
 
 uint32_t Load32(uint8_t* base, uint32_t address) {
   uint32_t value = 0;
@@ -64,10 +61,54 @@ uint32_t AddToRefCount(uint8_t* base, uint32_t object, int32_t delta) {
   return std::byteswap(updated);
 }
 
+// The frame and link register the replaced guest function would have had while it calls out.
+class GuestFrame {
+ public:
+  GuestFrame(PPCContext& ctx, uint8_t* base, uint32_t size) : ctx_(ctx), caller_sp_(ctx.r1.u32), caller_lr_(ctx.lr) {
+    Store32(base, caller_sp_ - size, caller_sp_);
+    ctx.r1.u32 = caller_sp_ - size;
+  }
+  ~GuestFrame() {
+    ctx_.r1.u32 = caller_sp_;
+    ctx_.lr = caller_lr_;
+  }
+  GuestFrame(const GuestFrame&) = delete;
+  GuestFrame& operator=(const GuestFrame&) = delete;
+
+ private:
+  PPCContext& ctx_;
+  uint32_t caller_sp_;
+  uint64_t caller_lr_;
+};
+
+#if MUA_GUEST_HAS_OBJECT_HANDLES
+// Only the weak handle's own reference is left: the handle manager drops the handle, under its lock, into a result
+// the release then ignores.
+void ReleaseObjectHandle(PPCContext& ctx, uint8_t* base, uint32_t object) {
+  GuestFrame frame(ctx, base, 112);
+  ctx.lr = mua::guest::kReleaseHandleManagerSite;
+  MUA_GUEST_HANDLE_MANAGER(ctx, base);
+  ctx.r4.u64 = ctx.r3.u64;
+  ctx.r3.u64 = ctx.r1.u32 + 80;
+  ctx.r5.u64 = object;
+  ctx.lr = mua::guest::kReleaseHandleSite;
+  MUA_GUEST_RELEASE_HANDLE(ctx, base);
+}
+#endif
+
 // Drops one reference and destroys the object when none is left; false when the object was destroyed (the guest
 // call then owns r3).
 bool Release(PPCContext& ctx, uint8_t* base, uint32_t object) {
-  if (AddToRefCount(base, object, -1) & kRefCountMask) {
+#if MUA_GUEST_HAS_OBJECT_HANDLES
+  const bool has_handle = Load32(base, object + kRefCountOffset) & mua::guest::kObjectHandleFlag;
+#endif
+  const uint32_t remaining = AddToRefCount(base, object, -1) & mua::guest::kRefCountMask;
+  if (remaining) {
+#if MUA_GUEST_HAS_OBJECT_HANDLES
+    if (remaining == 1 && has_handle && Load32(base, mua::guest::kObjectHandleManager)) {
+      ReleaseObjectHandle(ctx, base, object);
+    }
+#endif
     return true;
   }
   ctx.r3.u64 = object;
@@ -118,16 +159,11 @@ REX_HOOK_RAW(MUA_GUEST_ASSIGN_REF) {
     MUA_GUEST_ORIGINAL(MUA_GUEST_ASSIGN_REF)(ctx, base);
     return;
   }
+  const uint32_t slot = ctx.r3.u32;
   AssignReference(ctx, base, true);
-}
-
-REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_ASSIGN_ADOPTED_REF));
-REX_HOOK_RAW(MUA_GUEST_ASSIGN_ADOPTED_REF) {
-  if (!REXCVAR_GET(mua_lockfree_refcount)) {
-    MUA_GUEST_ORIGINAL(MUA_GUEST_ASSIGN_ADOPTED_REF)(ctx, base);
-    return;
+  if constexpr (mua::guest::kAssignRefReturnsSlot) {
+    ctx.r3.u64 = slot;
   }
-  AssignReference(ctx, base, false);
 }
 
 // r3 matrix a, r4 matrix b: 1 when every |b - a| is below the game's epsilon, computed in single precision with
@@ -151,6 +187,55 @@ REX_HOOK_RAW(MUA_GUEST_MATRIX_NEARLY_EQUAL) {
     }
   }
   ctx.r3.u64 = equal;
+}
+
+#if MUA_GUEST_HAS_OBJECT_HANDLES
+
+// r3 object (null allowed).
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_ADD_REF_IF_ANY));
+REX_HOOK_RAW(MUA_GUEST_ADD_REF_IF_ANY) {
+  if (!REXCVAR_GET(mua_lockfree_refcount)) {
+    MUA_GUEST_ORIGINAL(MUA_GUEST_ADD_REF_IF_ANY)(ctx, base);
+    return;
+  }
+  if (ctx.r3.u32) {
+    AddToRefCount(base, ctx.r3.u32, 1);
+  }
+}
+
+// r3 old object, r4 new object (both null allowed): references the new one, then releases the old one.
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_SWAP_REF));
+REX_HOOK_RAW(MUA_GUEST_SWAP_REF) {
+  if (!REXCVAR_GET(mua_lockfree_refcount)) {
+    MUA_GUEST_ORIGINAL(MUA_GUEST_SWAP_REF)(ctx, base);
+    return;
+  }
+  if (ctx.r4.u32) {
+    AddToRefCount(base, ctx.r4.u32, 1);
+  }
+  if (ctx.r3.u32) {
+    Release(ctx, base, ctx.r3.u32);
+  }
+}
+
+#endif  // MUA_GUEST_HAS_OBJECT_HANDLES
+
+#if MUA_GUEST_HAS_ALCHEMY_HELPERS
+
+REXCVAR_DEFINE_BOOL(mua_native_alchemy_matrix_and_type, false, "Marvel Ultimate Alliance",
+                    "Run the Alchemy matrix multiply, matrix copy and type check natively")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(mua_lockfree_string_and_resource_refs, false, "Marvel Ultimate Alliance",
+                    "Update Alchemy string, D3D resource and object list reference counts without the global lock")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_ASSIGN_ADOPTED_REF));
+REX_HOOK_RAW(MUA_GUEST_ASSIGN_ADOPTED_REF) {
+  if (!REXCVAR_GET(mua_lockfree_refcount)) {
+    MUA_GUEST_ORIGINAL(MUA_GUEST_ASSIGN_ADOPTED_REF)(ctx, base);
+    return;
+  }
+  AssignReference(ctx, base, false);
 }
 
 // r3 destination, r4 source: ANDs seven groups of three words in place, in the guest's load and store order.
@@ -229,26 +314,6 @@ void CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t target) {
   }
   function(ctx, base);
 }
-
-// The frame and link register the replaced guest function would have had while it calls out.
-class GuestFrame {
- public:
-  GuestFrame(PPCContext& ctx, uint8_t* base, uint32_t size) : ctx_(ctx), caller_sp_(ctx.r1.u32), caller_lr_(ctx.lr) {
-    Store32(base, caller_sp_ - size, caller_sp_);
-    ctx.r1.u32 = caller_sp_ - size;
-  }
-  ~GuestFrame() {
-    ctx_.r1.u32 = caller_sp_;
-    ctx_.lr = caller_lr_;
-  }
-  GuestFrame(const GuestFrame&) = delete;
-  GuestFrame& operator=(const GuestFrame&) = delete;
-
- private:
-  PPCContext& ctx_;
-  uint32_t caller_sp_;
-  uint64_t caller_lr_;
-};
 
 double LoadSingle(uint8_t* base, uint32_t address) {
   return double(LoadFloat(base, address));
@@ -457,3 +522,5 @@ REX_HOOK_RAW(MUA_GUEST_APPEND_REF) {
 }
 
 #endif  // MUA_GUEST_HAS_ALCHEMY_HELPERS
+
+#endif  // MUA_GUEST_HAS_ALCHEMY_CORE

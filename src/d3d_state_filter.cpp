@@ -68,18 +68,12 @@ REX_EXTERN(MUA_GUEST_RESERVE_COMMANDS);
 
 namespace {
 
-// The D3D device and resource layout both D3D builds share; d3d_state_setters.h has the rest.
+// The D3D device and resource layout all D3D builds share; d3d_state_setters.h has the rest.
 constexpr uint32_t kVsConstantDirty = 0;
 constexpr uint32_t kPsConstantDirty = 8;
 constexpr uint32_t kStateDirty = 16;
 constexpr uint32_t kStateDirty2 = 24;
 constexpr uint32_t kStateDirty3 = 32;
-constexpr uint32_t kShaderConstants = 1024;
-constexpr uint32_t kFetchConstants = 1024;
-constexpr uint32_t kVertexFetchConstants = 1648;
-constexpr uint32_t kVsAluConstants = 1792;
-constexpr uint32_t kPsAluConstants = 5888;
-constexpr uint32_t kCurrentFence = 10780;
 constexpr uint32_t kSamplerCount = 26;
 constexpr uint32_t kTextureCount = 32;
 constexpr uint32_t kStreamCount = 16;

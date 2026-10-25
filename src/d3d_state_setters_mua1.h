@@ -3,12 +3,18 @@
 #include <array>
 #include <cstdint>
 
-// MUA1's D3D device fields that differ in Gold Edition's later D3D build, its render state setters whose only effects
-// are the listed device fields and the dirty masks, and the sampler state setters that only change one slot's fetch
-// constant and per-slot bytes. guest_map_tests checks them against the generated code.
+// MUA1's D3D device fields that differ in later D3D builds, its render state setters whose only effects are the listed
+// device fields and the dirty masks, and the sampler state setters that only change one slot's fetch constant and
+// per-slot bytes. guest_map_tests checks them against the generated code.
 
 namespace mua::d3d {
 
+inline constexpr uint32_t kShaderConstants = 1024;
+inline constexpr uint32_t kFetchConstants = 1024;
+inline constexpr uint32_t kVertexFetchConstants = 1648;
+inline constexpr uint32_t kVsAluConstants = 1792;
+inline constexpr uint32_t kPsAluConstants = 5888;
+inline constexpr uint32_t kCurrentFence = 10780;
 inline constexpr uint32_t kCommandCursor = 40;
 inline constexpr uint32_t kCommandEnd = 44;
 inline constexpr uint32_t kCommandReserveLimit = 48;

@@ -70,3 +70,12 @@ address = 0x82272074
 name = "mua_upscale_device_back_buffer"
 registers = ["r7", "r8"]
 after_instruction = false
+
+# Gives the pause menu Statistics title of a primary player that is not signed in its user's name in sub_82919468
+# (Lua getCategoryList), right after "Player %d Statistics" is formatted; r31 holds the title string's frame and r28 the
+# player's port.
+[[midasm_hook]]
+address = 0x82919550
+name = "mua_player_stats_name"
+registers = ["r31", "r28"]
+after_instruction = false

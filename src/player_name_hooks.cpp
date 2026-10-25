@@ -9,6 +9,7 @@
 
 #include "guest_map.h"
 #include "player_names.h"
+#include "save_diagnostics.h"
 
 namespace {
 
@@ -75,6 +76,23 @@ void mua_player_list_name(PPCRegister& stack) {
     static_assert(kNameSize <= mua::kPlayerListRowTextSize);
     std::memcpy(base + stack.u32 + mua::kPlayerListRowTextOffset, base + name, kNameSize);
   }
+}
+
+#else
+
+// Codegen midasm hook (overrides.toml) in the pause menu's Statistics categories (Lua getCategoryList), after the
+// title of a primary player that is not signed in is formatted: its user's name replaces it, as a signed-in player's
+// own name does.
+void mua_player_stats_name(PPCRegister& frame, PPCRegister& user) {
+  uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
+  const uint32_t name = PlayerName(base, user.u32);
+  if (!name) {
+    return;
+  }
+  const uint32_t title = frame.u32 + mua::kStatsTitleOffset;
+  static_assert(kNameSize <= mua::kStatsTitleCapacity);
+  std::memcpy(base + mua::LoadBE32(base, title + mua::kStatsTitleTextOffset), base + name, kNameSize);
+  mua::StoreBE32(base, title, uint32_t(strnlen(reinterpret_cast<const char*>(base + name), kNameSize)));
 }
 
 #endif

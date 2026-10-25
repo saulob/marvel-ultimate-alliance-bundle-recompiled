@@ -7,7 +7,9 @@
 #define MUA_GUEST_HAS_RESET_EVENT 1
 #define MUA_GUEST_HAS_MEMMOVE 1
 #define MUA_GUEST_HAS_D3D_STATE_FILTER 1
+#define MUA_GUEST_HAS_ALCHEMY_CORE 1
 #define MUA_GUEST_HAS_ALCHEMY_HELPERS 1
+#define MUA_GUEST_HAS_OBJECT_HANDLES 0
 
 #define MUA_GUEST_PRESENT_CALLBACK sub_82497D00
 #define MUA_GUEST_SWAP sub_82498340
@@ -111,6 +113,8 @@ inline constexpr uint32_t kMainMenuVtable = 0x8203E4CC;
 inline constexpr uint32_t kMainMenuLiveNameEntry = 0x828BE2E0;
 inline constexpr uint32_t kEmptyString = 0x820034D8;
 inline constexpr uint32_t kIndirectTailTable = 0x820C8878;
+inline constexpr uint32_t kRefCountMask = 0x3FFFFF;
+inline constexpr bool kAssignRefReturnsSlot = false;
 inline constexpr uint32_t kMatrixEpsilon = 0x8200B67C;
 inline constexpr uint32_t kIsOfTypeMetaSite = 0x8254173C;
 inline constexpr uint32_t kAssignStringPrepareSite = 0x8238A000;
