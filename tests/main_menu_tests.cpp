@@ -65,6 +65,8 @@ class GuestMenu {
   const uint8_t* base() const { return memory_.data(); }
   menu::GuestAddresses guest() const { return {kVtable, kLiveEntry, empty_, kExitStrings}; }
   uint32_t first() const { return nodes_.front(); }
+  // The next nodes form a new item list, as when the menu file is parsed again; strings and globals stay.
+  void BeginReload() { nodes_.clear(); }
   const std::vector<uint32_t>& nodes() const { return nodes_; }
   void Store(uint32_t address, uint32_t value) { menu::StoreU32(base(), address, value); }
 
@@ -136,8 +138,7 @@ Attributes FocusModel(const std::string& name, const std::string& mode) {
 }
 
 // The item nodes of ui/menus/main.xmlb in file order (identical in MUA1 and Gold).
-GuestMenu BuildMainMenuData() {
-  GuestMenu data;
+void AddMainMenuItems(GuestMenu& data) {
   data.AddNode("item", {{"name", "help"}, {"style", "MED_WHITE"}});
   data.AddNode("item", {{"name", "left_frame"}, {"neverfocus", "true"}, {"type", "MENU_ITEM_MODEL"}});
   data.AddNode("item", FocusModel("option01_focus", "main play diff"));
@@ -161,6 +162,11 @@ GuestMenu BuildMainMenuData() {
                               "default main", 1);
   debug.emplace_back("debug", "true");
   data.AddNode("item", debug);
+}
+
+GuestMenu BuildMainMenuData() {
+  GuestMenu data;
+  AddMainMenuItems(data);
   return data;
 }
 
@@ -343,6 +349,44 @@ void TestRebuildsKeepTheSameMenu() {
   CHECK(Neighbor(data, "option04_text", "down") == "option01_text");
 }
 
+void CheckFinalMenu(GuestMenu& data, const std::vector<Item>& items) {
+  const std::vector<Item> main = MainTextItems(items);
+  CHECK(main.size() == 4);
+  if (main.size() == 4) {
+    CHECK(main[0].name == "option01_text" && main[0].text == "PLAY" && main[0].command == "menusetmode play");
+    CHECK(main[1].name == "option02_text" && main[1].text == "OPTIONS" && main[1].command == "options_main");
+    CHECK(main[2].name == "option03_text" && main[2].text == "REVIEW" &&
+          main[2].command == "set reviewmode -1;openmenu review");
+    CHECK(main[3].name == "option04_text" && main[3].text == "EXIT GAME" && main[3].command == "mua_exit_game");
+  }
+  for (const Item& item : items) {
+    CHECK(item.text.find("ONLINE") == std::string::npos);
+  }
+  CHECK(Text(data, Neighbor(data, "option01_text", "down")) == "OPTIONS");
+  CHECK(Text(data, Neighbor(data, "option02_text", "down")) == "REVIEW");
+  CHECK(Text(data, Neighbor(data, "option03_text", "down")) == "EXIT GAME");
+  CHECK(Neighbor(data, "option04_text", "down") == "option01_text");
+  CHECK(Neighbor(data, "option01_text", "up") == "option04_text");
+}
+
+void TestMenuParsedAgainAfterQuitGame() {
+  std::printf("menu parsed again after quit game\n");
+  GuestMenu data = BuildMainMenuData();
+  const menu::GuestAddresses guest = data.guest();
+  CheckFinalMenu(data, ParseItems(data));
+  CHECK(menu::LoadU32(data.base(), guest.live_name_entry) == guest.empty_string);
+
+  for (int rebuild = 0; rebuild < 3; ++rebuild) {
+    data.BeginReload();
+    AddMainMenuItems(data);
+    CHECK(Text(data, "option02_text") == "PLAY ONLINE");
+    CheckFinalMenu(data, ParseItems(data));
+    CHECK(menu::LoadU32(data.base(), guest.live_name_entry) == guest.empty_string);
+    CHECK(menu::IsExitCommand(data.base(), menu::LoadU32(data.base(), menu::AttributeSlot(
+                                               data.base(), data.Find("option04_text"), "usecmd"))));
+  }
+}
+
 void TestOtherModesAreUntouched() {
   std::printf("play and difficulty entries keep their data\n");
   GuestMenu before = BuildMainMenuData();
@@ -406,6 +450,17 @@ void TestUnexpectedDataIsLeftAlone() {
     const std::vector<Item> items = ParseItems(data);
     CHECK(std::memcmp(before.data(), data.base(), before.size()) == 0);
     CHECK(MainTextItems(items).size() == 4);
+  }
+  {
+    GuestMenu data = BuildMainMenuData();
+    ParseItems(data);
+    data.Store(GuestMenu::kLiveEntry, data.Intern("option09_text"));
+    data.BeginReload();
+    AddMainMenuItems(data);
+    const std::vector<uint8_t> before(data.base(), data.base() + 0x20000);
+    ParseItems(data);
+    CHECK(std::memcmp(before.data(), data.base(), before.size()) == 0);
+    CHECK(Text(data, "option02_text") == "PLAY ONLINE");
   }
   {
     GuestMenu data = BuildMainMenuData();
@@ -642,6 +697,7 @@ int main() {
   TestNoXboxLiveAction();
   TestNavigationWrapsOverFourEntries();
   TestRebuildsKeepTheSameMenu();
+  TestMenuParsedAgainAfterQuitGame();
   TestOtherModesAreUntouched();
   TestLiveHandlersHaveNothingToMatch();
   TestUnexpectedDataIsLeftAlone();

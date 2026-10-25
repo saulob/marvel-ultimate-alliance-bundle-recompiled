@@ -128,6 +128,12 @@ inline void DetachLiveHandlers(uint8_t* base, const GuestAddresses& guest) {
   StoreU32(base, guest.live_name_entry, guest.empty_string);
 }
 
+// The entry stays detached for the whole session, while the menu re-parses fresh item nodes every time it is built.
+inline bool IsLiveEntryExpected(const uint8_t* base, const GuestAddresses& guest) {
+  const uint32_t entry = LoadU32(base, guest.live_name_entry);
+  return entry == guest.empty_string || GuestString(base, entry) == kLiveItem;
+}
+
 // Moves the Options and Review content up into the Xbox Live and Options slots and gives the last slot Exit Game, so
 // the four slots, their focus models and their links stay the game's own. Changes nothing unless every part of the
 // list is where the game's data puts it.
@@ -142,8 +148,7 @@ inline void ReplaceLiveItem(uint8_t* base, uint32_t node, const GuestAddresses& 
     DetachLiveHandlers(base, guest);
     return;
   }
-  if (!IsBlank(AttributeValue(base, live, kCommandAttribute)) ||
-      GuestString(base, LoadU32(base, guest.live_name_entry)) != kLiveItem) {
+  if (!IsBlank(AttributeValue(base, live, kCommandAttribute)) || !IsLiveEntryExpected(base, guest)) {
     return;
   }
 
