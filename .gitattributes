@@ -6,3 +6,4 @@
 patches/rexglue-sdk/* text eol=lf
 patches/trg-launcher/* text eol=lf
 patches/**/*.patch -whitespace
+src/updater/third_party/** -whitespace

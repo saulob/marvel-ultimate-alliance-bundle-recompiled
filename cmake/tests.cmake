@@ -66,6 +66,29 @@ mua_add_test(diagnostics_tests headless SOURCES src/diagnostics.cpp)
 mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12)
 mua_add_test(crash_report_tests headless SOURCES src/crash_report.cpp LIBS shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(user_data_tests headless SOURCES src/user_data.cpp)
+
+set(MUA_UPDATER_TEST_SOURCES
+    src/updater/github_release.cpp
+    src/updater/install_transaction.cpp
+    src/updater/json.cpp
+    src/updater/sha256.cpp
+    src/updater/update_job.cpp
+    src/updater/update_paths.cpp
+    src/updater/update_platform.cpp
+    src/updater/update_zip.cpp
+    src/updater/version.cpp
+    src/updater/third_party/miniz/miniz.c
+)
+mua_add_test(update_tests headless SOURCES ${MUA_UPDATER_TEST_SOURCES} LIBS shell32)
+# TRG's platform and download sources without its ImGui dependency; C++17 like the launcher library.
+add_library(mua_trg_net_support STATIC EXCLUDE_FROM_ALL
+    "${_trg_patched_dir}/src/platform.cpp" "${_trg_patched_dir}/src/download.cpp")
+target_include_directories(mua_trg_net_support PUBLIC "${_trg_patched_dir}/include")
+set_target_properties(mua_trg_net_support PROPERTIES CXX_STANDARD 17)
+target_compile_definitions(mua_trg_net_support PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(mua_trg_net_support PUBLIC shell32 ole32 comdlg32 winmm user32 winhttp)
+mua_add_test(update_controller_tests headless
+    SOURCES ${MUA_UPDATER_TEST_SOURCES} src/updater/update_controller.cpp LIBS mua_trg_net_support ws2_32)
 mua_add_test(game_library_tests headless
     SOURCES src/game_definition.cpp src/game_files.cpp src/game_library.cpp src/game_profile.cpp src/xex_identity.cpp)
 mua_add_test(game_install_tests headless

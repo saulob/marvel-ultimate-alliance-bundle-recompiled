@@ -49,6 +49,27 @@ Render resolution, which costs less GPU time. Off, the default, keeps the plain 
 While playing, F2 shows or hides the frame counter, and the window title shows the frame rate (Gameplay page). F10 and F12
 are reserved and do nothing yet; F9 is unassigned.
 
+## Updates
+
+The launcher checks the latest GitHub release of `saulob/marvel-ultimate-alliance-recompiled` once per start. A newer
+release shows a banner in the header; nothing is installed until UPDATE NOW has downloaded and verified the package and
+RESTART TO UPDATE is pressed. The package is `MarvelUltimateAlliance-v<version>-windows-x64.zip`; its SHA-256 comes from
+the release asset's digest or the matching `.sha256` asset and must match before anything is unpacked. The update
+replaces the whole bundle together (the launcher, the three game programs, `trg-updater.exe`, the runtime and GPU plugin,
+the shipped config, the launcher assets and the licenses) through `trg-updater.exe`, which waits for the launcher to exit,
+backs up what it replaces, rolls back on any failure and restarts `marvel_ultimate_alliance.exe`. `game`, `user_data`,
+`logs`, `cache` and `settings.toml` are never part of a package and are refused if one carries them.
+
+`.\tools\package-release.ps1` builds the Release configuration into `build-release` and writes the package and its
+`.sha256` into `dist`; the updater only finds a package named for a plain version, so a release sets `MUA_VERSION_SUFFIX`
+to an empty string. `.\tools\package-release.ps1 -VerifyOnly <folder>` checks a staged folder.
+
+`.\tools\update-test.ps1` tests an update without publishing anything: it prepares a fake release v9.9.9 and a disposable
+copy of the build under `%TEMP%\mua-update-test`, serves the release on 127.0.0.1 and starts the launcher with
+`MUA_UPDATE_TEST=1` and `MUA_UPDATE_TEST_RELEASE_JSON`. In that mode only, the package may come from `http://127.0.0.1`;
+the SHA-256 check is the normal one. `MUA_UPDATE_TEST_CURRENT_VERSION` and `MUA_UPDATE_TEST_ASSET_SHA256` override the
+installed version and the expected digest. See the script's help for the steps, including a forced rollback.
+
 ## Build (Windows)
 
 ```powershell

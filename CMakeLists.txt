@@ -197,11 +197,24 @@ set(MUA_HOST_SOURCES
     src/settings.cpp
     src/shader_storage_repair.cpp
     src/system_info.cpp
+    src/update_config.cpp
+    src/updater/github_release.cpp
+    src/updater/json.cpp
+    src/updater/sha256.cpp
+    src/updater/third_party/miniz/miniz.c
+    src/updater/update_controller.cpp
+    src/updater/update_job.cpp
+    src/updater/update_paths.cpp
+    src/updater/update_platform.cpp
+    src/updater/update_ui.cpp
+    src/updater/update_zip.cpp
+    src/updater/version.cpp
     src/user_data.cpp
     src/window_host.cpp
     src/xex_identity.cpp
     src/hang_watchdog.cpp
 )
+set_source_files_properties(src/updater/third_party/miniz/miniz.c PROPERTIES COMPILE_OPTIONS "-w")
 
 # The hooks bound to one game's guest addresses; only the programs that carry a recompiled module have them.
 set(MUA_RUNTIME_SOURCES
@@ -312,6 +325,20 @@ function(mua_add_game_executable target module_key icon_key)
         VERBATIM
     )
 endfunction()
+
+# The helper the launcher copies out of the installation and starts: it must run while the installed files are replaced.
+add_executable(trg-updater WIN32
+    src/updater/helper_main.cpp
+    src/updater/install_transaction.cpp
+    src/updater/sha256.cpp
+    src/updater/update_job.cpp
+    src/updater/update_paths.cpp
+    src/updater/update_platform.cpp
+)
+target_include_directories(trg-updater PRIVATE src)
+target_link_libraries(trg-updater PRIVATE shell32)
+set_target_properties(trg-updater PROPERTIES OUTPUT_NAME "trg-updater")
+mua_enable_thinlto(trg-updater)
 
 mua_add_game_executable(marvel_ultimate_alliance "" launcher)
 mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)

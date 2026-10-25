@@ -53,6 +53,8 @@
 #include "player_names.h"
 #include "render_scale.h"
 #include "settings.h"
+#include "update_config.h"
+#include "updater/update_ui.h"
 #include "upscaling.h"
 
 namespace mua {
@@ -275,6 +277,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       SelectWindowSizeForAspect();
     }
     launcher_ = std::make_unique<trg::Launcher>(MakeConfig());
+    updater_ = std::make_unique<trg::update::UpdateController>(MakeUpdateConfig(PortFolder()));
+    updater_->StartCheck();
     if (WindowFullscreen()) {
       restore_when_windowed_ = true;
       RequestFullscreen(false);
@@ -289,6 +293,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       return;
     }
     PollInstall();
+    PollUpdate();
     TrackPlacement();
     if (!nav_taken_) {
       saved_nav_flags_ = io.ConfigFlags & kNavFlags;
@@ -313,6 +318,10 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     ImGui::BeginDisabled(starting_);
     const trg::Result result = launcher_->Frame();
     ImGui::EndDisabled();
+    if (result == trg::Result::kNone && !starting_) {
+      HandleUpdateAction(trg::update::DrawUpdateBanner(updater_->snapshot(), launcher_->config().theme, g_fonts,
+                                                       kHeaderHeight));
+    }
     if (starting_) {
       DrawStartingMessage();
     }
@@ -413,6 +422,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   // Runs inside the last frame; the in-game overlays share this ImGui context.
   void OnClose() override {
+    StopUpdater();
     ImGuiIO& io = GetIO();
     gamepad_.Release(io);
     io.ConfigFlags = (io.ConfigFlags & ~kNavFlags) | saved_nav_flags_;
@@ -422,11 +432,68 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
  private:
   void Finish(std::function<void()> action) {
     done_ = true;
-    SavePlacement(placement_.Flush());
+    StopUpdater();
+    if (!skip_finish_save_) {
+      SavePlacement(placement_.Flush());
+    }
     REXLOG_INFO("Launcher closed");
     Close();
     if (action) {
       action();
+    }
+  }
+
+  void StopUpdater() {
+    if (!updater_) {
+      return;
+    }
+    updater_->Cancel();
+    if (updater_->Busy()) {
+      // A network call must not be joined on the UI thread while the launcher leaves.
+      updater_.release();
+    }
+  }
+
+  void PollUpdate() {
+    if (updater_) {
+      updater_->Poll();
+    }
+  }
+
+  // The same Save the Play button runs, so the player's choices survive the restart.
+  bool SaveBeforeUpdateRestart() {
+    if (install_.running() || starting_) {
+      launcher_->SetStatus("Wait for the current install to finish.", 5.0);
+      return false;
+    }
+    if (!launcher_->Save()) {
+      return false;
+    }
+    SavePlacement(placement_.Flush());
+    return true;
+  }
+
+  void HandleUpdateAction(trg::update::UpdateUiAction action) {
+    switch (action) {
+      case trg::update::UpdateUiAction::kDownload:
+        updater_->StartDownload();
+        break;
+      case trg::update::UpdateUiAction::kRetry:
+        if (!updater_->RetryNeedsInstall()) {
+          updater_->Retry();
+        } else if (SaveBeforeUpdateRestart() && updater_->Retry()) {
+          skip_finish_save_ = true;
+          Finish(cb_.quit);
+        }
+        break;
+      case trg::update::UpdateUiAction::kRestart:
+        if (SaveBeforeUpdateRestart() && updater_->BeginInstall()) {
+          skip_finish_save_ = true;
+          Finish(cb_.quit);
+        }
+        break;
+      case trg::update::UpdateUiAction::kNone:
+        break;
     }
   }
 
@@ -1110,6 +1177,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   };
   std::array<HeaderArt, 3> header_art_;
   std::unique_ptr<trg::Launcher> launcher_;
+  std::unique_ptr<trg::update::UpdateController> updater_;
+  bool skip_finish_save_ = false;
   ImGuiGamepad gamepad_;
   bool nav_taken_ = false;
   bool starting_ = false;
