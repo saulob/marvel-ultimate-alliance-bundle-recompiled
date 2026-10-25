@@ -7,6 +7,8 @@ $RuntimePatchDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'patches\rexglue
 $RuntimeStampName = 'rexruntime-patch.txt'
 $RuntimeFiles = @('bin/rexruntime.dll', 'bin/rexruntimerd.dll', 'lib/rexruntime.lib', 'lib/rexruntimerd.lib',
                   'bin/rexgpu-xenos.dll', 'bin/rexgpu-xenosrd.dll', 'bin/rexglue.exe')
+# Patched ReXGlue sources the game's own build compiles from the SDK folder (ReXApp is part of the executable).
+$RuntimeSourceFiles = @{ 'share/rexglue/rex_app.cpp' = 'src/ui/rex_app.cpp' }
 # How the patched files are built; part of the fingerprint, so changing them invalidates the installed files.
 $RuntimePlatform = 'windows'
 $RuntimeBuildFlags = '-march=x86-64-v2'
@@ -166,7 +168,7 @@ function Write-RuntimeStamp([string]$SdkDir, [string]$InputsSha256) {
     $lines = @("sdk_version=$($baseline.SDK_VERSION)", "sdk_commit=$($baseline.SDK_COMMIT)", "inputs_sha256=$InputsSha256",
                "compiler=$(Get-RuntimeCompiler)", "patch_sha256=$(Get-RuntimePatchSetSha256)",
                "patches=$((Get-RuntimePatchFiles | ForEach-Object { $_.Name }) -join ',')")
-    foreach ($leaf in $RuntimeFiles) { $lines += "$(Get-FileSha256 (Join-Path $SdkDir $leaf))  $leaf" }
+    foreach ($leaf in @($RuntimeFiles) + @($RuntimeSourceFiles.Keys)) { $lines += "$(Get-FileSha256 (Join-Path $SdkDir $leaf))  $leaf" }
     [IO.File]::WriteAllText((Join-Path $SdkDir $RuntimeStampName), (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
     return $lines
 }
@@ -218,6 +220,12 @@ function Test-PatchedRuntime([string]$SdkDir) {
         $hash = Get-FileSha256 $path
         if ($hash -ne $stamp.Hashes[$leaf]) { $problems.Add("$leaf does not match the patched build") }
         if ($hash -eq $official[$leaf]) { $problems.Add("$leaf is the stock ReXGlue release file") }
+    }
+    foreach ($leaf in $RuntimeSourceFiles.Keys) {
+        $path = Join-Path $SdkDir $leaf
+        if (-not $stamp.Hashes.ContainsKey($leaf)) { $problems.Add("$leaf is not in $RuntimeStampName"); continue }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $problems.Add("missing: $leaf"); continue }
+        if ((Get-FileSha256 $path) -ne $stamp.Hashes[$leaf]) { $problems.Add("$leaf does not match the patched source") }
     }
     return $problems
 }

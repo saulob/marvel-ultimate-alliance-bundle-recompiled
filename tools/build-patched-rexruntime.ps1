@@ -99,6 +99,11 @@ if ($Restore) {
             [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $Sdk $leaf), $true)
             if ((Get-FileSha256 (Join-Path $Sdk $leaf)) -ne $Official[$leaf]) { throw "$leaf does not match the stock ReXGlue release" }
         }
+        foreach ($leaf in $RuntimeSourceFiles.Keys) {
+            $entry = $archive.GetEntry("win-amd64/$leaf")
+            if (-not $entry) { throw "$leaf is not in the SDK download" }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $Sdk $leaf), $true)
+        }
     } finally { $archive.Dispose() }
     Remove-Item -LiteralPath $StampPath -ErrorAction SilentlyContinue
     Write-Host 'Stock ReXGlue runtime and GPU plugin restored.'
@@ -181,7 +186,8 @@ function Install-PatchedRuntime {
     # tools\rexglue's headers come from the stock release zip and are never reinstalled otherwise; a patch that adds
     # or changes a public header (e.g. 0115's include/rex/audio/thread_priority.h) needs it mirrored here too.
     $headers = Copy-TreeIfDifferent (Join-Path $src 'include\rex') (Join-Path $Sdk 'include\rex')
-    Write-Host "Installed in tools\rexglue: $($installed.Count) of $($RuntimeFiles.Count) files and $headers headers changed"
+    $sources = @($RuntimeSourceFiles.Keys | Where-Object { Copy-FileIfDifferent (Join-Path $src $RuntimeSourceFiles[$_]) (Join-Path $Sdk $_) })
+    Write-Host "Installed in tools\rexglue: $($installed.Count) of $($RuntimeFiles.Count) files, $headers headers and $($sources.Count) sources changed"
     $lines = Write-RuntimeStamp $Sdk $inputsSha256
     $problems = Test-PatchedRuntime $Sdk
     if ($problems.Count) { throw "The installed runtime and GPU plugin do not match the patches: $($problems -join '; ')" }

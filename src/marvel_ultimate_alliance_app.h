@@ -257,6 +257,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       });
       if (imgui_drawer()) {
         mua::CreateFrameCounter(imgui_drawer());
+        mua::QueueStartupSkipIntroNotice(REXCVAR_GET(mua_skip_intro));
+        mua::CreateSkipIntroNotice(imgui_drawer());
         CreateCursorSync(imgui_drawer());
       }
     }
