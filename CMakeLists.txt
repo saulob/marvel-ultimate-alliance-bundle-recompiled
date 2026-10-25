@@ -169,6 +169,7 @@ get_directory_property(MUA_TRG_VERSION DIRECTORY "${_trg_patched_dir}" DEFINITIO
 
 set(MUA_HOST_SOURCES
     src/main.cpp
+    src/achievements_overlay.cpp
     src/active_log.cpp
     src/crash_report.cpp
     src/diagnostics.cpp
@@ -189,6 +190,7 @@ set(MUA_HOST_SOURCES
     src/launcher_achievements.cpp
     src/log_filter.cpp
     src/log_path.cpp
+    src/modal_dialog.cpp
     src/platform.cpp
     src/recomp_image.cpp
     src/session_log.cpp

@@ -46,6 +46,10 @@ void LoadLauncherFonts(ImFontAtlas* atlas, float density);
 // Re-rasterizes the launcher fonts in place when the window moves to a display with another scale.
 void UpdateLauncherFonts(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer, float density);
 
+// The launcher's body font, null when the UI fonts were not found.
+ImFont* LauncherRegularFont();
+ImFont* LauncherSemiboldFont();
+
 // Game files that are not ready always show the launcher: it is the only way to see why, so neither
 // the player's "off" choice nor the relaunch flag can hide it.
 inline bool LauncherWanted(bool game_ready, bool skip_once, bool shift_held, bool enabled) {

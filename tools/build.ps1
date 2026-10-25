@@ -148,7 +148,7 @@ try {
     # Keep MSYS2's gcc, cmake and ninja out of the build.
     $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -and $_ -notmatch '^C:\\msys64' }) -join ';'
 
-    Write-Host "Marvel Ultimate Alliance Recompiled - $Config build"
+    Write-Host "Marvel Ultimate Alliance Bundle Recompiled - $Config build"
     # VsDevCmd calls vswhere.exe by bare name; cmd does not resolve it from the current folder.
     $env:PATH = "$env:PATH;$(Split-Path $Vswhere)"
     $vsEnv = cmd.exe /c "`"$VsDevCmd`" -arch=x64 -host_arch=x64 -no_logo >nul && set"

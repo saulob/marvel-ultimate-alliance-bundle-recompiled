@@ -26,6 +26,7 @@
 
 #include "trg/game_helpers.h"
 
+#include "achievements_overlay.h"
 #include "active_log.h"
 #include "aspect_ratio.h"
 #include "diagnostics.h"
@@ -42,6 +43,7 @@
 #include "launcher.h"
 #include "log_filter.h"
 #include "log_path.h"
+#include "modal_dialog.h"
 #include "platform.h"
 #include "recomp_image.h"
 #include "session_log.h"
@@ -260,6 +262,11 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
         mua::QueueStartupSkipIntroNotice(REXCVAR_GET(mua_skip_intro));
         mua::CreateSkipIntroNotice(imgui_drawer());
         CreateCursorSync(imgui_drawer());
+        if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
+          // Replaces ReXApp's own callback: the modal overlay keeps the game's input until its close press is released.
+          input->SetActiveCallback([this] { return GameInputActive(); });
+        }
+        mua::ModalDialog::AttachEscapeKey(window());
       }
     }
   }
@@ -269,6 +276,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     if (auto* input = runtime() ? runtime()->input_system() : nullptr) {
       input->Shutdown();
     }
+    mua::ModalDialog::DetachEscapeKey();
+    delete achievements_;
     DetachWindowHost();
     REXLOG_INFO("{}", mua::FormatCleanExit(mua::ProcessUptimeText()));
   }
@@ -282,7 +291,35 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     std::_Exit(0);
   }
 
+  // F7 toggles the project's own overlay; ReXApp's stock one is never created.
+  std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override {
+    if (achievements_) {
+      achievements_->RequestClose();
+    } else {
+      OpenAchievements();
+    }
+    return nullptr;
+  }
+
  private:
+  bool GameInputActive() {
+    if (mua::ModalDialog::AnyOpen()) {
+      return false;
+    }
+    // As ReXGlue does for its own overlays: a pointer over an overlay window keeps the click from the game.
+    rex::ui::ImGuiDrawer* drawer = imgui_drawer();
+    return !drawer || !drawer->HasDialogs() || !drawer->GetIO().WantCaptureMouse;
+  }
+
+  void OpenAchievements() {
+    if (achievements_ || mua::ModalDialog::AnyOpen() || !runtime() || !runtime()->kernel_state() || !imgui_drawer() ||
+        !immediate_drawer()) {
+      return;
+    }
+    achievements_ = new mua::AchievementsOverlay(imgui_drawer(), immediate_drawer(), runtime(), &achievements(),
+                                                 [this] { achievements_ = nullptr; });
+  }
+
   static bool IsLauncher() { return !mua::GetRecompiledImage().game; }
 
   static std::string_view ImageKey(const mua::RecompiledImage& image) {
@@ -411,5 +448,6 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   std::filesystem::path explicit_game_root_;
   std::filesystem::path shipped_config_;
   mua::UserDataSelection user_data_;
+  mua::AchievementsOverlay* achievements_ = nullptr;
   bool show_launcher_ = false;
 };

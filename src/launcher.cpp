@@ -1122,6 +1122,14 @@ void UpdateLauncherFonts(rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer*
   g_font_density = density;
 }
 
+ImFont* LauncherRegularFont() {
+  return g_fonts.regular;
+}
+
+ImFont* LauncherSemiboldFont() {
+  return g_fonts.semibold;
+}
+
 bool ShouldShowLauncher(bool game_ready) {
   const bool skip_once = REXCVAR_GET(mua_skip_launcher);
   rex::cvar::ResetToDefault("mua_skip_launcher");

@@ -250,6 +250,14 @@ void AttachWindowHost(rex::ui::Window* window, rex::ui::WindowedAppContext& app_
   UpdateCursor();
 }
 
+void SetCursorOverlayOpen(bool open) {
+  if (!g_active.load(std::memory_order_relaxed)) {
+    return;
+  }
+  g_cursor.SetOverlayOpen(open);
+  UpdateCursor();
+}
+
 mua::WindowSize CurrentDrawableSize(rex::ui::Window* window) {
   if (window == nullptr) {
     return {};

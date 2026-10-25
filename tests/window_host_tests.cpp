@@ -145,6 +145,14 @@ void TestControllerActivityFilter() {
 void TestWindowTitle() {
   std::printf("window title\n");
   const std::string game = "Marvel Ultimate Alliance Gold Edition Recompiled";
+  CHECK(WindowTitleText("Marvel Ultimate Alliance Recompiled", std::string("1280x720"), 89.96) ==
+        "Marvel Ultimate Alliance Recompiled | 1280x720 | FPS: 89.96");
+  const std::string host = ReadSource("window_host.cpp");
+  CHECK(Has(host, "mua::GameWindowTitle(*game) : std::string(kWindowTitle)"));
+  CHECK(Has(host, "ShownRenderResolution(), fps)"));
+  CHECK(Has(ReadSource("marvel_ultimate_alliance_app.h"), "window()->SetTitle(mua::GameWindowTitle(*verified));"));
+  CHECK(!Has(ReadSource("game_definition.cpp"), "Bundle"));
+  CHECK(Has(ReadSource("../tools/build.ps1"), "\"Marvel Ultimate Alliance Bundle Recompiled - $Config build\""));
   const std::optional<std::string> resolution = "3360x1440";
   CHECK(WindowTitleText(game, std::nullopt, std::nullopt) == game);
   CHECK(WindowTitleText(game, resolution, std::nullopt) == game + " | 3360x1440");

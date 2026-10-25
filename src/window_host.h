@@ -26,6 +26,9 @@ void AttachWindowHost(rex::ui::Window* window, rex::ui::WindowedAppContext& app_
                       std::function<bool()> ui_wants_mouse);
 void DetachWindowHost();
 
+// A modal overlay keeps the cursor visible while it is open.
+void SetCursorOverlayOpen(bool open);
+
 // The current native client area in physical pixels: the extent the presenter draws into now, not the
 // last size event cached by the window.
 mua::WindowSize CurrentDrawableSize(rex::ui::Window* window);
