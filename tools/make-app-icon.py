@@ -17,12 +17,13 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ICONS = ROOT / "packaging" / "icons"
 SOURCE_DARK, SOURCE_LIGHT = "rgb(25,144,167)", "rgb(144,224,239)"
-LAUNCHER_PRIMARY = 0xBFC5CC
+LAUNCHER_ACCENT, LAUNCHER_BODY = 0xD4A42C, 0xE2E5E8
 LIGHT_TINT = 0.55
 VARIANTS = {"launcher": None, "mua1": "kMua1", "mua1-gold": "kMua1Gold", "mua2": "kMua2"}
 PNG_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
@@ -56,21 +57,28 @@ def game_primaries():
 
 def variant_colors():
     primaries = game_primaries()
-    return {name: LAUNCHER_PRIMARY if game is None else primaries[game] for name, game in VARIANTS.items()}
+    return {name: (LAUNCHER_ACCENT, LAUNCHER_BODY) if game is None else (primaries[game], tint(primaries[game]))
+            for name, game in VARIANTS.items()}
 
 
 def tint(color):
     channels = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
-    return tuple(round(c + (255 - c) * LIGHT_TINT) for c in channels)
+    r, g, b = (round(c + (255 - c) * LIGHT_TINT) for c in channels)
+    return r << 16 | g << 8 | b
 
 
-def recolor(svg, color):
+def recolor(svg, dark, light):
     text = svg.decode("utf-8")
     if SOURCE_DARK not in text or SOURCE_LIGHT not in text:
         sys.exit("app-icon.svg no longer carries the two source fills")
-    dark = f"#{color:06X}"
-    light = "#{:02X}{:02X}{:02X}".format(*tint(color))
-    return text.replace(SOURCE_DARK, dark).replace(SOURCE_LIGHT, light).encode("utf-8")
+    return text.replace(SOURCE_DARK, f"#{dark:06X}").replace(SOURCE_LIGHT, f"#{light:06X}").encode("utf-8")
+
+
+def finished_png(path):
+    try:
+        return path.read_bytes()[-8:-4] == b"IEND"
+    except OSError:
+        return False
 
 
 def render(browser, svg, size, work):
@@ -83,9 +91,15 @@ def render(browser, svg, size, work):
     out = work / f"{size}.png"
     subprocess.run(
         [browser, "--headless", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1",
-         "--default-background-color=00000000", f"--user-data-dir={work / 'profile'}",
+         "--default-background-color=00000000", f"--user-data-dir={work / f'profile-{size}'}",
          f"--window-size={size},{size}", f"--screenshot={out}", page.as_uri()],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    # Edge can exit before a detached child of its own finishes writing the screenshot.
+    deadline = time.monotonic() + 60
+    while not finished_png(out):
+        if time.monotonic() > deadline:
+            sys.exit(f"{size}px render wrote no PNG")
+        time.sleep(0.1)
     png = out.read_bytes()
     width, height, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", png[16:29])
     if (width, height, depth, color, interlace) != (size, size, 8, 6, 0):
@@ -151,16 +165,16 @@ def main():
     parser.add_argument("--browser", help="Edge or Chrome executable")
     browser = find_browser(parser.parse_args().browser)
     source = (ICONS / "app-icon.svg").read_bytes()
-    for name, color in variant_colors().items():
+    for name, (dark, light) in variant_colors().items():
         out_dir = ICONS / name
         out_dir.mkdir(exist_ok=True)
-        svg = recolor(source, color)
-        with tempfile.TemporaryDirectory() as work:
+        svg = recolor(source, dark, light)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as work:
             pngs = {size: render(browser, svg, size, pathlib.Path(work)) for size in PNG_SIZES}
         for size, png in pngs.items():
             (out_dir / f"app-icon-{size}.png").write_bytes(png)
         (out_dir / "app-icon.ico").write_bytes(build_ico(pngs))
-        print(f"{name}: #{color:06X}, {len(pngs)} PNGs and app-icon.ico ({', '.join(map(str, ICO_SIZES))}) in {out_dir}")
+        print(f"{name}: #{dark:06X}/#{light:06X}, {len(pngs)} PNGs and app-icon.ico ({', '.join(map(str, ICO_SIZES))}) in {out_dir}")
 
 
 if __name__ == "__main__":
