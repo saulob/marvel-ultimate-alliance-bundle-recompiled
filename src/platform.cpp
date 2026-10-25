@@ -198,6 +198,16 @@ void ApplyWindowPlacement(void* native_handle, const WindowPlacement& placement)
   }
 }
 
+void EnsureWindowVisible(void* native_handle) {
+  const std::optional<WindowState> state = QueryWindowState(native_handle);
+  if (!state || !StartupNeedsRestore(*state)) {
+    return;
+  }
+  const HWND window = static_cast<HWND>(native_handle);
+  ShowWindow(window, SW_RESTORE);
+  SetForegroundWindow(window);
+}
+
 void InstallPreShowPlacement(const PreShowPlan& plan, const WindowPlacement& saved) {
   if (g_hook || !plan.Needed()) {
     return;

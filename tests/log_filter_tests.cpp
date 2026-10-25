@@ -765,7 +765,7 @@ void TestWiring() {
   CHECK(Has(app, "void LaunchModule() override"));
   CHECK(Has(app, "mua::LogStartupDiagnostics("));
   CHECK(Has(app, "mua::FormatCleanExit("));
-  CHECK(Has(app, "Restarted in a new window; hard-exiting this process."));
+  CHECK(Has(app, "Started the game's own program; hard-exiting this process."));
   CHECK(Has(launcher, "Launcher closed"));
   CHECK(Has(filter, "Execution complete: clean exit"));
   CHECK(Has(app, "SetFlagFromCommandLine(\"log_file\""));

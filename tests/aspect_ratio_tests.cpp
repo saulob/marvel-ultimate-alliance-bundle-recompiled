@@ -192,7 +192,12 @@ void TestSources() {
   std::printf("setting, launcher and hook wiring\n");
   const std::string settings = ReadText(kSrcDir / "settings.cpp");
   CHECK(Has(settings, "REXCVAR_DEFINE_STRING(mua_aspect_ratio, \"16:9\""));
-  CHECK(Has(settings, "kGameScopedKeys[] = {\"mua_frame_rate\", \"mua_aspect_ratio\","));
+  const size_t scoped_begin = settings.find("kGameScopedKeys[] = {");
+  const size_t scoped_end = settings.find("};", scoped_begin);
+  const std::string scoped = scoped_begin == std::string::npos ? std::string() : settings.substr(scoped_begin, scoped_end - scoped_begin);
+  CHECK(Has(scoped, "\"mua_frame_rate\""));
+  CHECK(Has(scoped, "\"mua_aspect_ratio\""));
+  CHECK(!Has(scoped, "\"mua_graphics_adapter\""));
   CHECK(Has(settings, "void ApplyAspectRatio()"));
   CHECK(Has(settings, "REXLOG_INFO(\"Aspect ratio: {} ({}x{})\""));
 

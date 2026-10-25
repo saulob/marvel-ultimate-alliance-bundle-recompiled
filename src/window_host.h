@@ -5,7 +5,7 @@
 
 #include "aspect_ratio.h"
 
-inline constexpr char kWindowTitle[] = "Marvel Ultimate Alliance Recompiled";
+inline constexpr char kWindowTitle[] = "Marvel Ultimate Alliance Bundle Recompiled";
 
 // The latest one-second sample of the game's swaps; all zero until the first one is measured.
 struct GuestFrameStats {

@@ -50,6 +50,11 @@ inline constexpr int kMinVisibleWidth = 100;
 inline constexpr int kMinVisibleHeight = 50;
 inline constexpr double kPlacementSaveDelaySeconds = 0.5;
 
+// A launcher window is never left minimized at startup; a maximized one stays maximized when restored.
+inline bool StartupNeedsRestore(const WindowState& state) {
+  return state.minimized;
+}
+
 inline bool PlacementIsSet(const WindowPlacement& placement) {
   return placement.normal.width() >= kMinPlacementWidth && placement.normal.height() >= kMinPlacementHeight;
 }

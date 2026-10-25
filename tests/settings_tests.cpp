@@ -7,11 +7,14 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
+#include <vector>
 
 #include <toml++/toml.hpp>
 
 #include <rex/cvar.h>
 
+#include "graphics_adapters.h"
 #include "settings.h"
 
 namespace fs = std::filesystem;
@@ -144,8 +147,33 @@ void TestWindowChange(const Scratch& scratch) {
   settings.Set("window_width", "1920");
   CHECK(settings.WindowChanged());
   settings.Set("window_width", "1280");
-  settings.Set("mua_graphics_adapter", "1");
+  CHECK(!settings.WindowChanged());
+  settings.Set(mua::kTearingSetting, rex::cvar::GetFlagByName(mua::kTearingSetting) == "true" ? "false" : "true");
   CHECK(settings.WindowChanged());
+  settings.Set(mua::kTearingSetting, rex::cvar::GetFlagByName(mua::kTearingSetting));
+  CHECK(!settings.WindowChanged());
+
+  const std::vector<mua::GraphicsAdapter> adapters = mua::ListGraphicsAdapters();
+  if (adapters.empty()) {
+    return;
+  }
+  const std::string first = std::to_string(adapters.front().index);
+  const std::string other = std::to_string(adapters.back().index);
+  for (const std::string& created : {std::string("auto"), std::string(), first}) {
+    rex::cvar::SetFlagByName("mua_graphics_adapter", created);
+    mua::GameSettings gpu;
+    gpu.Capture(scratch.player, scratch.shipped);
+    gpu.MarkWindowCreated();
+    for (const std::string& equivalent :
+         {std::string("auto"), std::string(), std::string("invalid"), std::string("99"), first}) {
+      gpu.Set("mua_graphics_adapter", equivalent);
+      CHECK(!gpu.WindowChanged());
+    }
+    if (adapters.size() > 1) {
+      gpu.Set("mua_graphics_adapter", other);
+      CHECK(gpu.WindowChanged());
+    }
+  }
 }
 
 void TestApply() {
@@ -182,16 +210,30 @@ void TestDisplayModeStartup(const Scratch& scratch) {
 void TestSelectedGamePersists(const Scratch& scratch) {
   std::printf("the saved selected game is the one the next start selects\n");
   rex::cvar::SetFlagByName("mua_game", "mua1-gold");
-  mua::GameSettings settings;
-  settings.Capture(scratch.player, scratch.shipped);
-  settings.SelectGame(mua::GameId::kMua2);
-  CHECK(settings.Save());
-  CHECK(toml::parse_file(scratch.player.string())["mua_game"].value<std::string>() == "mua2");
+  {
+    mua::GameSettings fresh;
+    fresh.Capture(scratch.player, scratch.shipped);
+    CHECK(fresh.SelectedGame() == mua::DefaultGame().id);
+  }
+  struct Choice {
+    mua::GameId id;
+    const char* key;
+  };
+  for (const Choice choice : {Choice{mua::GameId::kMua1, "mua1"}, Choice{mua::GameId::kMua1Gold, "mua1-gold"},
+                              Choice{mua::GameId::kMua2, "mua2"}}) {
+    mua::GameSettings settings;
+    settings.Capture(scratch.player, scratch.shipped);
+    settings.SelectGame(choice.id);
+    CHECK(settings.Save());
+    CHECK(toml::parse_file(scratch.player.string())["mua_game"].value<std::string>() == choice.key);
 
-  rex::cvar::LoadConfig(scratch.player);
-  mua::GameSettings reopened;
-  reopened.Capture(scratch.player, scratch.shipped);
-  CHECK(reopened.SelectedGame() == mua::GameId::kMua2);
+    // A fresh start has not set mua_game itself, so the saved file decides.
+    rex::cvar::ResetToDefault("mua_game");
+    rex::cvar::LoadConfig(scratch.player);
+    mua::GameSettings reopened;
+    reopened.Capture(scratch.player, scratch.shipped);
+    CHECK(reopened.SelectedGame() == choice.id);
+  }
 
   rex::cvar::SetFlagByName("mua_game", "nonsense");
   mua::GameSettings unknown;
@@ -275,6 +317,7 @@ void TestAspectRatioPerGame(const Scratch& scratch) {
   rex::cvar::SetFlagByName("mua_aspect_ratio", "16:9");
   mua::GameSettings settings;
   settings.Capture(scratch.player, scratch.shipped);
+  settings.MarkWindowCreated();
 
   settings.SelectGame(mua::GameId::kMua1);
   CHECK(settings.Get("mua_aspect_ratio") == "16:9");

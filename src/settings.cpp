@@ -56,7 +56,7 @@ REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance
 REXCVAR_DEFINE_STRING(mua_upscale_quality, "native", "Marvel Ultimate Alliance",
                       "With an upscaler, draw below the Render resolution: native, quality, balanced or performance");
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
-                      "Graphics card: auto, or the index d3d12_adapter takes (applied at start)");
+                      "Graphics card: the index d3d12_adapter takes; anything else uses the first (applied at start)");
 REXCVAR_DEFINE_INT32(mua_launcher_x, 0, "Marvel Ultimate Alliance",
                      "Launcher window left edge, written by the launcher");
 REXCVAR_DEFINE_INT32(mua_launcher_y, 0, "Marvel Ultimate Alliance",
@@ -239,12 +239,11 @@ std::string ChoiceLabel(std::initializer_list<std::pair<std::string_view, std::s
 }
 
 std::string SelectedGraphicsCardLabel(const GameSettings& settings) {
-  const std::string setting = settings.Get("mua_graphics_adapter", kGraphicsAdapterAuto);
-  const std::optional<int> index = ParseGraphicsAdapter(setting);
-  if (!index) {
-    return "Automatic";
-  }
   const std::vector<GraphicsAdapter> adapters = ListGraphicsAdapters();
+  const std::optional<int> index = ResolveGraphicsAdapter(settings.Get("mua_graphics_adapter", ""), adapters);
+  if (!index) {
+    return "Unavailable";
+  }
   for (const GraphicsAdapter& adapter : adapters) {
     if (adapter.index != *index) {
       continue;
@@ -254,7 +253,7 @@ std::string SelectedGraphicsCardLabel(const GameSettings& settings) {
     });
     return same_name > 1 ? adapter.name + " (" + std::to_string(adapter.index) + ")" : adapter.name;
   }
-  return "Graphics card " + setting + " (not found)";
+  return "Unavailable";
 }
 
 std::string TextureFilteringName(std::string_view value) {
@@ -560,22 +559,21 @@ void ApplyAspectRatio() {
 
 void ApplyGraphicsAdapter() {
   const std::string setting = REXCVAR_GET(mua_graphics_adapter);
-  if (!ParseGraphicsAdapter(setting)) {
-    REXLOG_INFO("Graphics card: Automatic");
-    return;
-  }
   const std::vector<GraphicsAdapter> adapters = ListGraphicsAdapters();
-  const int index = ResolveGraphicsAdapter(setting, adapters);
-  if (index < 0) {
-    REXLOG_WARN("Graphics card {} is not available, using Automatic", setting);
+  const std::optional<int> index = ResolveGraphicsAdapter(setting, adapters);
+  if (!index) {
+    REXLOG_WARN("No usable Direct3D 12 graphics card found");
     return;
   }
-  rex::cvar::SetFlagByName("d3d12_adapter", std::to_string(index));
-  for (const GraphicsAdapter& adapter : adapters) {
-    if (adapter.index == index) {
-      REXLOG_INFO("Graphics card: {} (adapter {})", adapter.name, index);
-    }
+  const auto chosen = std::find_if(adapters.begin(), adapters.end(),
+                                   [&](const GraphicsAdapter& adapter) { return adapter.index == *index; });
+  if (ParseGraphicsAdapter(setting) != index) {
+    REXLOG_WARN("Graphics card {} is not available, using {} (adapter {})", setting, chosen->name, *index);
+  } else {
+    REXLOG_INFO("Graphics card: {} (adapter {})", chosen->name, *index);
   }
+  rex::cvar::SetFlagByName("d3d12_adapter", std::to_string(*index));
+  rex::cvar::SetFlagByName("mua_graphics_adapter", std::to_string(*index));
 }
 
 void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& display, int monitor,
@@ -709,7 +707,15 @@ bool GameSettings::WindowChanged() const {
   for (const std::string& key : kWindowKeys) {
     const auto created = window_created_.find(key);
     const std::string created_value = created == window_created_.end() ? std::string() : created->second;
-    if (WindowValue(key, Get(key)) != WindowValue(key, created_value)) {
+    const std::string pending_value = Get(key);
+    if (WindowValue(key, pending_value) == WindowValue(key, created_value)) {
+      continue;
+    }
+    if (key != "mua_graphics_adapter") {
+      return true;
+    }
+    const std::vector<GraphicsAdapter> adapters = ListGraphicsAdapters();
+    if (ResolveGraphicsAdapter(pending_value, adapters) != ResolveGraphicsAdapter(created_value, adapters)) {
       return true;
     }
   }

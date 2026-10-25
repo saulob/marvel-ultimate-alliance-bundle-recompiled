@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "window_host.h"
 #include "window_placement.h"
 
 using namespace mua;
@@ -147,6 +148,28 @@ void TestMinimizeAndFullscreen() {
   CHECK(!normal.Flush().has_value());
   normal.Observe(Normal(kScreen), true, 2.0);
   CHECK(!normal.Flush().has_value());
+}
+
+void TestStartupRestore() {
+  std::printf("startup restore\n");
+  CHECK(StartupNeedsRestore(WindowState{{-32000, -32000, -31840, -31972}, false, true}));
+  CHECK(StartupNeedsRestore(WindowState{{-32000, -32000, -31840, -31972}, true, true}));
+  CHECK(!StartupNeedsRestore(Normal(kNormal)));
+  CHECK(!StartupNeedsRestore(WindowState{kScreen, true, false}));
+
+  PlacementTracker tracker(WindowPlacement{kNormal, true});
+  tracker.Observe(WindowState{{-32000, -32000, -31840, -31972}, true, true}, false, 0.0);
+  CHECK(!tracker.Flush().has_value());
+  const std::map<std::string, std::string> values = [] {
+    const SettingValues v = PlacementValues(WindowPlacement{kNormal, true});
+    return std::map<std::string, std::string>(v.begin(), v.end());
+  }();
+  CHECK(values.size() == 5 && values.count("mua_launcher_minimized") == 0);
+}
+
+void TestBundleTitle() {
+  std::printf("bundle title\n");
+  CHECK(std::string(kWindowTitle) == "Marvel Ultimate Alliance Bundle Recompiled");
 }
 
 void TestFirstObservation() {
@@ -324,6 +347,8 @@ int main() {
   TestMinimizeAndFullscreen();
   TestFirstObservation();
   TestFlushOnClose();
+  TestStartupRestore();
+  TestBundleTitle();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

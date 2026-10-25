@@ -57,26 +57,31 @@ void TestValues() {
   CHECK(ParseGraphicsAdapter("12") == 12);
 
   const std::vector<mua::GraphicsAdapter> adapters = {{0, "NVIDIA GeForce RTX 4070"}, {1, "Intel UHD Graphics 730"}};
-  CHECK(mua::ResolveGraphicsAdapter("auto", adapters) == -1);
+  CHECK(mua::ResolveGraphicsAdapter("auto", adapters) == 0);
+  CHECK(mua::ResolveGraphicsAdapter("", adapters) == 0);
+  CHECK(mua::ResolveGraphicsAdapter("Intel", adapters) == 0);
   CHECK(mua::ResolveGraphicsAdapter("0", adapters) == 0);
   CHECK(mua::ResolveGraphicsAdapter("1", adapters) == 1);
-  CHECK(mua::ResolveGraphicsAdapter("2", adapters) == -1);
-  CHECK(mua::ResolveGraphicsAdapter("1", {}) == -1);
+  CHECK(mua::ResolveGraphicsAdapter("2", adapters) == 0);
+  CHECK(!mua::ResolveGraphicsAdapter("1", {}));
+  CHECK(!mua::ResolveGraphicsAdapter("auto", {}));
   // The index is the DXGI one, not the position in the list.
   const std::vector<mua::GraphicsAdapter> gap = {{1, "A"}, {3, "B"}};
   CHECK(mua::ResolveGraphicsAdapter("1", gap) == 1);
   CHECK(mua::ResolveGraphicsAdapter("3", gap) == 3);
-  CHECK(mua::ResolveGraphicsAdapter("0", gap) == -1);
+  CHECK(mua::ResolveGraphicsAdapter("0", gap) == 1);
+  CHECK(mua::ResolveGraphicsAdapter("auto", gap) == 1);
 
-  auto options = mua::GraphicsAdapterOptions(adapters, "auto");
-  CHECK(options.size() == 3);
-  CHECK(options[0].first == "auto" && options[0].second == "Automatic (Recommended)");
-  CHECK(options[1].first == "0" && options[1].second == "NVIDIA GeForce RTX 4070");
-  CHECK(options[2].first == "1" && options[2].second == "Intel UHD Graphics 730");
-  options = mua::GraphicsAdapterOptions({{0, "Same"}, {1, "Same"}}, "auto");
-  CHECK(options[1].second == "Same (0)" && options[2].second == "Same (1)");
-  options = mua::GraphicsAdapterOptions(adapters, "5");
-  CHECK(options.size() == 4 && options[3].first == "5" && options[3].second == "Graphics card 5 (not found)");
+  auto options = mua::GraphicsAdapterOptions(adapters);
+  CHECK(options.size() == 2);
+  CHECK(options[0].first == "0" && options[0].second == "NVIDIA GeForce RTX 4070");
+  CHECK(options[1].first == "1" && options[1].second == "Intel UHD Graphics 730");
+  for (const auto& [value, label] : options) {
+    CHECK(value != "auto" && label.find("Automatic") == std::string::npos);
+  }
+  CHECK(mua::GraphicsAdapterOptions({}).empty());
+  options = mua::GraphicsAdapterOptions({{0, "Same"}, {1, "Same"}});
+  CHECK(options[0].second == "Same (0)" && options[1].second == "Same (1)");
 }
 
 void TestPersistence() {
@@ -89,8 +94,7 @@ void TestPersistence() {
   {
     trg::TextFileSettings settings(file.string());
     CHECK(!settings.Has("mua_graphics_adapter"));
-    CHECK(settings.Get("mua_graphics_adapter", mua::kGraphicsAdapterAuto) == "auto");
-    CHECK(mua::ResolveGraphicsAdapter(settings.Get("mua_graphics_adapter", mua::kGraphicsAdapterAuto), {{0, "A"}}) == -1);
+    CHECK(mua::ResolveGraphicsAdapter(settings.Get("mua_graphics_adapter", ""), {{0, "A"}, {1, "B"}}) == 0);
     settings.Set("mua_graphics_adapter", "\"1\"");
     CHECK(settings.Save());
   }
@@ -164,13 +168,16 @@ void TestRegistration() {
         Has(settings, "      \"mua_graphics_adapter\",\r\n      \"mua_aspect_ratio\","));
   CHECK(Has(settings, "      kTearingSetting,\n      \"mua_graphics_adapter\",\n") ||
         Has(settings, "      kTearingSetting,\r\n      \"mua_graphics_adapter\",\r\n"));
-  CHECK(Has(settings, "rex::cvar::SetFlagByName(\"d3d12_adapter\", std::to_string(index));"));
+  CHECK(Has(settings, "rex::cvar::SetFlagByName(\"d3d12_adapter\", std::to_string(*index));"));
 
   const std::string launcher = ReadFile(src + "/launcher.cpp");
   const size_t card = launcher.find("ui.Combo(\"Graphics card\"");
   const size_t resolution = launcher.find("ui.Combo(\"Render resolution\"");
   CHECK(card != std::string::npos && resolution != std::string::npos && card < resolution);
-  CHECK(Has(launcher, "\"mua_graphics_adapter\", kGraphicsAdapterAuto, adapters"));
+  CHECK(Has(launcher, "\"mua_graphics_adapter\", value.c_str(), adapters"));
+  CHECK(!Has(launcher, "kGraphicsAdapterAuto") && !Has(launcher, "Automatic (Recommended)"));
+  CHECK(!Has(settings, "kGraphicsAdapterAuto") && !Has(settings, "Graphics card: Automatic"));
+  CHECK(Has(settings, "rex::cvar::SetFlagByName(\"mua_graphics_adapter\", std::to_string(*index));"));
 
   const std::string app = ReadFile(src + "/marvel_ultimate_alliance_app.h");
   const size_t load = app.find("mua::LoadPlayerSettings(");

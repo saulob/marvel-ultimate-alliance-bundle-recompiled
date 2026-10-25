@@ -59,6 +59,9 @@ std::optional<WindowState> QueryWindowState(void* native_handle);
 // Puts the window at the placement: the restored rectangle first, then maximized when asked.
 void ApplyWindowPlacement(void* native_handle, const WindowPlacement& placement);
 
+// Brings a launcher window that opened minimized back to its restored or maximized state and activates it once.
+void EnsureWindowVisible(void* native_handle);
+
 struct PreShowResult {
   WindowPlacement startup;  // where the window was created
   WindowPlacement applied;

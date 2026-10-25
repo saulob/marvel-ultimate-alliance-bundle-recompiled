@@ -28,16 +28,15 @@ struct GraphicsAdapterDetails {
 };
 
 // Windows: the adapter ReXGlue's d3d12_adapter selection will use for `configured_index` (-1 automatic, -2 WARP).
-// Mirrors the runtime's enumeration, so Automatic reports the GPU that is actually picked.
+// Mirrors the runtime's enumeration, so the effective GPU is the one actually picked.
 GraphicsAdapterDetails EffectiveGraphicsAdapter(int configured_index);
 
 // Windows: whether the adapter ReXGlue selects for `configured_index` (-1 automatic, -2 WARP) supports rasterizer-ordered
 // views, which the EDRAM in pixel shaders path (render_target_path_d3d12 = "rov") needs. False elsewhere.
 bool RasterizerOrderedViewsSupported(int configured_index);
 
-inline constexpr char kGraphicsAdapterAuto[] = "auto";
-
-// The adapter index a mua_graphics_adapter value names; empty for Automatic and for anything that is not an index.
+// The adapter index a mua_graphics_adapter value names; empty for anything that is not an index, such as the retired
+// "auto".
 inline std::optional<int> ParseGraphicsAdapter(std::string_view setting) {
   int index = 0;
   const char* end = setting.data() + setting.size();
@@ -48,22 +47,24 @@ inline std::optional<int> ParseGraphicsAdapter(std::string_view setting) {
   return index;
 }
 
-// The value for d3d12_adapter: -1 (automatic) unless the setting names an adapter that is present.
-inline int ResolveGraphicsAdapter(std::string_view setting, const std::vector<GraphicsAdapter>& adapters) {
+// The adapter the setting names if it is present, else the first adapter. Empty only when there are no adapters.
+inline std::optional<int> ResolveGraphicsAdapter(std::string_view setting, const std::vector<GraphicsAdapter>& adapters) {
+  if (adapters.empty()) {
+    return std::nullopt;
+  }
   const std::optional<int> index = ParseGraphicsAdapter(setting);
   for (const GraphicsAdapter& adapter : adapters) {
     if (index && adapter.index == *index) {
       return adapter.index;
     }
   }
-  return -1;
+  return adapters.front().index;
 }
 
-// The Graphics card choices as {value, label}: Automatic, then each adapter, then the saved one if it is not present.
+// The Graphics card choices as {value, label}, one per adapter.
 inline std::vector<std::pair<std::string, std::string>> GraphicsAdapterOptions(
-    const std::vector<GraphicsAdapter>& adapters, std::string_view current) {
+    const std::vector<GraphicsAdapter>& adapters) {
   std::vector<std::pair<std::string, std::string>> options;
-  options.emplace_back(kGraphicsAdapterAuto, "Automatic (Recommended)");
   for (const GraphicsAdapter& adapter : adapters) {
     int same_name = 0;
     for (const GraphicsAdapter& other : adapters) {
@@ -71,10 +72,6 @@ inline std::vector<std::pair<std::string, std::string>> GraphicsAdapterOptions(
     }
     options.emplace_back(std::to_string(adapter.index),
                          same_name > 1 ? adapter.name + " (" + std::to_string(adapter.index) + ")" : adapter.name);
-  }
-  if (const std::optional<int> index = ParseGraphicsAdapter(current);
-      index && ResolveGraphicsAdapter(current, adapters) < 0) {
-    options.emplace_back(std::string(current), "Graphics card " + std::to_string(*index) + " (not found)");
   }
   return options;
 }

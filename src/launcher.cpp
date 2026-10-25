@@ -432,6 +432,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   void StartInSavedState() {
     RestorePlacement();
+    EnsureWindowVisible(WindowHandle());
     if (fullscreen_pref_.wanted()) {
       RequestFullscreen(true);
     }
@@ -837,16 +838,16 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   }
 
   void PageGraphics(trg::Ui& ui) {
-    if (!graphics_adapters_.empty()) {
+    if (const std::optional<int> adapter =
+            ResolveGraphicsAdapter(settings_.Get("mua_graphics_adapter"), graphics_adapters_)) {
+      const std::string value = std::to_string(*adapter);
+      settings_.Set("mua_graphics_adapter", value);
       std::vector<trg::Option> adapters;
-      for (const auto& [value, label] :
-           GraphicsAdapterOptions(graphics_adapters_, settings_.Get("mua_graphics_adapter", kGraphicsAdapterAuto))) {
-        adapters.push_back({value, label});
+      for (const auto& [option_value, label] : GraphicsAdapterOptions(graphics_adapters_)) {
+        adapters.push_back({option_value, label});
       }
-      ui.Combo("Graphics card",
-               "Selects which GPU renders the game. Automatic uses the recommended high-performance GPU. "
-               "A GPU chosen here overrides automatic selection and restarts the game window.",
-               "mua_graphics_adapter", kGraphicsAdapterAuto, adapters);
+      ui.Combo("Graphics card", "Selects which GPU renders the game and restarts the game window.",
+               "mua_graphics_adapter", value.c_str(), adapters);
     }
     ui.Combo("Render resolution",
              "Draws the game at a multiple of its own picture, then scales it to the window. Higher is sharper and "
@@ -888,13 +889,13 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
 
   // The choice only matters when the GPU cannot run the rasterizer-ordered views EDRAM path.
   bool MultisamplingApplies() {
-    const std::string adapter = settings_.Get("mua_graphics_adapter", kGraphicsAdapterAuto);
+    const std::string adapter = settings_.Get("mua_graphics_adapter");
     if (!host_render_targets_checked_ || adapter != host_render_targets_adapter_) {
       host_render_targets_checked_ = true;
       host_render_targets_adapter_ = adapter;
       host_render_targets_ = HostRenderTargetsUsed(
           rex::cvar::GetFlagByName("render_target_path_d3d12"),
-          RasterizerOrderedViewsSupported(ResolveGraphicsAdapter(adapter, graphics_adapters_)));
+          RasterizerOrderedViewsSupported(ResolveGraphicsAdapter(adapter, graphics_adapters_).value_or(-1)));
     }
     return host_render_targets_;
   }
