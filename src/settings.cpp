@@ -48,7 +48,7 @@ REXCVAR_DEFINE_BOOL(mua_show_frame_counter, false, "Marvel Ultimate Alliance",
                     "Show the frame counter in the corner (F2 toggles it)");
 REXCVAR_DEFINE_BOOL(mua_msaa_compatibility, false, "Marvel Ultimate Alliance",
                     "Draw the game's 2x MSAA render targets with 4x MSAA, for GPUs or drivers whose "
-                    "native 2x MSAA misrenders (sets native_2x_msaa)");
+                    "native 2x MSAA misrenders (sets native_2x_msaa; unused with rasterizer-ordered views)");
 REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
                       "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
 REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance",
@@ -516,10 +516,22 @@ void ApplyDynamicPageStreaming(std::optional<GameId> game) {
   REXLOG_INFO("Dynamic page streaming: {}={}", kKey, rex::cvar::GetFlagByName(kKey));
 }
 
+namespace {
+
+bool HostRenderTargetsActive() {
+  static const bool active = HostRenderTargetsUsed(
+      rex::cvar::GetFlagByName("render_target_path_d3d12"),
+      RasterizerOrderedViewsSupported(std::atoi(CvarText("d3d12_adapter", "-1").c_str())));
+  return active;
+}
+
+}  // namespace
+
 // Also replaces a native_2x_msaa = false written by launchers that labelled it Off.
 void ApplyMultisampling() {
-  rex::cvar::SetFlagByName("native_2x_msaa",
-                           Native2xMsaaFor(REXCVAR_GET(mua_msaa_compatibility)) ? "true" : "false");
+  if (const auto native = Native2xMsaaToApply(HostRenderTargetsActive(), REXCVAR_GET(mua_msaa_compatibility))) {
+    rex::cvar::SetFlagByName("native_2x_msaa", *native ? "true" : "false");
+  }
 }
 
 void ApplyUpscaler(const GameSettings& settings) {
@@ -612,8 +624,9 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.launcher_graphics.anti_aliasing =
       ChoiceLabel({{"none", "Off"}, {"fxaa", "FXAA"}, {"fxaa_extreme", "FXAA Extreme"}},
                   settings.Get("swap_post_effect", "none"), "Off");
-  diagnostics.launcher_graphics.multisampling =
-      settings.GetBool("mua_msaa_compatibility", false) ? "4x MSAA (Compatibility)" : "2x MSAA";
+  const bool host_render_targets = HostRenderTargetsActive();
+  const bool msaa_compatibility = settings.GetBool("mua_msaa_compatibility", false);
+  diagnostics.launcher_graphics.multisampling = MsaaLauncherText(host_render_targets, msaa_compatibility);
   diagnostics.launcher_graphics.texture_filtering =
       TextureFilteringName(settings.Get("anisotropic_override", "3"));
   diagnostics.launcher_graphics.upscaling = UpscalingText(upscaler, quality);
@@ -667,12 +680,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.graphics.upscaling = UpscalingText(upscaler, quality);
   diagnostics.graphics.guest_width = sizes.guest.width;
   diagnostics.graphics.guest_height = sizes.guest.height;
-  const bool host_render_targets = HostRenderTargetsUsed(
-      CvarText("render_target_path_d3d12", ""),
-      RasterizerOrderedViewsSupported(std::atoi(CvarText("d3d12_adapter", "-1").c_str())));
-  diagnostics.graphics.msaa = !host_render_targets                                ? "rov (setting unused)"
-                              : settings.GetBool("mua_msaa_compatibility", false) ? "4x compatibility"
-                                                                                  : "2x native";
+  diagnostics.graphics.msaa = MsaaRuntimeText(host_render_targets, msaa_compatibility);
   diagnostics.graphics.anti_aliasing = diagnostics.launcher_graphics.anti_aliasing;
   diagnostics.graphics.texture_filtering = diagnostics.launcher_graphics.texture_filtering;
   diagnostics.graphics.allow_invalid_fetch_constants = CvarText("gpu_allow_invalid_fetch_constants", "false");

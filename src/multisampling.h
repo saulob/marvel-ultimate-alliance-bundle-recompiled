@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace mua {
@@ -28,6 +30,30 @@ inline bool HostRenderTargetsUsed(std::string_view render_target_path, bool rov_
     return !rov_supported;
   }
   return true;
+}
+
+// native_2x_msaa only reaches host render targets, so it is left alone under ROV.
+inline std::optional<bool> Native2xMsaaToApply(bool host_render_targets, bool compatibility) {
+  if (!host_render_targets) {
+    return std::nullopt;
+  }
+  return Native2xMsaaFor(compatibility);
+}
+
+// The Multisampling value in the launcher's startup log; under ROV the player has no choice.
+inline std::string MsaaLauncherText(bool host_render_targets, bool compatibility) {
+  if (!host_render_targets) {
+    return "ROV (fixed)";
+  }
+  return compatibility ? "4x MSAA (Compatibility)" : "2x MSAA";
+}
+
+// What the renderer does with the game's 2x MSAA render targets.
+inline std::string MsaaRuntimeText(bool host_render_targets, bool compatibility) {
+  if (!host_render_targets) {
+    return "2x as 4x (ROV, fixed)";
+  }
+  return compatibility ? "2x as 4x (host render targets, compatibility)" : "2x native (host render targets)";
 }
 
 }  // namespace mua

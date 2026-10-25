@@ -58,8 +58,9 @@ inline std::filesystem::path GameSettingsPath(const std::filesystem::path& user_
 }
 void LoadPlayerSettings(const std::filesystem::path& path);
 
-// Sets the Xenos native_2x_msaa cvar from the launcher's Multisampling choice. Call once the GPU plugin
-// has registered its cvars and before emulation starts.
+// Sets the Xenos native_2x_msaa cvar from the launcher's Multisampling choice when the EDRAM lives in host
+// render targets; under ROV it leaves the cvar alone. Call once the GPU plugin has registered its cvars and
+// before emulation starts.
 void ApplyMultisampling();
 
 // Sets async_shader_wait_ms for the Frame rate choice. Call with ApplyMultisampling.
