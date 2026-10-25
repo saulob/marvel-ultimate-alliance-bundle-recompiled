@@ -2,8 +2,8 @@
 
 #include <chrono>
 
-// The guest-frame totals the GPU plugin's Performance line reads (ReXGlue patch 0132). MUA1 only for now.
-#if defined(MUA_RUNTIME_MUA1) && defined(_WIN32)
+// The guest-frame totals the GPU plugin's Performance line reads (ReXGlue patch 0132). MUA1 and Gold Edition only.
+#if (defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)) && defined(_WIN32)
 #define MUA_GUEST_FRAME_COUNTERS 1
 #include <rex/perf/counter.h>
 #else

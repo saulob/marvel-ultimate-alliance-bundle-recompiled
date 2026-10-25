@@ -542,7 +542,7 @@ void ApplyDynamicPageStreaming(std::optional<GameId> game) {
     REXLOG_WARN("Dynamic page streaming: {} is not in this runtime", kKey);
     return;
   }
-  if (game == GameId::kMua1 && info->source == rex::cvar::Source::kDefault) {
+  if ((game == GameId::kMua1 || game == GameId::kMua1Gold) && info->source == rex::cvar::Source::kDefault) {
     rex::cvar::SetFlagByName(kKey, "true");
   }
   REXLOG_INFO("Dynamic page streaming: {}={}", kKey, rex::cvar::GetFlagByName(kKey));

@@ -37,7 +37,6 @@ namespace {
 
 constexpr uint32_t kRefCountOffset = 4;
 constexpr uint32_t kRefCountMask = 0x3FFFFF;
-constexpr uint32_t kMatrixEpsilon = 0x8200B8A4;
 
 uint32_t Load32(uint8_t* base, uint32_t address) {
   uint32_t value = 0;
@@ -140,7 +139,7 @@ REX_HOOK_RAW(MUA_GUEST_MATRIX_NEARLY_EQUAL) {
     return;
   }
   ctx.fpscr.disableFlushMode();
-  const double epsilon = LoadFloat(base, kMatrixEpsilon);
+  const double epsilon = LoadFloat(base, mua::guest::kMatrixEpsilon);
   const uint32_t a = ctx.r3.u32;
   const uint32_t b = ctx.r4.u32;
   uint64_t equal = 1;
@@ -216,15 +215,13 @@ namespace {
 // The recompiled module's layout (REX_IMAGE_BASE, REX_IMAGE_SIZE, REX_CODE_BASE, REX_CODE_SIZE and
 // REX_THUNK_RESERVE_SIZE of the generated header), which locates the function table indirect calls go through.
 constexpr uint64_t kImageBase = 0x82000000;
-constexpr uint64_t kImageSize = 0xCB0000;
-constexpr uint32_t kCodeBase = 0x82110000;
-constexpr uint32_t kCodeSize = 0x7418CC;
 constexpr uint32_t kThunkReserveSize = 0x10000;
 
 void CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t target) {
+  const uint32_t code_offset = target - mua::guest::kCodeBase;
   PPCFunc* function = nullptr;
-  if (target - kCodeBase < kCodeSize + kThunkReserveSize) {
-    function = *reinterpret_cast<PPCFunc**>(base + kImageBase + kImageSize + uint64_t(target - kCodeBase) * 2);
+  if (code_offset < mua::guest::kCodeSize + kThunkReserveSize) {
+    function = *reinterpret_cast<PPCFunc**>(base + kImageBase + mua::guest::kImageSize + uint64_t(code_offset) * 2);
   }
   if (!function) {
     ctx.last_indirect_target = target;
@@ -286,7 +283,7 @@ REX_HOOK_RAW(MUA_GUEST_IS_OF_TYPE) {
     GuestFrame frame(ctx, base, 96);
     const uint32_t get_meta = Load32(base, Load32(base, object) + 80);
     ctx.ctr.u64 = get_meta;
-    ctx.lr = 0x82526BB4;
+    ctx.lr = mua::guest::kIsOfTypeMetaSite;
     CallIndirect(ctx, base, get_meta);
     current = ctx.r3.u32;
   }
@@ -387,10 +384,10 @@ REX_HOOK_RAW(MUA_GUEST_ASSIGN_STRING) {
   const uint32_t slot = ctx.r3.u32;
   const uint32_t text = ctx.r4.u32;
   GuestFrame frame(ctx, base, 112);
-  ctx.lr = 0x82374D70;
+  ctx.lr = mua::guest::kAssignStringPrepareSite;
   MUA_GUEST_STRING_PREPARE(ctx, base);
   ctx.r4.u64 = text;
-  ctx.lr = 0x82374D78;
+  ctx.lr = mua::guest::kAssignStringInternSite;
   MUA_GUEST_STRING_INTERN(ctx, base);
   const uint32_t interned = ctx.r3.u32;
   if (const uint32_t old = Load32(base, slot)) {
@@ -398,7 +395,7 @@ REX_HOOK_RAW(MUA_GUEST_ASSIGN_STRING) {
     ctx.r4.u64 = header;
     if (!AddToRefCount(base, header, -1)) {
       ctx.r3.u64 = Load32(base, header);
-      ctx.lr = 0x82374DC8;
+      ctx.lr = mua::guest::kAssignStringFreeSite;
       MUA_GUEST_FREE_STRING(ctx, base);
     }
   }
@@ -424,11 +421,11 @@ REX_HOOK_RAW(MUA_GUEST_RELEASE_RESOURCE) {
   const uint32_t header = Load32(base, resource);
   if ((header & 0xF) == 4 && (header & 0x40000000)) {
     ctx.r3.u64 = Load32(base, resource + 24);
-    ctx.lr = 0x8247BB70;
+    ctx.lr = mua::guest::kReleaseResourceParentSite;
     MUA_GUEST_RELEASE_RESOURCE(ctx, base);
   }
   ctx.r3.u64 = resource;
-  ctx.lr = 0x8247BB78;
+  ctx.lr = mua::guest::kReleaseResourceDestroySite;
   MUA_GUEST_DESTROY_RESOURCE(ctx, base);
   ctx.r3.u64 = 0;
 }
@@ -453,7 +450,7 @@ REX_HOOK_RAW(MUA_GUEST_APPEND_REF) {
     ctx.r3.u64 = array;
     ctx.r4.u64 = uint32_t(count + 1);
     ctx.r5.u64 = 4;
-    ctx.lr = 0x8255D738;
+    ctx.lr = mua::guest::kAppendRefResizeSite;
     MUA_GUEST_RESIZE_ARRAY(ctx, base);
   }
   Store32(base, Load32(base, array + 16) + uint32_t(count) * 4, object);

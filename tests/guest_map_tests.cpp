@@ -3,16 +3,20 @@
 // function of the module generated for that game.
 // Run: mua_guest_map_tests
 
+#include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #pragma clang diagnostic ignored "-Wmacro-redefined"
 namespace gold {
@@ -23,6 +27,12 @@ namespace mua1 {
 }
 namespace mua2 {
 #include "guest_map_mua2.h"
+}
+namespace gold_d3d {
+#include "d3d_state_setters_mua1_gold.h"
+}
+namespace mua1_d3d {
+#include "d3d_state_setters_mua1.h"
 }
 
 namespace {
@@ -93,9 +103,13 @@ const std::set<std::string> kOptionalHooks = {
     "MUA_GUEST_IS_OF_TYPE", "MUA_GUEST_MATRIX_MULTIPLY", "MUA_GUEST_MATRIX_COPY", "MUA_GUEST_RELEASE_STRING",
     "MUA_GUEST_ASSIGN_STRING", "MUA_GUEST_RELEASE_RESOURCE", "MUA_GUEST_APPEND_REF", "MUA_GUEST_FREE_STRING",
     "MUA_GUEST_STRING_PREPARE", "MUA_GUEST_STRING_INTERN", "MUA_GUEST_DESTROY_RESOURCE", "MUA_GUEST_RESIZE_ARRAY"};
-const std::set<std::string> kOptionalConstants = {"kIndirectTailTable", "kInputUserSlotOffset",
-                                                  "kMainMenuExitCommand", "kMainMenuVtable",
-                                                  "kMainMenuLiveNameEntry", "kEmptyString"};
+const std::set<std::string> kOptionalConstants = {
+    "kIndirectTailTable",         "kInputUserSlotOffset",     "kMainMenuExitCommand",
+    "kMainMenuVtable",            "kMainMenuLiveNameEntry",   "kEmptyString",
+    "kMatrixEpsilon",             "kIsOfTypeMetaSite",        "kAssignStringPrepareSite",
+    "kAssignStringInternSite",    "kAssignStringFreeSite",    "kReleaseResourceParentSite",
+    "kReleaseResourceDestroySite", "kAppendRefResizeSite",    "kImageSize",
+    "kCodeBase",                  "kCodeSize"};
 
 // sub_8248A0A0 holds the swap for another vblank while the interval in the high half of its argument has not passed
 // since the last flip, or while the scanline has passed the threshold in the low half.
@@ -210,13 +224,26 @@ void TestMapsCarryTheSameHooks() {
   CHECK(Matches(gold_map, "#define (MUA_GUEST_MEMMOVE) sub_82859500").size() == 1);
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_MEMMOVE) 1").size() == 1);
   CHECK(Matches(mua2_map, "#define (MUA_GUEST_MEMMOVE) sub_82A65700").size() == 1);
-  CHECK(Matches(mua1_map, "#define (MUA_GUEST_HAS_D3D_STATE_FILTER) 1").size() == 1);
   CHECK(Matches(mua1_map, "#define (MUA_GUEST_SET_VERTEX_DECLARATION) sub_824766D8").size() == 1);
-  for (const std::string& text : {gold_map, mua2_map}) {
-    CHECK(Matches(text, "#define (MUA_GUEST_HAS_D3D_STATE_FILTER) 0").size() == 1);
-    CHECK(Matches(text, "#define (MUA_GUEST_(SET_(VERTEX|PIXEL|STREAM|TEXTURE)|UPLOAD|WRITE_PACKETS|RESERVE)\\w*) ")
-              .empty());
+  CHECK(Matches(gold_map, "#define (MUA_GUEST_SET_VERTEX_DECLARATION) sub_8248F378").size() == 1);
+  for (const std::string& text : {gold_map, mua1_map}) {
+    CHECK(Matches(text, "#define (MUA_GUEST_HAS_D3D_STATE_FILTER) 1").size() == 1);
+    CHECK(Matches(text, "#define (MUA_GUEST_HAS_ALCHEMY_HELPERS) 1").size() == 1);
   }
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_D3D_STATE_FILTER) 0").size() == 1);
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_HAS_ALCHEMY_HELPERS) 0").size() == 1);
+  CHECK(Matches(mua2_map, "#define (MUA_GUEST_(SET_(VERTEX|PIXEL|STREAM|TEXTURE)|UPLOAD|WRITE_PACKETS|RESERVE)\\w*) ")
+            .empty());
+
+  // Gold Edition carries every hook, constant and feature MUA1 has; only its indirect tail call table is its own.
+  std::set<std::string> gold_hooks = Matches(gold_map, macros);
+  gold_hooks.erase("MUA_GUEST_INDIRECT_TAIL_CALL");
+  CHECK(gold_hooks == Matches(mua1_map, macros));
+  std::set<std::string> gold_constants = Matches(gold_map, constants);
+  gold_constants.erase("kIndirectTailTable");
+  CHECK(gold_constants == Matches(mua1_map, constants));
+  const char* const feature_values = R"(#define (MUA_GUEST_HAS_(?!INDIRECT_TAIL_CALLS)[A-Z_]+ [01]))";
+  CHECK(Matches(gold_map, feature_values) == Matches(mua1_map, feature_values));
 }
 
 void TestEveryUsedHookIsMapped() {
@@ -401,29 +428,113 @@ bool Has(const std::string& text, const std::string& needle) {
   return text.find(needle) != std::string::npos;
 }
 
-// The D3D state filters drop a repeated set only while each setter still does what they compare against: merge its
-// value into one field and mark it dirty, or (shaders and stream sources) refresh the replaced object's fence, store
-// it and apply what the filter checks is already applied.
-void TestD3DStateSettersMatchFilters() {
-#ifdef MUA_GENERATED_ROOT
-  std::printf("D3D state setters match their filters\n");
-  const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / "mua1";
-  if (ReadSource(module / "marvel_ultimate_alliance_register.cpp").empty()) {
-    return;
+/// The device fields a D3D build's setter table header gives.
+struct D3DFields {
+  uint32_t command_cursor;
+  uint32_t command_end;
+  uint32_t command_reserve_limit;
+  uint32_t texture_dirty;
+  uint32_t flags;
+  uint32_t vertex_declaration;
+  uint32_t committed_strides;
+  uint32_t stream_sources;
+  uint32_t stream_strides;
+  uint32_t textures;
+  uint32_t pixel_shader;
+  uint32_t vertex_shader;
+  std::array<uint32_t, 4> sampler_bytes;
+  uint32_t literal_entries;
+  uint32_t literal_bytes;
+};
+
+#define MUA_D3D_FIELDS(ns)                                                                                       \
+  D3DFields {                                                                                                    \
+    ns::mua::d3d::kCommandCursor, ns::mua::d3d::kCommandEnd, ns::mua::d3d::kCommandReserveLimit,                 \
+        ns::mua::d3d::kTextureDirty, ns::mua::d3d::kFlags, ns::mua::d3d::kVertexDeclaration,                     \
+        ns::mua::d3d::kCommittedStrides, ns::mua::d3d::kStreamSources, ns::mua::d3d::kStreamStrides,             \
+        ns::mua::d3d::kTextures, ns::mua::d3d::kPixelShader, ns::mua::d3d::kVertexShader,                        \
+        ns::mua::d3d::kSamplerBytes, ns::mua::d3d::kLiteralEntries, ns::mua::d3d::kLiteralBytes                  \
   }
 
+// One game's D3D build, with the instructions whose register allocation or bit layout differs between the builds:
+// how the declaration setter requests the shader commit, the texture setter's dirty mask merge and the shader
+// constant setters' (vertex, pixel) dirty mask merge and store.
+struct D3DBuild {
+  const char* key;
+  const char* map;
+  const char* table;
+  D3DFields fields;
+  const char* binding;
+  const char* commit_request;
+  const char* texture_dirty_merge;
+  std::array<std::pair<const char*, const char*>, 2> constant_dirty;
+};
+
+const D3DBuild kD3DBuilds[] = {
+    {"mua1",
+     "guest_map_mua1.h",
+     "d3d_state_setters_mua1.h",
+     MUA_D3D_FIELDS(mua1_d3d),
+     "sub_824874D8",
+     "ctx.r12.u64 = __builtin_rotateleft64(ctx.r12.u64, 51)",
+     "// or r11,r11,r6",
+     {{{"// or r10,r10,r9", "// std r10,0(r11)"}, {"// or r10,r10,r9", "// std r10,8(r11)"}}}},
+    {"mua1-gold",
+     "guest_map_mua1_gold.h",
+     "d3d_state_setters_mua1_gold.h",
+     MUA_D3D_FIELDS(gold_d3d),
+     "sub_824A0C30",
+     "ctx.r11.u64 = ctx.r11.u64 | 524288;",
+     "// or r11,r6,r11",
+     {{{"// or r11,r11,r7", "// std r11,0(r3)"}, {"// or r11,r7,r11", "// std r11,8(r3)"}}}},
+};
+
+std::string N(uint32_t value) {
+  return std::to_string(value);
+}
+
+// The function a guest map binds a hook to, as "sub_XXXXXXXX".
+std::string Hooked(const std::string& map, const std::string& hook) {
+  const std::set<std::string> found = Matches(map, ("#define " + hook + " (sub_[0-9A-F]{8})").c_str());
+  return found.size() == 1 ? *found.begin() : std::string();
+}
+
+// The branch target form of a function in the generated code's instruction comments.
+std::string BranchTarget(const std::string& function) {
+  std::string target = "0x" + function.substr(4);
+  for (char& c : target) {
+    c = char(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return target;
+}
+
+// The D3D state filters drop a repeated set only while each setter still does what they compare against: merge its
+// value into one field and mark it dirty, or (shaders and stream sources) refresh the replaced object's fence, store
+// it and apply what the filter checks is already applied. Each build's device fields are the ones its own setters use.
+void CheckD3DBuild(const D3DBuild& build) {
+  const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / build.key;
   const std::string registry = ReadSource(module / "marvel_ultimate_alliance_register.cpp");
-  const std::string declaration = GeneratedBody(module, "sub_824766D8");
+  if (registry.empty()) {
+    std::printf("  %s: module not generated, skipped\n", build.key);
+    return;
+  }
+  const std::string map = ReadSource(kSources / build.map);
+  const auto hooked = [&](const char* hook) { return GeneratedBody(module, Hooked(map, hook)); };
+  const D3DFields& fields = build.fields;
+
+  const std::string declaration = hooked("MUA_GUEST_SET_VERTEX_DECLARATION");
   CHECK(Count(declaration, "REX_STORE_") == 2);
-  CHECK(Has(declaration, "REX_STORE_U32(ctx.r3.u32 + 11536, ctx.r4.u32);"));
-  CHECK(Has(declaration, "ctx.r12.u64 = __builtin_rotateleft64(ctx.r12.u64, 51)"));
+  CHECK(Has(declaration, "REX_STORE_U32(ctx.r3.u32 + " + N(fields.vertex_declaration) + ", ctx.r4.u32);"));
+  CHECK(Has(declaration, build.commit_request));
   CHECK(!Has(declaration, "(ctx, base);"));
-  const std::string binding = GeneratedBody(module, "sub_824874D8");
+  const std::string binding = GeneratedBody(module, build.binding);
   CHECK(Has(binding, "ctx.r11.u64 = REX_LOAD_U32(ctx.r30.u32 + 48);"));
   CHECK(Has(binding, "REX_STORE_U32(ctx.r30.u32 + 48, ctx.r11.u32);"));
+  CHECK(Has(binding, "ctx.r29.s64 = ctx.r31.s64 + " + N(fields.stream_strides) + ";"));
+  CHECK(Has(binding, "REX_STORE_U64(ctx.r31.u32 + " + N(fields.committed_strides) + ", ctx.r11.u64);"));
 
   // Every listed render state setter is a leaf whose only stores are its listed fields, the dirty masks and its stack.
-  const std::string tables = ReadSource(kSources / "d3d_state_setters_mua1.h");
+  const std::string tables = ReadSource(kSources / build.table);
   const std::regex leaf(R"(X\(([0-9A-F]{8})((?:, MUA_FIELD\(\d+, \d\))+)\))");
   const std::regex field(R"(MUA_FIELD\((\d+), (\d)\))");
   const std::regex store(R"(REX_STORE_U(8|16|32|64)\(ctx\.r(\d+)\.u32 \+ (-?\d+), )");
@@ -432,8 +543,8 @@ void TestD3DStateSettersMatchFilters() {
   for (std::sregex_iterator it(tables.begin(), tables.end(), leaf), end; it != end; ++it) {
     ++leaves;
     std::set<std::pair<int, int>> allowed;
-    const std::string fields = (*it)[2].str();
-    for (std::sregex_iterator f(fields.begin(), fields.end(), field); f != end; ++f) {
+    const std::string fields_text = (*it)[2].str();
+    for (std::sregex_iterator f(fields_text.begin(), fields_text.end(), field); f != end; ++f) {
       allowed.insert({std::stoi((*f)[1].str()), std::stoi((*f)[2].str())});
     }
     const std::string address = (*it)[1].str();
@@ -457,8 +568,10 @@ void TestD3DStateSettersMatchFilters() {
   CHECK(leaves == 76);
 
   // Every listed sampler state setter only stores into the slot's fetch constant (r3 + 24 * slot, with or without
-  // the 1024 shadow offset folded in), the slot's bytes (r3 + slot), the first state mask and its stack.
-  const std::set<int> slot_offsets = {0, 4, 8, 12, 16, 20, 1024, 1028, 1032, 1036, 1040, 1044, 11652, 11678, 11704, 11730};
+  // the 1024 shadow offset folded in), the slot's bytes (r3 + slot), the texture dirty mask and its stack.
+  std::set<int> slot_offsets = {0, 4, 8, 12, 16, 20, 1024, 1028, 1032, 1036, 1040, 1044};
+  slot_offsets.insert(fields.sampler_bytes.begin(), fields.sampler_bytes.end());
+  const int texture_dirty = int(fields.texture_dirty);
   const std::regex sampler(R"(X\(([0-9A-F]{8})\))");
   size_t samplers = 0;
   for (std::sregex_iterator it(tables.begin(), tables.end(), sampler), end; it != end; ++it) {
@@ -469,52 +582,68 @@ void TestD3DStateSettersMatchFilters() {
     CHECK(!body.empty());
     CHECK(!Has(body, "\tsub_") && !Has(body, "REX_CALL_INDIRECT") && !std::regex_search(body, assigns_r3));
     CHECK(std::regex_search(body, std::regex(R"(// mulli r\d+,r4,24\n)")));
-    CHECK(Has(body, "REX_STORE_U64(ctx.r3.u32 + 16, "));
+    CHECK(Has(body, "REX_STORE_U64(ctx.r3.u32 + " + N(fields.texture_dirty) + ", "));
     for (std::sregex_iterator s(body.begin(), body.end(), store); s != end; ++s) {
       const int reg = std::stoi((*s)[2].str());
       const int offset = std::stoi((*s)[3].str());
-      CHECK(reg == 1 || (reg == 3 && offset == 16) || (reg != 3 && slot_offsets.contains(offset)));
-      if (offset >= 11652) {
+      CHECK(reg == 1 || (reg == 3 && offset == texture_dirty) || (reg != 3 && slot_offsets.contains(offset)));
+      if (offset >= int(fields.sampler_bytes[0])) {
         CHECK(std::regex_search(body, std::regex("// add r" + (*s)[2].str() + R"(,r3,r4\n)")));
       }
     }
   }
   CHECK(samplers == 20);
 
-  const std::string texture = GeneratedBody(module, "sub_824719D0");
-  CHECK(Has(texture, "// addi r11,r4,3068"));
+  const std::string texture = hooked("MUA_GUEST_SET_TEXTURE");
+  CHECK(Has(texture, "// addi r11,r4," + N(fields.textures / 4) + "\n"));
   CHECK(Has(texture, "// mulli r11,r4,24"));
   CHECK(Has(texture, "// addi r11,r11,1024"));
-  CHECK(Has(texture, "// or r11,r11,r6"));
+  CHECK(Has(texture, build.texture_dirty_merge));
+  CHECK(Has(texture, "// std r11," + N(fields.texture_dirty) + "(r31)"));
+  CHECK(Has(texture, "// lbz r9," + N(fields.sampler_bytes[1]) + "(r8)"));
+  CHECK(Has(texture, "// lbz r8," + N(fields.sampler_bytes[2]) + "(r8)"));
   CHECK(Has(texture, "// stwx r5,r29,r31"));
   CHECK(Has(texture, "// stw r11,8(r28)"));
 
-  for (const auto& [function, first, dirty] : {std::tuple{"sub_82475E00", "// addi r10,r4,112", "// std r10,0(r11)"},
-                                               std::tuple{"sub_82475F10", "// addi r10,r4,368", "// std r10,8(r11)"}}) {
-    const std::string body = GeneratedBody(module, function);
-    CHECK(Has(body, first));
-    CHECK(Has(body, dirty));
-    CHECK(Has(body, "// or r10,r10,r9"));
+  const std::array<std::pair<const char*, const char*>, 2> constants = {
+      {{"MUA_GUEST_SET_VERTEX_SHADER_CONSTANTS", "// addi r10,r4,112"},
+       {"MUA_GUEST_SET_PIXEL_SHADER_CONSTANTS", "// addi r10,r4,368"}}};
+  for (size_t i = 0; i < constants.size(); ++i) {
+    const std::string body = hooked(constants[i].first);
+    CHECK(Has(body, constants[i].second));
+    CHECK(Has(body, build.constant_dirty[i].first));
+    CHECK(Has(body, build.constant_dirty[i].second));
     CHECK(Count(body, "// stvx ") == 5);
     CHECK(!Has(body, "\tsub_"));
   }
 
-  const std::string packets = GeneratedBody(module, "sub_82486008");
+  const std::string write_packets = BranchTarget(Hooked(map, "MUA_GUEST_WRITE_PACKETS"));
+  const std::string reserve = BranchTarget(Hooked(map, "MUA_GUEST_RESERVE_COMMANDS"));
+  const std::string cursor = N(fields.command_cursor);
+  const std::string command_end = N(fields.command_end);
+  const std::string packets = hooked("MUA_GUEST_WRITE_PACKETS");
   CHECK(Has(packets, "// rlwinm r10,r10,16,0,15"));
   CHECK(Has(packets, "// lwzu r9,4(r27)"));
-  CHECK(Has(packets, "// bl 0x82472e98"));
-  const std::string registers = GeneratedBody(module, "sub_824864D0");
+  CHECK(Has(packets, "// bl " + reserve + "\n"));
+  CHECK(Has(packets, "// lwz r11," + command_end + "(r29)") && Has(packets, "// stw r4," + cursor + "(r29)"));
+  const std::string registers = hooked("MUA_GUEST_UPLOAD_REGISTERS");
   CHECK(Has(registers, "// addi r29,r6,-4"));
   CHECK(Has(registers, "// add r10,r27,r4"));
   CHECK(Has(registers, "// li r8,1"));
   CHECK(Has(registers, "// lwzu r10,4(r29)"));
-  const std::string alu = GeneratedBody(module, "sub_82486870");
+  CHECK(Has(registers, "// bl " + write_packets + "\n"));
+  CHECK(Has(registers, "// lwz r4," + cursor + "(r26)") && Has(registers, "// lwz r9," + command_end + "(r26)") &&
+        Has(registers, "// stw r4," + cursor + "(r26)"));
+  const std::string alu = hooked("MUA_GUEST_UPLOAD_ALU_CONSTANTS");
   CHECK(Has(alu, "// lis r25,-32768"));
   CHECK(Has(alu, "// clrlwi r11,r4,28"));
   CHECK(Has(alu, "// addi r11,r29,3"));
   CHECK(Has(alu, "// li r8,16"));
   CHECK(Count(alu, "// stvx ") == 4);
-  const std::string fetch = GeneratedBody(module, "sub_82486710");
+  CHECK(Has(alu, "// bl " + write_packets + "\n"));
+  CHECK(Has(alu, "// lwz r4," + cursor + "(r26)") && Has(alu, "// lwz r9," + command_end + "(r26)") &&
+        Has(alu, "// stw r4," + cursor + "(r26)"));
+  const std::string fetch = hooked("MUA_GUEST_UPLOAD_FETCH_CONSTANTS");
   CHECK(Has(fetch, "// li r10,18432"));
   CHECK(Has(fetch, "// mulli r9,r11,24"));
   CHECK(Has(fetch, "// addi r11,r29,5"));
@@ -523,20 +652,26 @@ void TestD3DStateSettersMatchFilters() {
   CHECK(Has(fetch, "// li r11,37"));
   CHECK(Has(fetch, "// rldicr r11,r11,44,19"));
   CHECK(Has(fetch, "// li r8,6"));
+  CHECK(Has(fetch, "// bl " + write_packets + "\n") && Has(fetch, "// bl " + reserve + "\n"));
+  CHECK(Has(fetch, "// lwz r4," + cursor + "(r28)") && Has(fetch, "// lwz r8," + command_end + "(r28)") &&
+        Has(fetch, "// lwz r10," + N(fields.command_reserve_limit) + "(r28)") &&
+        Has(fetch, "// stw r4," + cursor + "(r28)"));
 
   struct Shader {
-    const char* function;
-    const char* slot;
+    const char* hook;
+    uint32_t slot;
     const char* header;
   };
   const Shader shaders[] = {
-      {"sub_824761C0", "REX_STORE_U32(ctx.r30.u32 + 12416, ctx.r29.u32);", "ctx.r11.s64 = ctx.r29.s64 + 40;"},
-      {"sub_824764C8", "REX_STORE_U32(ctx.r30.u32 + 12420, ctx.r29.u32);", "ctx.r11.s64 = ctx.r29.s64 + 872;"},
+      {"MUA_GUEST_SET_PIXEL_SHADER", fields.pixel_shader, "ctx.r11.s64 = ctx.r29.s64 + 40;"},
+      {"MUA_GUEST_SET_VERTEX_SHADER", fields.vertex_shader, "ctx.r11.s64 = ctx.r29.s64 + 872;"},
   };
   for (const Shader& shader : shaders) {
-    const std::string body = GeneratedBody(module, shader.function);
-    CHECK(Has(body, shader.slot));
+    const std::string body = hooked(shader.hook);
+    CHECK(Has(body, "REX_STORE_U32(ctx.r30.u32 + " + N(shader.slot) + ", ctx.r29.u32);"));
     CHECK(Has(body, shader.header));
+    CHECK(Has(body, "ctx.r31.s64 = ctx.r11.s64 + " + N(fields.literal_entries) + ";"));
+    CHECK(Has(body, "ctx.r11.u64 = REX_LOAD_U32(ctx.r11.u32 + " + N(fields.literal_bytes) + ");"));
     CHECK(Has(body, "ctx.r11.u64 = REX_LOAD_U32(ctx.r30.u32 + 10780);"));
     CHECK(Has(body, "REX_STORE_U32(ctx.r31.u32 + 8, ctx.r11.u32);"));
     CHECK(Has(body, "ctx.r28.s64 = ctx.r30.s64 + 1024;"));
@@ -545,18 +680,30 @@ void TestD3DStateSettersMatchFilters() {
     CHECK(Has(body, "ctx.r9.u64 = ctx.r9.u64 | ctx.r7.u64;"));
     CHECK(Count(body, "\tsub_") == 2);
   }
-  CHECK(Has(GeneratedBody(module, "sub_824764C8"), "ctx.r11.u64 = ctx.r11.u32 & 0x7F;"));
+  const std::string vertex_shader = hooked("MUA_GUEST_SET_VERTEX_SHADER");
+  CHECK(Has(vertex_shader, "ctx.r11.u64 = REX_LOAD_U8(ctx.r30.u32 + " + N(fields.flags) + ");"));
+  CHECK(Has(vertex_shader, "ctx.r11.u64 = ctx.r11.u32 & 0x7F;"));
+  CHECK(Has(vertex_shader, "REX_STORE_U8(ctx.r30.u32 + " + N(fields.flags) + ", ctx.r11.u8);"));
 
-  const std::string stream = GeneratedBody(module, "sub_8246EF10");
+  const std::string stream = hooked("MUA_GUEST_SET_STREAM_SOURCE");
   CHECK(Has(stream, "REX_STORE_U32(ctx.r11.u32 + 1652, ctx.r9.u32);"));
   CHECK(Has(stream, "ctx.r5.s64 = ctx.r11.s64 + 206;"));
   CHECK(Has(stream, "ctx.r10.s64 = ctx.r6.s64 + 512;"));
   CHECK(Has(stream, "ctx.r7.u64 = ctx.r10.u32 & 0x1FFFFFFF;"));
-  CHECK(Has(stream, "ctx.r11.s64 = ctx.r29.s64 + 3047;"));
+  CHECK(Has(stream, "ctx.r11.s64 = ctx.r29.s64 + " + N(fields.stream_sources / 4) + ";"));
   CHECK(Has(stream, "ctx.r11.u64 = REX_LOAD_U32(ctx.r31.u32 + 10780);"));
   CHECK(Has(stream, "REX_STORE_U32(ctx.r28.u32 + 8, ctx.r11.u32);"));
-  CHECK(Has(stream, "REX_STORE_U8(ctx.r10.u32 + 12256, ctx.r11.u8);"));
-  CHECK(Has(stream, "ctx.r10.u64 = REX_LOAD_U8(ctx.r10.u32 + 11552);"));
+  CHECK(Has(stream, "REX_STORE_U8(ctx.r10.u32 + " + N(fields.stream_strides) + ", ctx.r11.u8);"));
+  CHECK(Has(stream, "ctx.r10.u64 = REX_LOAD_U8(ctx.r10.u32 + " + N(fields.committed_strides) + ");"));
+  CHECK(Has(stream, "// std r11," + N(fields.texture_dirty) + "(r31)"));
+}
+
+void TestD3DStateSettersMatchFilters() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("D3D state setters match their filters\n");
+  for (const D3DBuild& build : kD3DBuilds) {
+    CheckD3DBuild(build);
+  }
 #endif
 }
 
@@ -670,20 +817,239 @@ void TestAlchemyHelpersMatchNative() {
                     ",40(r9);stfs f13,44(r9);lfs f0,-96(r1);lfs f13,-92(r1);stfs f0,48(r9);stfs f13,52(r9);lfs f0,-88(r1)"
                     ";lfs f13,-84(r1);stfs f0,56(r9);stfs f13,60(r9);addi r12,r1,-8;bl 0x82827d50;lwz r12,-8(r1);mtlr r12"
                     ";blr ;"));
-  const std::string pch = ReadSource(module / "marvel_ultimate_alliance_pch.h");
   const std::string native = ReadSource(kSources / "alchemy_native.cpp");
-  CHECK(Has(pch, "#define REX_IMAGE_BASE 0x82000000ull\n") && Has(native, "kImageBase = 0x82000000;"));
-  CHECK(Has(pch, "#define REX_IMAGE_SIZE 0xCB0000ull\n") && Has(native, "kImageSize = 0xCB0000;"));
-  CHECK(Has(pch, "#define REX_CODE_BASE 0x82110000ull\n") && Has(native, "kCodeBase = 0x82110000;"));
-  CHECK(Has(pch, "#define REX_CODE_SIZE 0x7418CCull\n") && Has(native, "kCodeSize = 0x7418CC;"));
-  CHECK(Has(pch, "#define REX_THUNK_RESERVE_SIZE 0x10000ull\n") && Has(native, "kThunkReserveSize = 0x10000;"));
-  const std::string compare = GeneratedBody(module, "sub_82598D98");
-  CHECK(Count(compare, "// fsubs ") == 16);
-  CHECK(Count(compare, "// clrlwi r11,r11,1\n") == 16);
-  CHECK(Count(compare, "// fcmpu cr6,f13,f0\n") == 16);
-  CHECK(Has(compare, "// lis r11,-32255\n") && Has(compare, "// lfs f0,-18268(r11)\n"));
-  CHECK(Has(compare, "// clrlwi r3,r11,24\n") && !Has(compare, "\tsub_"));
-  CHECK(Count(compare, "(r3)\n") == 16 && Count(compare, "(r4)\n") == 16);
+  CHECK(Has(native, "kImageBase = 0x82000000;") && Has(native, "kThunkReserveSize = 0x10000;"));
+#endif
+}
+
+std::string Hex(uint32_t value) {
+  char text[16];
+  std::snprintf(text, sizeof(text), "%X", value);
+  return text;
+}
+
+uint32_t FunctionAddress(const std::string& function) {
+  return uint32_t(std::stoul(function.substr(4), nullptr, 16));
+}
+
+struct AlchemyModule {
+  const char* key;
+  const char* map;
+  uint32_t image_size;
+  uint32_t code_base;
+  uint32_t code_size;
+  uint32_t matrix_epsilon;
+};
+
+const AlchemyModule kAlchemyModules[] = {
+    {"mua1", "guest_map_mua1.h", mua1::mua::guest::kImageSize, mua1::mua::guest::kCodeBase,
+     mua1::mua::guest::kCodeSize, mua1::mua::guest::kMatrixEpsilon},
+    {"mua1-gold", "guest_map_mua1_gold.h", gold::mua::guest::kImageSize, gold::mua::guest::kCodeBase,
+     gold::mua::guest::kCodeSize, gold::mua::guest::kMatrixEpsilon},
+};
+
+// Each game's map gives the native helpers its own module's layout, and the epsilon its matrix compare loads.
+void TestAlchemyModuleConstants() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("Alchemy helpers use their module's layout and epsilon\n");
+  for (const AlchemyModule& game : kAlchemyModules) {
+    const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / game.key;
+    const std::string pch = ReadSource(module / "marvel_ultimate_alliance_pch.h");
+    if (pch.empty()) {
+      std::printf("  %s: module not generated, skipped\n", game.key);
+      continue;
+    }
+    CHECK(Has(pch, "#define REX_IMAGE_BASE 0x82000000ull\n"));
+    CHECK(Has(pch, "#define REX_IMAGE_SIZE 0x" + Hex(game.image_size) + "ull\n"));
+    CHECK(Has(pch, "#define REX_CODE_BASE 0x" + Hex(game.code_base) + "ull\n"));
+    CHECK(Has(pch, "#define REX_CODE_SIZE 0x" + Hex(game.code_size) + "ull\n"));
+    CHECK(Has(pch, "#define REX_THUNK_RESERVE_SIZE 0x10000ull\n"));
+    const std::string compare =
+        GeneratedBody(module, Hooked(ReadSource(kSources / game.map), "MUA_GUEST_MATRIX_NEARLY_EQUAL"));
+    const int high = int16_t((game.matrix_epsilon + 0x8000) >> 16);
+    const int low = int16_t(game.matrix_epsilon & 0xFFFF);
+    CHECK(Count(compare, "// fsubs ") == 16);
+    CHECK(Count(compare, "// clrlwi r11,r11,1\n") == 16);
+    CHECK(Count(compare, "// fcmpu cr6,f13,f0\n") == 16);
+    CHECK(Has(compare, "// lis r11," + std::to_string(high) + "\n") &&
+          Has(compare, "// lfs f0," + std::to_string(low) + "(r11)\n"));
+    CHECK(Has(compare, "// clrlwi r3,r11,24\n") && !Has(compare, "\tsub_"));
+    CHECK(Count(compare, "(r3)\n") == 16 && Count(compare, "(r4)\n") == 16);
+  }
+#endif
+}
+
+std::map<uint32_t, std::string> MappedHooks(const std::string& map) {
+  std::map<uint32_t, std::string> hooks;
+  const std::regex hook(R"(#define (MUA_GUEST_[A-Z_]+) (sub_[0-9A-F]{8}))");
+  for (std::sregex_iterator it(map.begin(), map.end(), hook), end; it != end; ++it) {
+    hooks[FunctionAddress((*it)[2].str())] = (*it)[1].str();
+  }
+  return hooks;
+}
+
+// A function's instructions with its own branch targets as offsets from its start and its calls out as the hook the
+// game's map binds there (or the runtime helper the call becomes), so two games' copies of a function compare equal.
+std::string Fingerprint(const std::filesystem::path& module, const std::string& function,
+                        const std::map<uint32_t, std::string>& hooks) {
+  std::vector<std::string> lines;
+  std::istringstream body(GeneratedBody(module, function));
+  for (std::string line; std::getline(body, line);) {
+    lines.push_back(line);
+  }
+  size_t count = 0;
+  for (const std::string& line : lines) {
+    count += line.starts_with("\t// ");
+  }
+  const uint32_t start = FunctionAddress(function);
+  const uint32_t end = start + uint32_t(count) * 4;
+  const std::regex target("0x([0-9a-f]{8})");
+  const std::regex helper(R"((__\w+)\(ctx, base\))");
+  std::string text;
+  for (size_t i = 0; i < lines.size(); ++i) {
+    if (!lines[i].starts_with("\t// ")) {
+      continue;
+    }
+    const std::string instruction = lines[i].substr(4);
+    std::smatch found;
+    if (!std::regex_search(instruction, found, target)) {
+      text += instruction + ";";
+      continue;
+    }
+    const uint32_t address = uint32_t(std::stoul(found[1].str(), nullptr, 16));
+    std::string name = "external";
+    if (address >= start && address < end) {
+      name = "+" + std::to_string(address - start);
+    } else if (const auto hook = hooks.find(address); hook != hooks.end()) {
+      name = hook->second;
+    } else {
+      std::smatch call;
+      for (size_t j = i + 1; j < lines.size() && !lines[j].starts_with("\t// "); ++j) {
+        if (std::regex_search(lines[j], call, helper)) {
+          name = call[1].str();
+          break;
+        }
+      }
+    }
+    text += found.prefix().str() + name + found.suffix().str() + ";";
+  }
+  return text;
+}
+
+// Gold Edition's Alchemy helpers are MUA1's instruction for instruction, calling Gold Edition's own copies of the same
+// functions, and the guest return addresses the native copies give their calls sit at the same offsets.
+void TestGoldAlchemyHelpersMatchMua1() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("Gold Edition Alchemy helpers match MUA1's\n");
+  const std::filesystem::path root = MUA_GENERATED_ROOT;
+  if (ReadSource(root / "mua1" / "marvel_ultimate_alliance_register.cpp").empty() ||
+      ReadSource(root / "mua1-gold" / "marvel_ultimate_alliance_register.cpp").empty()) {
+    std::printf("  modules not generated, skipped\n");
+    return;
+  }
+  const std::string mua1_map = ReadSource(kSources / "guest_map_mua1.h");
+  const std::string gold_map = ReadSource(kSources / "guest_map_mua1_gold.h");
+  const std::map<uint32_t, std::string> mua1_hooks = MappedHooks(mua1_map);
+  const std::map<uint32_t, std::string> gold_hooks = MappedHooks(gold_map);
+  for (const char* hook :
+       {"MUA_GUEST_ADD_REF", "MUA_GUEST_RELEASE", "MUA_GUEST_ASSIGN_REF", "MUA_GUEST_ASSIGN_ADOPTED_REF",
+        "MUA_GUEST_AND_MASKS", "MUA_GUEST_INDEX_ALLOWED", "MUA_GUEST_IS_OF_TYPE", "MUA_GUEST_MATRIX_MULTIPLY",
+        "MUA_GUEST_MATRIX_COPY", "MUA_GUEST_RELEASE_STRING", "MUA_GUEST_ASSIGN_STRING", "MUA_GUEST_RELEASE_RESOURCE",
+        "MUA_GUEST_APPEND_REF", "MUA_GUEST_FREE_STRING", "MUA_GUEST_STRING_INTERN", "MUA_GUEST_RESIZE_ARRAY"}) {
+    const std::string mua1_print = Fingerprint(root / "mua1", Hooked(mua1_map, hook), mua1_hooks);
+    const std::string gold_print = Fingerprint(root / "mua1-gold", Hooked(gold_map, hook), gold_hooks);
+    if (mua1_print.empty() || mua1_print != gold_print) {
+      std::printf("  %s differs\n", hook);
+    }
+    CHECK(!mua1_print.empty() && mua1_print == gold_print);
+  }
+
+  struct Site {
+    uint32_t mua1;
+    uint32_t gold;
+    const char* hook;
+  };
+  const Site sites[] = {
+      {mua1::mua::guest::kIsOfTypeMetaSite, gold::mua::guest::kIsOfTypeMetaSite, "MUA_GUEST_IS_OF_TYPE"},
+      {mua1::mua::guest::kAssignStringPrepareSite, gold::mua::guest::kAssignStringPrepareSite,
+       "MUA_GUEST_ASSIGN_STRING"},
+      {mua1::mua::guest::kAssignStringInternSite, gold::mua::guest::kAssignStringInternSite, "MUA_GUEST_ASSIGN_STRING"},
+      {mua1::mua::guest::kAssignStringFreeSite, gold::mua::guest::kAssignStringFreeSite, "MUA_GUEST_ASSIGN_STRING"},
+      {mua1::mua::guest::kReleaseResourceParentSite, gold::mua::guest::kReleaseResourceParentSite,
+       "MUA_GUEST_RELEASE_RESOURCE"},
+      {mua1::mua::guest::kReleaseResourceDestroySite, gold::mua::guest::kReleaseResourceDestroySite,
+       "MUA_GUEST_RELEASE_RESOURCE"},
+      {mua1::mua::guest::kAppendRefResizeSite, gold::mua::guest::kAppendRefResizeSite, "MUA_GUEST_APPEND_REF"},
+  };
+  for (const Site& site : sites) {
+    const uint32_t mua1_function = FunctionAddress(Hooked(mua1_map, site.hook));
+    const uint32_t gold_function = FunctionAddress(Hooked(gold_map, site.hook));
+    CHECK(site.mua1 > mua1_function && site.mua1 - mua1_function < 0x100);
+    CHECK(site.mua1 - mua1_function == site.gold - gold_function);
+  }
+#endif
+}
+
+// A fingerprint's mnemonics and the hooks and runtime helpers it calls, without the other operands.
+std::string Shape(const std::string& fingerprint) {
+  const std::regex callee(R"((MUA_GUEST_\w+|__\w+))");
+  std::string shape;
+  std::istringstream instructions(fingerprint);
+  for (std::string instruction; std::getline(instructions, instruction, ';');) {
+    shape += instruction.substr(0, instruction.find(' '));
+    std::smatch name;
+    if (std::regex_search(instruction, name, callee)) {
+      shape += " " + name[1].str();
+    }
+    shape += ";";
+  }
+  return shape;
+}
+
+// Every other function Gold Edition hooks is MUA1's in shape, calling the same hooks and imports; the guest wrappers of
+// the save, profile and content imports and the audio and memory routines are MUA1's instruction for instruction.
+// The rest were rebuilt by Gold Edition's later XDK or its own code changes: the D3D routines and the present path,
+// checked per build above, and game functions whose hooks were written against both games together.
+void TestGoldHooksMatchMua1() {
+#ifdef MUA_GENERATED_ROOT
+  std::printf("Gold Edition hooks match MUA1's functions\n");
+  const std::filesystem::path root = MUA_GENERATED_ROOT;
+  if (ReadSource(root / "mua1" / "marvel_ultimate_alliance_register.cpp").empty() ||
+      ReadSource(root / "mua1-gold" / "marvel_ultimate_alliance_register.cpp").empty()) {
+    std::printf("  modules not generated, skipped\n");
+    return;
+  }
+  const std::set<std::string> rebuilt = {
+      "MUA_GUEST_AUDIO_RENDER", "MUA_GUEST_ITEM_USE", "MUA_GUEST_MENU_ITEM_CREATE", "MUA_GUEST_MOVIE_MENU_UPDATE",
+      "MUA_GUEST_OPEN_MENU", "MUA_GUEST_OPTIONS_INIT", "MUA_GUEST_PRESENT_CALLBACK", "MUA_GUEST_PROFILE_REFRESH_PAD",
+      "MUA_GUEST_SCRIPT_DISPATCH", "MUA_GUEST_SET_PIXEL_SHADER", "MUA_GUEST_SET_PIXEL_SHADER_CONSTANTS",
+      "MUA_GUEST_SET_STREAM_SOURCE", "MUA_GUEST_SET_VERTEX_DECLARATION", "MUA_GUEST_SET_VERTEX_SHADER",
+      "MUA_GUEST_SET_VERTEX_SHADER_CONSTANTS", "MUA_GUEST_STRING_DATA", "MUA_GUEST_SWAP",
+      "MUA_GUEST_UPLOAD_ALU_CONSTANTS", "MUA_GUEST_WORLD_UPDATE"};
+  const std::set<std::string> identical = {
+      "MUA_GUEST_AUDIO_BARRIER",   "MUA_GUEST_RESET_EVENT",       "MUA_GUEST_FENCE_BEGIN",
+      "MUA_GUEST_MEMCPY",          "MUA_GUEST_MEMMOVE",           "MUA_GUEST_MEMSET",
+      "MUA_GUEST_PROFILE_READ",    "MUA_GUEST_PROFILE_WRITE",     "MUA_GUEST_CONTENT_CREATE",
+      "MUA_GUEST_CONTENT_CLOSE",   "MUA_GUEST_CONTENT_ENUMERATE", "MUA_GUEST_DEVICE_SELECTOR"};
+  const std::string mua1_map = ReadSource(kSources / "guest_map_mua1.h");
+  const std::string gold_map = ReadSource(kSources / "guest_map_mua1_gold.h");
+  const std::map<uint32_t, std::string> mua1_hooks = MappedHooks(mua1_map);
+  const std::map<uint32_t, std::string> gold_hooks = MappedHooks(gold_map);
+  size_t compared = 0;
+  for (const auto& [address, hook] : mua1_hooks) {
+    if (rebuilt.contains(hook)) {
+      continue;
+    }
+    const std::string mua1_print = Fingerprint(root / "mua1", Hooked(mua1_map, hook), mua1_hooks);
+    const std::string gold_print = Fingerprint(root / "mua1-gold", Hooked(gold_map, hook), gold_hooks);
+    const bool same = identical.contains(hook) ? mua1_print == gold_print : Shape(mua1_print) == Shape(gold_print);
+    if (mua1_print.empty() || !same) {
+      std::printf("  %s differs\n", hook.c_str());
+    }
+    CHECK(!mua1_print.empty() && same);
+    ++compared;
+  }
+  CHECK(compared + rebuilt.size() == mua1_hooks.size());
 #endif
 }
 
@@ -692,47 +1058,50 @@ void TestAlchemyHelpersMatchNative() {
 void TestGlobalLockSectionsAreSingleAtomics() {
 #ifdef MUA_GENERATED_ROOT
   std::printf("global interrupt lock sections are single atomics\n");
-  const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / "mua1";
-  if (ReadSource(module / "marvel_ultimate_alliance_register.cpp").empty()) {
-    return;
-  }
   const std::set<std::string> allowed = {"lwarx",  "ldarx",  "stwcx.", "stdcx.", "addi",   "add",  "subf",
                                          "or",     "and",    "andc",   "mr",     "li",     "cmpw", "cmplw",
                                          "cmpd",   "cmpwi",  "cmplwi", "bne",    "beq",    "rlwinm", "clrlwi"};
-  size_t sections = 0;
-  for (const auto& entry : std::filesystem::directory_iterator(module)) {
-    if (entry.path().filename().string().find("_recomp.") == std::string::npos) {
+  for (const char* key : {"mua1", "mua1-gold"}) {
+    const std::filesystem::path module = std::filesystem::path(MUA_GENERATED_ROOT) / key;
+    if (ReadSource(module / "marvel_ultimate_alliance_register.cpp").empty()) {
+      std::printf("  %s: module not generated, skipped\n", key);
       continue;
     }
-    std::istringstream lines(ReadSource(entry.path()));
-    bool inside = false;
-    std::string first;
-    std::string last;
-    for (std::string line; std::getline(lines, line);) {
-      if (!line.starts_with("\t// ")) {
+    size_t sections = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(module)) {
+      if (entry.path().filename().string().find("_recomp.") == std::string::npos) {
         continue;
       }
-      const std::string instruction = line.substr(4);
-      const std::string op = instruction.substr(0, instruction.find(' '));
-      if (op == "mtmsrd") {
+      std::istringstream lines(ReadSource(entry.path()));
+      bool inside = false;
+      std::string first;
+      std::string last;
+      for (std::string line; std::getline(lines, line);) {
+        if (!line.starts_with("\t// ")) {
+          continue;
+        }
+        const std::string instruction = line.substr(4);
+        const std::string op = instruction.substr(0, instruction.find(' '));
+        if (op == "mtmsrd") {
+          if (inside) {
+            CHECK((first == "lwarx" || first == "ldarx") && (last == "stwcx." || last == "stdcx."));
+          }
+          inside = instruction.starts_with("mtmsrd r13,");
+          sections += inside;
+          first.clear();
+          continue;
+        }
         if (inside) {
-          CHECK((first == "lwarx" || first == "ldarx") && (last == "stwcx." || last == "stdcx."));
+          CHECK(allowed.contains(op));
+          if (first.empty()) {
+            first = op;
+          }
+          last = op;
         }
-        inside = instruction.starts_with("mtmsrd r13,");
-        sections += inside;
-        first.clear();
-        continue;
-      }
-      if (inside) {
-        CHECK(allowed.contains(op));
-        if (first.empty()) {
-          first = op;
-        }
-        last = op;
       }
     }
+    CHECK(sections > 500);
   }
-  CHECK(sections > 500);
 #endif
 }
 
@@ -748,6 +1117,9 @@ int main() {
   TestMemmoveMatchesMemcpy();
   TestD3DStateSettersMatchFilters();
   TestAlchemyHelpersMatchNative();
+  TestAlchemyModuleConstants();
+  TestGoldAlchemyHelpersMatchMua1();
+  TestGoldHooksMatchMua1();
   TestGlobalLockSectionsAreSingleAtomics();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

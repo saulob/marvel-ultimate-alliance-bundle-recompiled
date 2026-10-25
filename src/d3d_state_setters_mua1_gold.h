@@ -1,0 +1,129 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+
+// Gold Edition's D3D device fields that differ from MUA1's earlier D3D build, and its render state and sampler state
+// setters, in the order of MUA1's tables (both games' D3D state tables list them in the same order with the same
+// defaults). guest_map_tests checks them against the generated code.
+
+namespace mua::d3d {
+
+inline constexpr uint32_t kCommandCursor = 48;
+inline constexpr uint32_t kCommandEnd = 52;
+inline constexpr uint32_t kCommandReserveLimit = 56;
+inline constexpr uint32_t kTextureDirty = 24;
+inline constexpr uint32_t kFlags = 10814;
+inline constexpr uint32_t kVertexDeclaration = 11684;
+inline constexpr uint32_t kCommittedStrides = 11696;
+inline constexpr uint32_t kStreamSources = 12324;
+inline constexpr uint32_t kStreamStrides = 12392;
+inline constexpr uint32_t kTextures = 12408;
+inline constexpr uint32_t kPixelShader = 12556;
+inline constexpr uint32_t kVertexShader = 12560;
+inline constexpr std::array<uint32_t, 4> kSamplerBytes = {11788, 11814, 11840, 11866};
+// In a shader's literal table: the first entry and the size of all entries.
+inline constexpr uint32_t kLiteralEntries = 20;
+inline constexpr uint32_t kLiteralBytes = 16;
+
+}  // namespace mua::d3d
+
+#define MUA_D3D_LEAF_SETTERS(X) \
+  X(82484E28, MUA_FIELD(10440, 4)) \
+  X(82484E58, MUA_FIELD(10440, 4)) \
+  X(82484E88, MUA_FIELD(10428, 4)) \
+  X(82484EC0, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11716, 4)) \
+  X(82484F50, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11712, 4)) \
+  X(82484FE0, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11712, 4)) \
+  X(82485070, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11712, 4)) \
+  X(82485100, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11712, 4)) \
+  X(82485170, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11712, 4)) \
+  X(824851E0, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11712, 4)) \
+  X(82485250, MUA_FIELD(10424, 4), MUA_FIELD(10456, 4), MUA_FIELD(10460, 4), MUA_FIELD(10464, 4), MUA_FIELD(11716, 4)) \
+  X(824852E8, MUA_FIELD(10372, 4)) \
+  X(82485350, MUA_FIELD(10428, 4)) \
+  X(82485380, MUA_FIELD(10336, 4), MUA_FIELD(10340, 4), MUA_FIELD(10344, 4), MUA_FIELD(10348, 4)) \
+  X(82485548, MUA_FIELD(10420, 4), MUA_FIELD(11740, 4)) \
+  X(82485588, MUA_FIELD(10420, 4)) \
+  X(824855B8, MUA_FIELD(10420, 4)) \
+  X(824855F0, MUA_FIELD(10420, 4), MUA_FIELD(11744, 4)) \
+  X(82485630, MUA_FIELD(10420, 4)) \
+  X(82485668, MUA_FIELD(10420, 4)) \
+  X(82485698, MUA_FIELD(10420, 4)) \
+  X(824856D0, MUA_FIELD(10420, 4)) \
+  X(82485708, MUA_FIELD(10420, 4)) \
+  X(82485738, MUA_FIELD(10420, 4)) \
+  X(82485768, MUA_FIELD(10420, 4)) \
+  X(824857A0, MUA_FIELD(10420, 4)) \
+  X(824857D8, MUA_FIELD(10420, 4)) \
+  X(82485808, MUA_FIELD(10371, 1)) \
+  X(82485828, MUA_FIELD(10370, 1)) \
+  X(82485848, MUA_FIELD(10369, 1)) \
+  X(82485868, MUA_FIELD(10367, 1)) \
+  X(82485888, MUA_FIELD(10366, 1)) \
+  X(824858A8, MUA_FIELD(10365, 1)) \
+  X(824858C8, MUA_FIELD(10292, 4), MUA_FIELD(10436, 4)) \
+  X(82485920, MUA_FIELD(10440, 4), MUA_FIELD(10704, 4), MUA_FIELD(10712, 4)) \
+  X(824859E8, MUA_FIELD(10440, 4), MUA_FIELD(10708, 4), MUA_FIELD(10716, 4)) \
+  X(82485A90, MUA_FIELD(10440, 4)) \
+  X(82485AC0, MUA_FIELD(10624, 4)) \
+  X(82485AE0, MUA_FIELD(10332, 4), MUA_FIELD(11724, 4)) \
+  X(82485B20, MUA_FIELD(10332, 4), MUA_FIELD(11728, 4)) \
+  X(82485B60, MUA_FIELD(10332, 4), MUA_FIELD(11732, 4)) \
+  X(82485BA0, MUA_FIELD(10332, 4), MUA_FIELD(11736, 4)) \
+  X(82485D00, MUA_FIELD(10412, 4)) \
+  X(82485D20, MUA_FIELD(10412, 4)) \
+  X(82485D48, MUA_FIELD(10412, 4)) \
+  X(82485D70, MUA_FIELD(10412, 4)) \
+  X(82485D98, MUA_FIELD(10412, 4)) \
+  X(82485DC0, MUA_FIELD(10412, 4)) \
+  X(82485DE8, MUA_FIELD(10412, 4)) \
+  X(82485E10, MUA_FIELD(10412, 4)) \
+  X(82485E30, MUA_FIELD(10416, 4)) \
+  X(82485E50, MUA_FIELD(10416, 4)) \
+  X(82485E78, MUA_FIELD(10416, 4)) \
+  X(82485EA0, MUA_FIELD(10416, 4)) \
+  X(82485EC8, MUA_FIELD(10416, 4)) \
+  X(82485EF0, MUA_FIELD(10416, 4)) \
+  X(82485F18, MUA_FIELD(10416, 4)) \
+  X(82485F40, MUA_FIELD(10416, 4)) \
+  X(82486060, MUA_FIELD(10436, 4), MUA_FIELD(10444, 4)) \
+  X(82486370, MUA_FIELD(10496, 4)) \
+  X(824863A8, MUA_FIELD(10492, 4)) \
+  X(824863E0, MUA_FIELD(10488, 4)) \
+  X(82486418, MUA_FIELD(10560, 4)) \
+  X(82486450, MUA_FIELD(10440, 4)) \
+  X(82486480, MUA_FIELD(10328, 4)) \
+  X(824864A8, MUA_FIELD(10428, 4)) \
+  X(824864D8, MUA_FIELD(10428, 4)) \
+  X(82486510, MUA_FIELD(10572, 4)) \
+  X(82486540, MUA_FIELD(10564, 4)) \
+  X(82486570, MUA_FIELD(10576, 4)) \
+  X(82486598, MUA_FIELD(10568, 4)) \
+  X(824865C8, MUA_FIELD(11716, 4)) \
+  X(82486660, MUA_FIELD(10432, 4)) \
+  X(82486690, MUA_FIELD(10432, 4)) \
+  X(824866C0, MUA_FIELD(10432, 4)) \
+  X(824866F0, MUA_FIELD(10434, 1))
+
+#define MUA_D3D_SAMPLER_SETTERS(X) \
+  X(82486740) \
+  X(82486830) \
+  X(824868C8) \
+  X(824869B8) \
+  X(82486A50) \
+  X(82486AA8) \
+  X(82486B40) \
+  X(82486BB8) \
+  X(82486C60) \
+  X(82486D00) \
+  X(82486D80) \
+  X(82486E00) \
+  X(82486E70) \
+  X(82486EC0) \
+  X(82486F10) \
+  X(82486F60) \
+  X(82486FB8) \
+  X(82487010) \
+  X(82487068) \
+  X(824870C0)

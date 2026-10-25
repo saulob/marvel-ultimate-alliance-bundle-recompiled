@@ -39,9 +39,10 @@ double NowSeconds() {
 
 }  // namespace
 
-#if defined(MUA_RUNTIME_MUA1)
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)
 namespace {
 
+#if defined(MUA_RUNTIME_MUA1)
 constexpr int kMaxTimingReports = 90;
 constexpr double kSlowWorldUpdateMs = 50.0;
 constexpr int kMaxSlowWorldUpdateReports = 40;
@@ -50,10 +51,12 @@ std::mutex g_timing_mutex;
 mua::WorldUpdateTiming g_timing;
 int g_timing_reports = 0;
 int g_slow_update_reports = 0;
+#endif
 
-// DEBUG_SAULO: World::Update host time, also published for the GPU plugin's Performance line.
+// World::Update host time for the GPU plugin's Performance line; MUA1 also logs it (DEBUG_SAULO).
 void NoteWorldUpdateTime(std::chrono::steady_clock::duration elapsed) {
   mua::AddGuestFrameTime(mua::GuestFrameTime::kWorldUpdate, elapsed);
+#if defined(MUA_RUNTIME_MUA1)
   const double ms = std::chrono::duration<double, std::milli>(elapsed).count();
   std::lock_guard lock(g_timing_mutex);
   if (ms >= kSlowWorldUpdateMs && g_slow_update_reports < kMaxSlowWorldUpdateReports) {
@@ -67,6 +70,7 @@ void NoteWorldUpdateTime(std::chrono::steady_clock::duration elapsed) {
     ++g_timing_reports;
     REXLOG_INFO("DEBUG_SAULO {}", *line);
   }
+#endif
 }
 
 }  // namespace
@@ -75,7 +79,7 @@ void NoteWorldUpdateTime(std::chrono::steady_clock::duration elapsed) {
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE));
 REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
   const uint32_t world = ctx.r3.u32;
-#if defined(MUA_RUNTIME_MUA1)
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)
   const auto update_start = std::chrono::steady_clock::now();
   MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
   NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);

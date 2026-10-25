@@ -6,8 +6,8 @@
 #define MUA_GUEST_HAS_AUDIO_BARRIER 1
 #define MUA_GUEST_HAS_RESET_EVENT 1
 #define MUA_GUEST_HAS_MEMMOVE 1
-#define MUA_GUEST_HAS_D3D_STATE_FILTER 0
-#define MUA_GUEST_HAS_ALCHEMY_HELPERS 0
+#define MUA_GUEST_HAS_D3D_STATE_FILTER 1
+#define MUA_GUEST_HAS_ALCHEMY_HELPERS 1
 
 #define MUA_GUEST_PRESENT_CALLBACK sub_82497D00
 #define MUA_GUEST_SWAP sub_82498340
@@ -22,6 +22,38 @@
 #define MUA_GUEST_MEMCPY sub_828564E0
 #define MUA_GUEST_MEMSET sub_82857020
 #define MUA_GUEST_MEMMOVE sub_82859500
+#define MUA_GUEST_SET_VERTEX_DECLARATION sub_8248F378
+#define MUA_GUEST_SET_VERTEX_SHADER sub_8248F160
+#define MUA_GUEST_SET_PIXEL_SHADER sub_8248EE60
+#define MUA_GUEST_SET_STREAM_SOURCE sub_82487220
+#define MUA_GUEST_SET_TEXTURE sub_8248A0A0
+#define MUA_GUEST_SET_VERTEX_SHADER_CONSTANTS sub_8248EA90
+#define MUA_GUEST_SET_PIXEL_SHADER_CONSTANTS sub_8248EB98
+#define MUA_GUEST_UPLOAD_REGISTERS sub_8249FC30
+#define MUA_GUEST_UPLOAD_ALU_CONSTANTS sub_8249FFD0
+#define MUA_GUEST_UPLOAD_FETCH_CONSTANTS sub_8249FE70
+#define MUA_GUEST_WRITE_PACKETS sub_8249F5F8
+#define MUA_GUEST_RESERVE_COMMANDS sub_8248B578
+#define MUA_GUEST_ADD_REF sub_82540AE0
+#define MUA_GUEST_RELEASE sub_82563BB8
+#define MUA_GUEST_ASSIGN_REF sub_8256B0D0
+#define MUA_GUEST_ASSIGN_ADOPTED_REF sub_8256B170
+#define MUA_GUEST_DESTROY_OBJECT sub_82561018
+#define MUA_GUEST_MATRIX_NEARLY_EQUAL sub_825B3330
+#define MUA_GUEST_AND_MASKS sub_823A2C20
+#define MUA_GUEST_INDEX_ALLOWED sub_825027A8
+#define MUA_GUEST_IS_OF_TYPE sub_82541718
+#define MUA_GUEST_MATRIX_MULTIPLY sub_825B9288
+#define MUA_GUEST_MATRIX_COPY sub_825B35C8
+#define MUA_GUEST_RELEASE_STRING sub_82371918
+#define MUA_GUEST_ASSIGN_STRING sub_82389FE0
+#define MUA_GUEST_RELEASE_RESOURCE sub_82494898
+#define MUA_GUEST_APPEND_REF sub_82578180
+#define MUA_GUEST_FREE_STRING sub_8256B3C8
+#define MUA_GUEST_STRING_PREPARE sub_823715F0
+#define MUA_GUEST_STRING_INTERN sub_82570A48
+#define MUA_GUEST_DESTROY_RESOURCE sub_824942F8
+#define MUA_GUEST_RESIZE_ARRAY sub_8256F050
 #define MUA_GUEST_PROFILE_READ sub_824CB818
 #define MUA_GUEST_PROFILE_WRITE sub_824CB880
 #define MUA_GUEST_CONTENT_CREATE sub_8247EDF0
@@ -67,9 +99,8 @@
 namespace mua::guest {
 
 inline constexpr uint32_t kFencePollSite = 0x8248AFB8;
-// Not mapped yet: those waits keep the guest's polling.
-inline constexpr uint32_t kRingSpacePollSite = 0;
-inline constexpr uint32_t kRingProgressPollSite = 0;
+inline constexpr uint32_t kRingSpacePollSite = 0x8248A38C;
+inline constexpr uint32_t kRingProgressPollSite = 0x8248A2E8;
 inline constexpr uint32_t kDeviceFenceOffset = 10768;
 inline constexpr uint32_t kDeviceFlagsOffset = 10813;
 inline constexpr uint32_t kRepeatPresentSite = 0x8249EFE0;
@@ -80,6 +111,17 @@ inline constexpr uint32_t kMainMenuVtable = 0x8203E4CC;
 inline constexpr uint32_t kMainMenuLiveNameEntry = 0x828BE2E0;
 inline constexpr uint32_t kEmptyString = 0x820034D8;
 inline constexpr uint32_t kIndirectTailTable = 0x820C8878;
+inline constexpr uint32_t kMatrixEpsilon = 0x8200B67C;
+inline constexpr uint32_t kIsOfTypeMetaSite = 0x8254173C;
+inline constexpr uint32_t kAssignStringPrepareSite = 0x8238A000;
+inline constexpr uint32_t kAssignStringInternSite = 0x8238A008;
+inline constexpr uint32_t kAssignStringFreeSite = 0x8238A058;
+inline constexpr uint32_t kReleaseResourceParentSite = 0x824948F8;
+inline constexpr uint32_t kReleaseResourceDestroySite = 0x82494900;
+inline constexpr uint32_t kAppendRefResizeSite = 0x825781F8;
+inline constexpr uint32_t kImageSize = 0xD00000;
+inline constexpr uint32_t kCodeBase = 0x82120000;
+inline constexpr uint32_t kCodeSize = 0x760ECC;
 
 // The callback's argument: swap interval in bits 8-11; zero releases the swap at once.
 inline constexpr uint32_t ImmediatePresentArgument(uint32_t argument) {

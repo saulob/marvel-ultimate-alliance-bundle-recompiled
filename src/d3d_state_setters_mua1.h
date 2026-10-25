@@ -1,8 +1,32 @@
 #pragma once
 
-// MUA1's D3D render state setters whose only effects are the listed device fields and the dirty masks, and the
-// sampler state setters that only change one slot's fetch constant and per-slot bytes. guest_map_tests checks both
-// against the generated code.
+#include <array>
+#include <cstdint>
+
+// MUA1's D3D device fields that differ in Gold Edition's later D3D build, its render state setters whose only effects
+// are the listed device fields and the dirty masks, and the sampler state setters that only change one slot's fetch
+// constant and per-slot bytes. guest_map_tests checks them against the generated code.
+
+namespace mua::d3d {
+
+inline constexpr uint32_t kCommandCursor = 40;
+inline constexpr uint32_t kCommandEnd = 44;
+inline constexpr uint32_t kCommandReserveLimit = 48;
+inline constexpr uint32_t kTextureDirty = 16;
+inline constexpr uint32_t kFlags = 10810;
+inline constexpr uint32_t kVertexDeclaration = 11536;
+inline constexpr uint32_t kCommittedStrides = 11552;
+inline constexpr uint32_t kStreamSources = 12188;
+inline constexpr uint32_t kStreamStrides = 12256;
+inline constexpr uint32_t kTextures = 12272;
+inline constexpr uint32_t kPixelShader = 12416;
+inline constexpr uint32_t kVertexShader = 12420;
+inline constexpr std::array<uint32_t, 4> kSamplerBytes = {11652, 11678, 11704, 11730};
+// In a shader's literal table: the first entry and the size of all entries.
+inline constexpr uint32_t kLiteralEntries = 32;
+inline constexpr uint32_t kLiteralBytes = 24;
+
+}  // namespace mua::d3d
 
 #define MUA_D3D_LEAF_SETTERS(X) \
   X(8246C9F8, MUA_FIELD(10440, 4)) \

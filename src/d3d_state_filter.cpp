@@ -1,7 +1,7 @@
 // The game repeats D3D state sets on every geometry bind and material apply, and the D3D setters mark their state
-// dirty every time, so the shader commit (sub_82487620) and the register uploads run again on nearly every draw. A set
-// that matches the current state changes nothing else, so its dirty marking is dropped, as SetStreamSource already
-// does for an unchanged stride.
+// dirty every time, so the shader commit and the register uploads run again on nearly every draw. A set that matches
+// the current state changes nothing else, so its dirty marking is dropped, as SetStreamSource already does for an
+// unchanged stride.
 
 #include "d3d_state_filter.h"
 
@@ -25,7 +25,9 @@
 
 #if MUA_GUEST_HAS_D3D_STATE_FILTER
 
-#include "d3d_state_setters_mua1.h"
+#include "d3d_state_setters.h"
+
+using namespace mua::d3d;
 
 REXCVAR_DEFINE_BOOL(mua_skip_redundant_vertex_declaration, true, "Marvel Ultimate Alliance",
                     "Drop a vertex declaration set that repeats the current one")
@@ -66,30 +68,18 @@ REX_EXTERN(MUA_GUEST_RESERVE_COMMANDS);
 
 namespace {
 
-// The game's D3D device and resource layout.
+// The D3D device and resource layout both D3D builds share; d3d_state_setters.h has the rest.
 constexpr uint32_t kVsConstantDirty = 0;
 constexpr uint32_t kPsConstantDirty = 8;
 constexpr uint32_t kStateDirty = 16;
 constexpr uint32_t kStateDirty2 = 24;
 constexpr uint32_t kStateDirty3 = 32;
-constexpr uint32_t kCommandCursor = 40;
-constexpr uint32_t kCommandEnd = 44;
-constexpr uint32_t kCommandReserveLimit = 48;
 constexpr uint32_t kShaderConstants = 1024;
 constexpr uint32_t kFetchConstants = 1024;
 constexpr uint32_t kVertexFetchConstants = 1648;
 constexpr uint32_t kVsAluConstants = 1792;
 constexpr uint32_t kPsAluConstants = 5888;
 constexpr uint32_t kCurrentFence = 10780;
-constexpr uint32_t kFlags = 10810;
-constexpr uint32_t kVertexDeclaration = 11536;
-constexpr uint32_t kCommittedStrides = 11552;
-constexpr uint32_t kStreamSources = 12188;
-constexpr uint32_t kStreamStrides = 12256;
-constexpr uint32_t kTextures = 12272;
-constexpr uint32_t kPixelShader = 12416;
-constexpr uint32_t kVertexShader = 12420;
-constexpr std::array<uint32_t, 4> kSamplerBytes = {11652, 11678, 11704, 11730};
 constexpr uint32_t kSamplerCount = 26;
 constexpr uint32_t kTextureCount = 32;
 constexpr uint32_t kStreamCount = 16;
@@ -273,8 +263,8 @@ bool LiteralsApplied(uint8_t* base, uint32_t device, uint32_t header) {
   }
   const uint32_t table = header + table_offset;
   const uint32_t shadow = device + kShaderConstants;
-  uint32_t cursor = table + 32;
-  const uint32_t end = cursor + Load32(base, table + 24);
+  uint32_t cursor = table + kLiteralEntries;
+  const uint32_t end = cursor + Load32(base, table + kLiteralBytes);
   while (cursor < end) {
     const uint16_t count = Load<uint16_t>(base, cursor + 2);
     cursor += 4;
@@ -420,11 +410,11 @@ void RunSamplerSetter(PPCContext& ctx, uint8_t* base, PPCFunc* original) {
     return;
   }
   const SamplerSnapshot before = TakeSampler(base, device, slot);
-  const uint64_t dirty = Load64(base, device + kStateDirty);
+  const uint64_t dirty = Load64(base, device + kTextureDirty);
   original(ctx, base);
   const bool unchanged = TakeSampler(base, device, slot) == before;
   if (unchanged) {
-    Store64(base, device + kStateDirty, dirty);
+    Store64(base, device + kTextureDirty, dirty);
   }
   Count(kSamplerState, unchanged);
 }
@@ -659,6 +649,21 @@ void UploadFetchConstants(PPCContext& ctx, uint8_t* base) {
 
 }  // namespace mua::d3d
 
+// MUA1's gpu_producer_counters.cpp owns these hooks while it times them.
+#if !defined(MUA_RUNTIME_MUA1)
+REX_HOOK_RAW(MUA_GUEST_UPLOAD_REGISTERS) {
+  mua::d3d::UploadRegisters(ctx, base);
+}
+
+REX_HOOK_RAW(MUA_GUEST_UPLOAD_ALU_CONSTANTS) {
+  mua::d3d::UploadAluConstants(ctx, base);
+}
+
+REX_HOOK_RAW(MUA_GUEST_UPLOAD_FETCH_CONSTANTS) {
+  mua::d3d::UploadFetchConstants(ctx, base);
+}
+#endif
+
 // r3 device, r4 declaration. One without a binding id has never been bound, so it may be a new object at a freed one's
 // address and still needs the rebind.
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_SET_VERTEX_DECLARATION));
@@ -725,11 +730,11 @@ REX_HOOK_RAW(MUA_GUEST_SET_TEXTURE) {
   uint8_t before[kFetchConstantBytes];
   std::memcpy(before, GuestBytes(base, fetch), sizeof(before));
   const bool same_texture = Load32(base, device + kTextures + slot * 4) == texture;
-  const uint64_t dirty = Load64(base, device + kStateDirty);
+  const uint64_t dirty = Load64(base, device + kTextureDirty);
   MUA_GUEST_ORIGINAL(MUA_GUEST_SET_TEXTURE)(ctx, base);
   const bool skip = same_texture && std::memcmp(before, GuestBytes(base, fetch), sizeof(before)) == 0;
   if (skip) {
-    Store64(base, device + kStateDirty, Load64(base, device + kStateDirty) & ~(slot_bit & ~dirty));
+    Store64(base, device + kTextureDirty, Load64(base, device + kTextureDirty) & ~(slot_bit & ~dirty));
   }
   Count(kTexture, skip);
 }

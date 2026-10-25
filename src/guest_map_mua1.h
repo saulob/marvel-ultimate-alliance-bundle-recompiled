@@ -110,6 +110,17 @@ inline constexpr uint32_t kMainMenuExitCommand = 0x82015DE8;
 inline constexpr uint32_t kMainMenuVtable = 0x8203F634;
 inline constexpr uint32_t kMainMenuLiveNameEntry = 0x8288D5F8;
 inline constexpr uint32_t kEmptyString = 0x820034A0;
+inline constexpr uint32_t kMatrixEpsilon = 0x8200B8A4;
+inline constexpr uint32_t kIsOfTypeMetaSite = 0x82526BB4;
+inline constexpr uint32_t kAssignStringPrepareSite = 0x82374D70;
+inline constexpr uint32_t kAssignStringInternSite = 0x82374D78;
+inline constexpr uint32_t kAssignStringFreeSite = 0x82374DC8;
+inline constexpr uint32_t kReleaseResourceParentSite = 0x8247BB70;
+inline constexpr uint32_t kReleaseResourceDestroySite = 0x8247BB78;
+inline constexpr uint32_t kAppendRefResizeSite = 0x8255D738;
+inline constexpr uint32_t kImageSize = 0xCB0000;
+inline constexpr uint32_t kCodeBase = 0x82110000;
+inline constexpr uint32_t kCodeSize = 0x7418CC;
 
 // The callback's argument: swap interval in the high half, scanline threshold in percent in the low half. No
 // interval and a threshold the scanline never passes release the swap at once.
