@@ -11,7 +11,7 @@
 namespace mua {
 
 inline constexpr char kUpdateReleasesUrl[] =
-    "https://api.github.com/repos/saulob/marvel-ultimate-alliance-recompiled/releases/latest";
+    "https://api.github.com/repos/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/latest";
 inline constexpr char kUpdatePackageName[] = "MarvelUltimateAlliance";
 inline constexpr char kBundleLauncher[] = "marvel_ultimate_alliance_bundle.exe";
 inline constexpr char kUpdateHelper[] = "trg-updater.exe";

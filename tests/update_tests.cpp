@@ -256,7 +256,7 @@ constexpr const char* kReleaseJson = R"({
     "tag_name": "v0.2.0",
     "draft": false,
     "prerelease": false,
-    "html_url": "https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/tag/v0.2.0",
+    "html_url": "https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/tag/v0.2.0",
     "assets": [
       {"name": "MarvelUltimateAlliance-v0.2.0-windows-x64.zip",
        "browser_download_url": "https://github.com/example/windows.zip",
@@ -340,7 +340,7 @@ void TestReleases() {
 
 void TestSecureUrls() {
   std::printf("update addresses\n");
-  CHECK(IsSecureUpdateUrl("https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/download/a.zip"));
+  CHECK(IsSecureUpdateUrl("https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/download/a.zip"));
   CHECK(!IsSecureUpdateUrl("http://github.com/a.zip"));
   CHECK(!IsSecureUpdateUrl("http://127.0.0.1:8000/a.zip"));
   CHECK(!IsSecureUpdateUrl("ftp://github.com/a.zip"));
@@ -833,7 +833,7 @@ void TestManifestRules() {
 void TestBundleDefinitions() {
   std::printf("bundle definitions\n");
   CHECK(std::string_view(mua::kUpdateReleasesUrl) ==
-        "https://api.github.com/repos/saulob/marvel-ultimate-alliance-recompiled/releases/latest");
+        "https://api.github.com/repos/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/latest");
   CHECK(std::string_view(mua::kBundleLauncher) == "marvel_ultimate_alliance_bundle.exe");
   CHECK(std::string_view(mua::kUpdateHelper) == "trg-updater.exe");
   const auto version = ParseVersion("1.2.3-rc1");
@@ -993,7 +993,17 @@ void TestSourceWiring() {
   CHECK(Contains(config, "kBundleLauncher"));
 
   CHECK(Contains(readme, "@VERSION@"));
-  CHECK(Contains(readme, "saulob/marvel-ultimate-alliance-recompiled"));
+  CHECK(Contains(readme, "saulob/marvel-ultimate-alliance-bundle-recompiled"));
+  const std::string project_readme = ReadFile(src + "/../README.md");
+  const std::string release_notes = ReadFile(src + "/../.github/release-notes-v0.1.0.md");
+  const std::string obsolete_slug = std::string("saulob/marvel-ultimate-alliance") + "-recompiled";
+  CHECK(Contains(project_readme, "saulob/marvel-ultimate-alliance-bundle-recompiled/releases/latest"));
+  CHECK(Contains(project_readme, "saulob/marvel-ultimate-alliance-bundle-recompiled/issues"));
+  CHECK(Contains(project_readme, "Steam%20Deck%20experimental"));
+  for (const std::string* text : {&readme, &project_readme, &release_notes, &package, &config}) {
+    CHECK(!text->empty() && !Contains(*text, obsolete_slug));
+  }
+  CHECK(!Contains(std::string(mua::kUpdateReleasesUrl), obsolete_slug));
 }
 
 void TestNoStaleNames() {

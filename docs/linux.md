@@ -1,12 +1,14 @@
-# Linux
+# Linux and Steam Deck
 
 The Linux build is a native x86_64 program, not a Windows build under Proton or Wine. It uses the same code and the same
 launcher as the Windows build: ReXGlue SDK 0.10.0's Linux runtime and the Xenos GPU plugin's Vulkan backend, both built
 with the project's patches. It ships as one AppImage that holds the launcher and the three game programs (Marvel Ultimate
 Alliance, Gold Edition and Marvel Ultimate Alliance 2).
 
-**Experimental.** The AppImage is built and checked by the project's scripts, but this release has not yet been validated
-on real Linux PCs or Steam Deck hardware. Reports are welcome.
+**Experimental.** Linux and Steam Deck are both experimental. The AppImage is built and checked by the project's scripts
+(Ubuntu 20.04, glibc 2.31) and passes the automated packaging checks, but it has not been broadly validated on real Linux
+PCs or Steam Deck hardware. Steam Deck is expected to work through the AppImage, as a native Linux program and not through
+Proton. Reports are welcome.
 
 Every launcher setting works on Linux, apart from two that exist on Windows only. **Graphics card** selects a Direct3D 12
 adapter. On Linux the runtime prefers the dedicated GPU, and the usual selection variables (`DRI_PRIME`,
@@ -38,8 +40,19 @@ is older than GCC 13.
 PLAY starts the AppImage again for the game's own program, so the launcher's window closes and the game's opens; the
 log, settings and saves stay the same.
 
-Steam Deck is not a tested target for this release. Adding the AppImage as a non-Steam game should work, but nobody has
-tried it.
+## Steam Deck (experimental)
+
+The Steam Deck uses the same x86_64 AppImage, which draws with Vulkan through the Deck's Mesa driver. Broad validation on
+real Steam Deck hardware is still limited, so rendering, audio, controllers and performance there are largely unconfirmed.
+
+1. Switch to **Desktop Mode**, download the AppImage into a folder you can write to and make it executable (right-click >
+   **Properties** > **Permissions** > **Is executable**, or `chmod +x`).
+2. Run it and install each game from its disc image on the **Play** page. `game`, `logs` and `user_data` are created next to
+   the AppImage.
+3. Add it to Steam with **Games > Add a Non-Steam Game to My Library**, then play it from **Game Mode**.
+
+If Steam starts it in an environment where FUSE is unavailable, the AppImage unpacks itself and runs anyway (see below).
+Upscaling and the Graphics card selector are Windows only on the Deck too.
 
 ### If the AppImage does not start
 

@@ -7,7 +7,7 @@ Windows with the ReXGlue SDK. This is a native recompilation, not an
 emulator.
 
 Source code and issue tracker:
-https://github.com/saulob/marvel-ultimate-alliance-recompiled
+https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled
 
 
 NO GAME FILES ARE INCLUDED
@@ -114,7 +114,7 @@ If a game does not start, crashes, runs slowly, or has a graphics, audio,
 save, controller or launcher problem, please attach the newest
 marvel_ultimate_alliance_*.log file from the "logs" folder (the launcher's
 About page opens it) to a report at
-https://github.com/saulob/marvel-ultimate-alliance-recompiled/issues
+https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/issues
 and say which game you played and what you were doing. The log already holds
 your Windows version, CPU, graphics card, settings and the frame rate. For an
 audio glitch, press F9 right after it happens, then attach the log. After a

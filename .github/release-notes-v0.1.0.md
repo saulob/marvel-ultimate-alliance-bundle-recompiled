@@ -18,8 +18,8 @@ Play Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel 
 
 The launcher checks the Title ID and Media ID when you pick the disc image and checks `default.xex` after extracting it. It explains if your disc image is a different version.
 
-### Linux AppImage (experimental)
-Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage**, run `chmod +x` on it and start it from a folder you can write to. It is a native Linux build using Vulkan, with the launcher and the three games in one x86_64 AppImage; the launcher and the **Install from package...** flow are the same as on Windows, and `game`, `logs` and `user_data` are kept next to the AppImage. It needs glibc 2.31 or newer (Ubuntu 20.04 generation or later) and a Vulkan driver, and unpacks itself to run where FUSE is unavailable (see `docs/linux.md`). It has been built and checked by script, with little testing on real Linux hardware yet, so please report what you find.
+### Linux and Steam Deck (experimental)
+Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage**, run `chmod +x` on it and start it from a folder you can write to. It is a native Linux build using Vulkan, with the launcher and the three games in one x86_64 AppImage; the launcher and the **Install from package...** flow are the same as on Windows, and `game`, `logs` and `user_data` are kept next to the AppImage. It needs glibc 2.31 or newer (Ubuntu 20.04 generation or later) and a Vulkan driver, and unpacks itself to run where FUSE is unavailable (see `docs/linux.md`). It has been built and checked by script, with little testing on real Linux hardware yet, so please report what you find. On a Steam Deck, make the AppImage executable in Desktop Mode, add it with **Games > Add a Non-Steam Game to My Library** and play it from Game Mode; Steam Deck is expected to work this way but has not been broadly validated on real hardware.
 
 ### What's in it
 - Marvel Ultimate Alliance, Gold Edition and Marvel Ultimate Alliance 2 in one PC bundle, each statically recompiled from its own game code into a native program
@@ -44,7 +44,7 @@ Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage**, run `chmod +x` on it
 - Portable player data in a `user_data` folder next to the program
 
 ### Known limitations
-- Windows is the supported platform. The Linux AppImage is experimental; Upscaling and the **Graphics card** selector are Windows-only, and the CRASH REPORT section is written on Windows only.
+- Windows is the supported platform. The Linux AppImage, which is also the Steam Deck build, is experimental; Upscaling and the **Graphics card** selector are Windows-only, and the CRASH REPORT section is written on Windows only.
 - HD Text is not available for Marvel Ultimate Alliance 2.
 - Offline only: there is no Xbox Live connection or online play.
 - Only the game versions listed above are supported.
@@ -61,5 +61,5 @@ The SHA-256 of each file is published with the release as `MarvelUltimateAllianc
 
 | File | SHA-256 |
 | --- | --- |
-| `MarvelUltimateAlliance-v0.1.0-windows-x64.zip` | `43268e7cb214e6912b6596baeadaba5a4d52fdebfdafb8d1ead96ca8f7ab9289` |
-| `MarvelUltimateAlliance-v0.1.0-x86_64.AppImage` | `7ded3e2d339a8d6e0a287f17d237cf0dfc6cb44cac5cee8242ee6059aefdfc1d` |
+| `MarvelUltimateAlliance-v0.1.0-windows-x64.zip` | `bfb60b6d371bc2070ee6e2b07ae758f149fb92267793aa3078ab8096e811286c` |
+| `MarvelUltimateAlliance-v0.1.0-x86_64.AppImage` | `4760d24a599531722effa176fa87ea65fd6b81464f83b87836aeac105ca030f5` |

@@ -8,7 +8,8 @@
 .DESCRIPTION
   The CMake groups need the build folder that tools\build.ps1 configures. mua_headless_tests need no ReXGlue runtime;
   mua_runtime_tests run beside the patched runtime in tools\rexglue and are skipped (with a warning) when it does not
-  match patches\rexglue-sdk.
+  match patches\rexglue-sdk. mua_update_helper_tests runs against the release CLANG64 trg-updater.exe, which
+  build-updater.ps1 makes first when it is missing or older than its sources.
 
 .EXAMPLE
   .\tools\test.ps1
@@ -116,7 +117,7 @@ try {
 
     $headless = @('achievements_overlay', 'aspect_ratio','audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'game_data', 'game_install', 'game_library', 'gpu_perf_patches', 'graphics_adapter', 'guest_map', 'render_scale', 'keyboard', 'launcher_handoff', 'launcher_header_art', 'launcher_quit',
                   'lifecycle', 'log_path', 'multisampling', 'player_names', 'port_version', 'relaunch', 'resolve_order', 'runtime_config',
-                  'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'skip_intro', 'skip_intro_notice', 'sound_stream_ring', 'update', 'update_controller', 'update_helper', 'user_data', 'window_host',
+                  'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'skip_intro', 'skip_intro_notice', 'sound_stream_ring', 'update', 'update_controller', 'user_data', 'window_host',
                   'window_placement', 'xaudio_barrier', 'xma_packet_continuity', 'd3d12_async_submission', 'd3d12_sampler_memo',
                   'd3d12_copy_validation', 'achievement_metadata', 'hd_text', 'main_menu', 'main_menu_mua2', 'title_shutdown',
                   'upscaling') | ForEach-Object { "mua_$($_)_tests" }
@@ -125,11 +126,16 @@ try {
                  'vmsum_tests') | ForEach-Object { "mua_$_" }
     Write-Host 'Headless tests:'
     foreach ($name in $headless) { Invoke-TestExecutable (Join-Path $BuildDir "$name.exe") @() }
-    $releaseUpdater = Join-Path $Root 'build-release\trg-updater-clang64\trg-updater.exe'
-    if (Test-Path -LiteralPath $releaseUpdater) {
-        Write-Host "Update helper tests against the release CLANG64 build ($releaseUpdater):"
-        Invoke-TestExecutable (Join-Path $BuildDir 'mua_update_helper_tests.exe') @($releaseUpdater)
+    # Only the shipped helper is run: the CMake-built build\trg-updater.exe is compiled but never executed.
+    $releaseUpdaterDir = Join-Path $Root 'build-release\trg-updater-clang64'
+    $releaseUpdater = Join-Path $releaseUpdaterDir 'trg-updater.exe'
+    $updaterInputs = @(Get-ChildItem -LiteralPath (Join-Path $Root 'src\updater') -Recurse -File) + @(Get-Item -LiteralPath (Join-Path $PSScriptRoot 'build-updater.ps1'))
+    if (-not (Test-Path -LiteralPath $releaseUpdater) -or
+        @($updaterInputs | Where-Object { $_.LastWriteTimeUtc -gt (Get-Item -LiteralPath $releaseUpdater).LastWriteTimeUtc }).Count) {
+        & (Join-Path $PSScriptRoot 'build-updater.ps1') -OutDir $releaseUpdaterDir
     }
+    Write-Host "update_helper_tests (release CLANG64 build: $releaseUpdater)"
+    Invoke-TestExecutable (Join-Path $BuildDir 'mua_update_helper_tests.exe') @($releaseUpdater)
     if ($groups -contains 'mua_runtime_tests') {
         Write-Host 'Runtime tests (beside the patched runtime, no window):'
         foreach ($name in $runtime) {

@@ -122,7 +122,7 @@ function Invoke-Prepare {
     $base = "http://127.0.0.1:$Port"
     $release = [ordered]@{
         tag_name = "v$Version"; draft = $false; prerelease = $false
-        html_url = "https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/tag/v$Version"
+        html_url = "https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/tag/v$Version"
         assets = @([ordered]@{ name = $PackageName; browser_download_url = "$base/$PackageName"
                                size = (Get-Item -LiteralPath $zipPath).Length; digest = "sha256:$zipHash" })
     }

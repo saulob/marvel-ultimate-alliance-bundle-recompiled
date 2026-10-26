@@ -2,11 +2,11 @@
 
 # Marvel Ultimate Alliance - PC Port
 
-### Marvel Ultimate Alliance, its Gold Edition and Marvel Ultimate Alliance 2 for Xbox 360, running natively on Windows, and experimentally on Linux, through static recompilation, with the TRG launcher and modern PC options
+### Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2 for Xbox 360, running natively on Windows, and experimentally on Linux and Steam Deck, through static recompilation, with the TRG launcher and modern PC options
 
-[![Latest release](https://img.shields.io/github/v/release/saulob/marvel-ultimate-alliance-recompiled?style=for-the-badge&label=release&color=D4A42C&labelColor=07101f&include_prereleases&cacheSeconds=300)](https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/saulob/marvel-ultimate-alliance-recompiled/total?style=for-the-badge&color=D4A42C&labelColor=07101f&cacheSeconds=300)](https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases)
-![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20experimental-00acc1?style=for-the-badge&labelColor=07101f)
+[![Latest release](https://img.shields.io/github/v/release/saulob/marvel-ultimate-alliance-bundle-recompiled?style=for-the-badge&label=release&color=D4A42C&labelColor=07101f&include_prereleases&cacheSeconds=300)](https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/saulob/marvel-ultimate-alliance-bundle-recompiled/total?style=for-the-badge&color=D4A42C&labelColor=07101f&cacheSeconds=300)](https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20experimental%20%7C%20Steam%20Deck%20experimental-00acc1?style=for-the-badge&labelColor=07101f)
 
 <sub>The original Xbox 360 game code, statically recompiled to native PC code with the <a href="https://github.com/rexglue/rexglue-sdk">ReXGlue SDK</a>. <b>No game files included</b>: bring your own Xbox 360 disc images.</sub>
 
@@ -15,7 +15,7 @@
 ## Features
 
 - **Three games in one bundle**: Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2, each recompiled from its own game code into its own program, chosen from one launcher.
-- **Native static recompilation**: the games' own code, not an emulator. Windows (Direct3D 12), plus an experimental Linux AppImage (Vulkan).
+- **Native static recompilation**: the games' own code, not an emulator. Windows (Direct3D 12), plus an experimental Linux / Steam Deck AppImage (Vulkan).
 - **TRG launcher** with a game selector, a disc image installer per game, and Display, Graphics, Gameplay, Achievements, Controls and About pages for the selected game.
 - **Launcher updates**: the launcher checks GitHub releases once per start and installs a newer release only when you choose UPDATE NOW. Game files, saves, settings and logs are kept.
 - **Display**: Windowed or Borderless Fullscreen (**F11**), window size, monitor and VSync.
@@ -38,7 +38,7 @@ Online play and Xbox Live are not supported.
 ## What you need
 
 - **Windows:** Windows 10 or 11, 64-bit, and a DirectX 12 graphics card, with the latest Microsoft Visual C++ 2015-2022 Redistributable (x64). Most PCs have it.
-- **Linux (experimental):** 64-bit x86 Linux with glibc 2.31 or newer (Ubuntu 20.04 or later), a Vulkan driver and an X11 or Wayland desktop. See [docs/linux.md](docs/linux.md).
+- **Linux and Steam Deck (experimental):** 64-bit x86 Linux or a Steam Deck, with glibc 2.31 or newer (Ubuntu 20.04 or later), a Vulkan driver and an X11 or Wayland desktop. See [docs/linux.md](docs/linux.md).
 - **Your own Xbox 360 disc image** (`.iso`) of each game you want to play, these exact versions:
 
 | | Marvel Ultimate Alliance | Gold Edition | Marvel Ultimate Alliance 2 |
@@ -58,7 +58,7 @@ The launcher checks the Title ID and Media ID when you pick the disc image and c
 
 ## Installing
 
-1. Download **MarvelUltimateAlliance-v0.1.0-windows-x64.zip** from the [latest release](https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/latest) and extract it anywhere you can write to (not "Program Files"). Keep its files together: the launcher starts the game programs beside it.
+1. Download **MarvelUltimateAlliance-v0.1.0-windows-x64.zip** from the [latest release](https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/latest) and extract it anywhere you can write to (not "Program Files"). Keep its files together: the launcher starts the game programs beside it.
 2. Run **marvel_ultimate_alliance_bundle.exe**. The launcher opens.
 3. Choose the game in the strip under the header: **MARVEL ULTIMATE ALLIANCE**, **GOLD EDITION** or **MARVEL ULTIMATE ALLIANCE 2**.
 4. On the **Play** page click **Install from package...** and pick that game's disc image.
@@ -67,9 +67,15 @@ The launcher checks the Title ID and Media ID when you pick the disc image and c
 
 **No game files are included** in the release. Each game is installed on its own; **Reinstall from package...** repairs a game's files and keeps your settings and saves. A new install is extracted and verified next to the old one, which is kept until the new one is in place.
 
-### Linux AppImage (experimental)
+### Linux and Steam Deck
 
-Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage**, make it executable (`chmod +x`) and run it from a folder you can write to. It is a native Linux build that uses Vulkan, with the launcher and the three games in one x86_64 AppImage. The launcher works as on Windows; `game`, `logs` and `user_data` are created next to the AppImage file, outside the read-only AppImage. Where FUSE is not available, the AppImage unpacks itself to a temporary folder and runs from there. Upscaling and the Graphics card selector are Windows only in this release. It has been built and checked by script but not yet validated on a wide range of Linux PCs, and Steam Deck is not a tested target. Details, requirements and known limits are in [docs/linux.md](docs/linux.md).
+**Experimental.** This is a native Linux build (ReXGlue's patched Linux runtime and Vulkan GPU plugin), not Proton or Wine, with the launcher and the three games in one x86_64 AppImage. It is built and checked by script on Ubuntu 20.04 (it needs glibc 2.31 or newer), but it has not been broadly validated on real Linux PCs or Steam Deck hardware: Steam Deck is expected to work through the AppImage, and reports are welcome. Upscaling and the Graphics card selector are Windows only.
+
+1. Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage** from the release and mark it executable (right-click > **Properties** > **Permissions** > **Is executable**, or `chmod +x`).
+2. Run it from a folder you can write to, then install each game from its disc image on the **Play** page as above. The launcher works as on Windows.
+3. On a Steam Deck, do this in **Desktop Mode**, then add the AppImage with **Games > Add a Non-Steam Game to My Library** and play it from **Game Mode**.
+
+`game`, `logs` and `user_data` are created next to the AppImage, outside the read-only AppImage. Where FUSE is not available, the AppImage unpacks itself to a temporary folder and runs from there. Details, requirements and known limits are in [docs/linux.md](docs/linux.md).
 
 ### Windows SmartScreen
 
@@ -118,7 +124,7 @@ The launcher checks the latest GitHub release once per start. A newer release sh
 
 ## Reporting problems
 
-If a game does not start, crashes, runs slowly, or has a graphics, audio, save, controller or launcher problem, please open an [issue](https://github.com/saulob/marvel-ultimate-alliance-recompiled/issues). Attach the newest `marvel_ultimate_alliance_*.log` file from the `logs` folder next to the program (the launcher's About page opens the folder), and say which game you played and what you were doing. The log already records the port version, the game and its files' fingerprint, the system, graphics card and driver, display, the launcher settings and the frame timing, so there is no need to list them. For an audio glitch, press **F9** right after it and then attach the log.
+If a game does not start, crashes, runs slowly, or has a graphics, audio, save, controller or launcher problem, please open an [issue](https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/issues). Attach the newest `marvel_ultimate_alliance_*.log` file from the `logs` folder next to the program (the launcher's About page opens the folder), and say which game you played and what you were doing. The log already records the port version, the game and its files' fingerprint, the system, graphics card and driver, display, the launcher settings and the frame timing, so there is no need to list them. For an audio glitch, press **F9** right after it and then attach the log.
 
 The launcher and the game it starts write to the same log for one session, and the newest 30 sessions are kept. **Detailed logging** (About page) is on by default; turned off, a normal session's log is discarded on exit, while a crash keeps it. After a crash on Windows the log ends with a `CRASH REPORT` section; no separate crash file or minidump is written. On Linux the log also records the distribution, kernel, glibc, Vulkan device and driver; please say whether you start the AppImage from Steam.
 

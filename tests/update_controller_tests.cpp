@@ -229,7 +229,7 @@ struct AssetSpec {
 std::string ReleaseJson(const std::string& tag, bool draft, bool prerelease, const std::vector<AssetSpec>& assets) {
   std::string json = "{\"tag_name\":\"" + tag + "\",\"draft\":" + (draft ? "true" : "false") +
                      ",\"prerelease\":" + (prerelease ? "true" : "false") +
-                     ",\"html_url\":\"https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/tag/" + tag +
+                     ",\"html_url\":\"https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/releases/tag/" + tag +
                      "\",\"assets\":[";
   for (size_t i = 0; i < assets.size(); ++i) {
     const AssetSpec& a = assets[i];
@@ -372,7 +372,7 @@ void TestCheck() {
     CHECK(snapshot.latest_version == "0.2.0");
     CHECK(snapshot.current_version == "0.1.0-dev");
     CHECK(snapshot.asset_name == "MarvelUltimateAlliance-v0.2.0-windows-x64.zip");
-    CHECK(snapshot.release_url.rfind("https://github.com/saulob/marvel-ultimate-alliance-recompiled/", 0) == 0);
+    CHECK(snapshot.release_url.rfind("https://github.com/saulob/marvel-ultimate-alliance-bundle-recompiled/", 0) == 0);
     CHECK(snapshot.install_supported);
     CHECK(s.server.requests() == 0);
     controller.StartCheck();
