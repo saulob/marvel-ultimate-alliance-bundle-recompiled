@@ -248,6 +248,7 @@ set(MUA_RUNTIME_SOURCES
     src/gpu_fence_wait.cpp
     src/guest_atomics.cpp
     src/guest_hook_report.cpp
+    src/guest_semaphore.cpp
     src/indirect_tail_calls.cpp
     src/main_menu.cpp
     src/main_menu_mua2.cpp
@@ -256,6 +257,8 @@ set(MUA_RUNTIME_SOURCES
     src/skip_intro.cpp
     src/sound_stream_ring.cpp
     src/swap_hooks.cpp
+    src/world_update_profile.cpp
+    src/world_update_profiler.cpp
     src/xaudio_worker_barrier.cpp
 )
 
