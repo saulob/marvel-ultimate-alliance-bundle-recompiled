@@ -1,13 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 project(marvel_ultimate_alliance VERSION 0.1.0 LANGUAGES C CXX)
-enable_language(RC)
 set(MUA_VERSION_SUFFIX "-dev")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(NOT WIN32)
-    message(FATAL_ERROR "Only Windows is supported for now")
+if(WIN32)
+    enable_language(RC)
+elseif(NOT (UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64"))
+    message(FATAL_ERROR "Windows x64 and Linux x86_64 are supported")
 endif()
 
 get_property(_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
@@ -15,7 +16,12 @@ if(NOT _multi_config AND NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|RelWithDebInfo|Re
     message(FATAL_ERROR "Set CMAKE_BUILD_TYPE to Debug, RelWithDebInfo or Release (the presets and tools/build.ps1 do): the ReXGlue runtime and GPU plugin are checked per configuration")
 endif()
 
-set(MUA_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/win-amd64")
+# Where tools/setup-sdk.ps1 (Windows) unpacks the pinned SDK, or the extracted linux-amd64 SDK (tools/build.sh).
+if(WIN32)
+    set(MUA_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/win-amd64")
+else()
+    set(MUA_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/rexglue/linux-amd64")
+endif()
 list(APPEND CMAKE_PREFIX_PATH "${MUA_SDK_DIR}")
 
 # Release binaries must not carry the build machine's folders (__FILE__ in log calls).
@@ -233,7 +239,6 @@ set(MUA_RUNTIME_SOURCES
     src/frame_limiter.cpp
     src/frame_pacing.cpp
     src/gpu_fence_wait.cpp
-    src/gpu_producer_counters.cpp
     src/guest_hook_report.cpp
     src/indirect_tail_calls.cpp
     src/main_menu.cpp
@@ -256,6 +261,8 @@ function(mua_enable_thinlto target)
         # lld-link runs the LTO backend at -O2 unless told otherwise; Release compiles at -O3.
         set(_link -flto=thin "$<$<CONFIG:Release>:-Wl,/opt:lldlto=3>"
             "-Wl,/lldltocache:${CMAKE_BINARY_DIR}/lto-cache")
+    elseif(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(_link -flto=thin -fuse-ld=lld "-Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/lto-cache")
     else()
         return()
     endif()
@@ -267,11 +274,20 @@ function(mua_enable_thinlto target)
 endfunction()
 
 # Every build checks that tools/rexglue holds the runtime and GPU plugin built from this branch's patches, and that
-# the copies next to the program are those; tools/build.ps1 rebuilds them when they are not. The Debug files stay stock.
-# Windows PowerShell has a fixed path, unlike a Store pwsh; the module path a parent pwsh sets breaks it.
-find_program(MUA_WINDOWS_POWERSHELL NAMES powershell REQUIRED)
-set(MUA_REXGLUE_CHECK "${CMAKE_COMMAND}" -E env --unset=PSModulePath
-    "${MUA_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/build-patched-rexruntime.ps1" -Check -Config $<CONFIG>)
+# the copies next to the program are those; tools/build.ps1 and tools/build.sh rebuild them when they are not. The
+# Debug files stay stock.
+if(WIN32)
+    # Windows PowerShell has a fixed path, unlike a Store pwsh; the module path a parent pwsh sets breaks it.
+    find_program(MUA_WINDOWS_POWERSHELL NAMES powershell REQUIRED)
+    set(MUA_REXGLUE_CHECK "${CMAKE_COMMAND}" -E env --unset=PSModulePath
+        "${MUA_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/build-patched-rexruntime.ps1" -Check -Config $<CONFIG>)
+    set(MUA_REXGLUE_STAGED -Staged)
+else()
+    find_program(MUA_BASH bash REQUIRED)
+    set(MUA_REXGLUE_CHECK "${MUA_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/build-patched-rexruntime.sh"
+        --check "${MUA_SDK_DIR}" --config $<CONFIG>)
+    set(MUA_REXGLUE_STAGED --staged)
+endif()
 add_custom_target(mua_rexglue_check COMMAND ${MUA_REXGLUE_CHECK} VERBATIM)
 
 # One program per game: it carries that game's recompiled module (generated/<key>), its guest hooks and the host code
@@ -283,32 +299,50 @@ set(MUA_HEADER_ART_FILES
     "${MUA_HEADER_ART_DIR}/header-art-mua2.png")
 
 function(mua_add_game_executable target module_key icon_key)
-    # Resource 1 is the first icon in the executable: Explorer, the taskbar and SDL's window class use it.
-    set(_app_rc "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/${target}.rc")
-    set_source_files_properties("${_app_rc}" PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/icons/${icon_key}/app-icon.ico")
-    add_executable(${target} WIN32 ${MUA_HOST_SOURCES} "${_app_rc}")
+    if(WIN32)
+        # Resource 1 is the first icon in the executable: Explorer, the taskbar and SDL's window class use it.
+        set(_app_rc "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/${target}.rc")
+        set_source_files_properties("${_app_rc}" PROPERTIES
+            OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/icons/${icon_key}/app-icon.ico")
+        add_executable(${target} WIN32 ${MUA_HOST_SOURCES} "${_app_rc}")
+        target_link_options(${target} PRIVATE "LINKER:/MANIFESTINPUT:${MUA_APP_MANIFEST}")
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${MUA_APP_MANIFEST}")
+    else()
+        add_executable(${target} ${MUA_HOST_SOURCES})
+    endif()
     if(NOT "${module_key}" STREQUAL "")
         target_sources(${target} PRIVATE ${MUA_RUNTIME_SOURCES})
     endif()
-    target_link_options(${target} PRIVATE "LINKER:/MANIFESTINPUT:${MUA_APP_MANIFEST}")
-    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${MUA_APP_MANIFEST}")
 
-    mua_setup_target(${target} ${module_key} GPU_PLUGINS xenos)
+    mua_setup_target(${target} "${module_key}" GPU_PLUGINS xenos)
 
     mua_enable_thinlto(${target})
     if(TARGET ${target}_recomp)
         mua_enable_thinlto(${target}_recomp)
     endif()
-    target_link_libraries(${target} PRIVATE trg::launcher shcore synchronization dxgi shell32 dbghelp)
-    # The SDK stages its DLLs only when the program links, so a rebuilt runtime or GPU plugin has to
-    # make it link again; tools/build.ps1 also checks the staged copies.
-    foreach(_sdk_dll rexruntime rexruntimed rexruntimerd rexgpu-xenos rexgpu-xenosd rexgpu-xenosrd)
-        if(EXISTS "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
-            set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
-                "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
-        endif()
-    endforeach()
+    target_link_libraries(${target} PRIVATE trg::launcher)
+    # The SDK stages its libraries only when the program links, so a rebuilt runtime or GPU plugin has to
+    # make it link again; tools/build.ps1 and tools/build.sh also check the staged copies.
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE shcore synchronization dxgi shell32 dbghelp)
+        foreach(_sdk_dll rexruntime rexruntimed rexruntimerd rexgpu-xenos rexgpu-xenosd rexgpu-xenosrd)
+            if(EXISTS "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
+                set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+                    "${MUA_SDK_DIR}/bin/${_sdk_dll}.dll")
+            endif()
+        endforeach()
+    else()
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE_DIR:${target}>"
+            VERBATIM
+        )
+        foreach(_sdk_lib rexruntime rexruntimed rexruntimerd rexgpu-xenos rexgpu-xenosd rexgpu-xenosrd)
+            if(EXISTS "${MUA_SDK_DIR}/lib/lib${_sdk_lib}.so")
+                set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+                    "${MUA_SDK_DIR}/lib/lib${_sdk_lib}.so")
+            endif()
+        endforeach()
+    endif()
     add_dependencies(${target} mua_rexglue_check)
 
     target_compile_definitions(${target} PRIVATE
@@ -333,18 +367,21 @@ function(mua_add_game_executable target module_key icon_key)
 endfunction()
 
 # The helper the launcher copies out of the installation and starts: it must run while the installed files are replaced.
-add_executable(trg-updater WIN32
-    src/updater/helper_main.cpp
-    src/updater/install_transaction.cpp
-    src/updater/sha256.cpp
-    src/updater/update_job.cpp
-    src/updater/update_paths.cpp
-    src/updater/update_platform.cpp
-)
-target_include_directories(trg-updater PRIVATE src)
-target_link_libraries(trg-updater PRIVATE shell32)
-set_target_properties(trg-updater PROPERTIES OUTPUT_NAME "trg-updater")
-mua_enable_thinlto(trg-updater)
+# The AppImage replaces itself instead (src/updater/update_platform.cpp).
+if(WIN32)
+    add_executable(trg-updater WIN32
+        src/updater/helper_main.cpp
+        src/updater/install_transaction.cpp
+        src/updater/sha256.cpp
+        src/updater/update_job.cpp
+        src/updater/update_paths.cpp
+        src/updater/update_platform.cpp
+    )
+    target_include_directories(trg-updater PRIVATE src)
+    target_link_libraries(trg-updater PRIVATE shell32)
+    set_target_properties(trg-updater PROPERTIES OUTPUT_NAME "trg-updater")
+    mua_enable_thinlto(trg-updater)
+endif()
 
 mua_add_game_executable(marvel_ultimate_alliance "" launcher)
 mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)
@@ -354,18 +391,20 @@ mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2 mua2)
 add_custom_target(mua_rexglue_staging ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE:rex::gpu-xenos>"
         "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
-    COMMAND ${MUA_REXGLUE_CHECK} -Staged "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
+    COMMAND ${MUA_REXGLUE_CHECK} ${MUA_REXGLUE_STAGED} "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
     VERBATIM
 )
 add_dependencies(mua_rexglue_staging marvel_ultimate_alliance marvel_ultimate_alliance_mua1
                  marvel_ultimate_alliance_mua1_gold marvel_ultimate_alliance_mua2)
 
-# Extracts an Xbox 360 disc image: tools/extract-disc.ps1
-add_executable(extract_disc tools/extract_disc/main.cpp)
-target_link_libraries(extract_disc PRIVATE trg::launcher rex::runtime)
-add_custom_command(TARGET extract_disc POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:extract_disc> $<TARGET_FILE_DIR:extract_disc>
-    COMMAND_EXPAND_LISTS)
+# Extracts an Xbox 360 disc image: tools/extract-disc.ps1, a Windows development step.
+if(WIN32)
+    add_executable(extract_disc tools/extract_disc/main.cpp)
+    target_link_libraries(extract_disc PRIVATE trg::launcher rex::runtime)
+    add_custom_command(TARGET extract_disc POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:extract_disc> $<TARGET_FILE_DIR:extract_disc>
+        COMMAND_EXPAND_LISTS)
+endif()
 
 # Builds the HD text overlay from a game folder and writes the rebuilt atlases: cmake --build <dir> --target
 # hd_text_preview, then hd_text_preview <game folder> <output folder> [render scale]
@@ -383,9 +422,16 @@ target_include_directories(hd_text_preview PRIVATE src)
 # Writes the decompressed guest image for offline analysis: cmake --build <dir> --target dump_image
 add_executable(dump_image EXCLUDE_FROM_ALL tools/dump_image/main.cpp)
 target_link_libraries(dump_image PRIVATE rex::runtime)
-add_custom_command(TARGET dump_image POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:dump_image> $<TARGET_FILE_DIR:dump_image>
-    COMMAND_EXPAND_LISTS)
+if(WIN32)
+    add_custom_command(TARGET dump_image POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:dump_image> $<TARGET_FILE_DIR:dump_image>
+        COMMAND_EXPAND_LISTS)
+else()
+    set_target_properties(dump_image PROPERTIES BUILD_RPATH "$ORIGIN")
+    add_custom_command(TARGET dump_image POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE_DIR:dump_image>"
+        VERBATIM)
+endif()
 
 # Headless tests, not part of the default build: cmake --build <dir> --target mua_tests
 # (tools/test.ps1 builds and runs them without the ReXGlue runtime where they do not need it).

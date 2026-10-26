@@ -1,13 +1,15 @@
 find_package(rexglue 0.10.0 QUIET CONFIG)
 if(NOT rexglue_FOUND)
-    message(FATAL_ERROR "ReXGlue SDK 0.10.0 not found under tools/rexglue: run tools/setup-sdk.ps1")
+    message(FATAL_ERROR "ReXGlue SDK 0.10.0 not found under tools/rexglue: run tools/setup-sdk.ps1 (Windows) or extract rexglue-sdk-0.10.0-linux-amd64.zip into tools/rexglue (Linux)")
 endif()
 message(STATUS "Found ReXGlue SDK ${REXGLUE_VERSION_STRING} at ${rexglue_DIR}")
 
 set(MUA_RECOMP_OPTIONS "")
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Guest SEH scopes emit __try/__except, which traps hardware faults only under asynchronous EH.
     list(APPEND MUA_RECOMP_OPTIONS -fasync-exceptions -gline-tables-only)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    list(APPEND MUA_RECOMP_OPTIONS -gline-tables-only)
 endif()
 
 # Each game is recompiled from its own default.xex into generated/<key>, and each executable carries one such module:
@@ -40,18 +42,24 @@ function(mua_declare_module key codegen_target)
     set(MUA_MODULE_${_id}_SOURCES "${_sources}" PARENT_SCOPE)
     set(MUA_MODULE_${_id}_CODEGEN "${codegen_target}" PARENT_SCOPE)
 
-    add_custom_command(
-        OUTPUT "${_dir}/codegen.build.stamp"
-        COMMAND $<TARGET_FILE:rex::rexglue> codegen --ignore-stamp "${_manifest}"
-        COMMAND ${CMAKE_COMMAND} -E touch "${_dir}/codegen.build.stamp"
-        DEPENDS $<TARGET_FILE:rex::rexglue> ${_mua_codegen_prev_stamp}
-        DEPFILE "${_dir}/codegen.d"
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        COMMENT "Generating recompiled code for ${key}"
-        VERBATIM
-    )
-    add_custom_target(${codegen_target} DEPENDS "${_dir}/codegen.build.stamp")
-    set(_mua_codegen_prev_stamp "${_dir}/codegen.build.stamp" PARENT_SCOPE)
+    # Codegen runs on Windows only, with the patched rexglue.exe (tools/build-patched-rexruntime.ps1): a Linux build
+    # compiles the generated code as it is, and tools/check-guest-code.sh refuses it when it is not current.
+    if(WIN32)
+        add_custom_command(
+            OUTPUT "${_dir}/codegen.build.stamp"
+            COMMAND $<TARGET_FILE:rex::rexglue> codegen --ignore-stamp "${_manifest}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_dir}/codegen.build.stamp"
+            DEPENDS $<TARGET_FILE:rex::rexglue> ${_mua_codegen_prev_stamp}
+            DEPFILE "${_dir}/codegen.d"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMENT "Generating recompiled code for ${key}"
+            VERBATIM
+        )
+        add_custom_target(${codegen_target} DEPENDS "${_dir}/codegen.build.stamp")
+        set(_mua_codegen_prev_stamp "${_dir}/codegen.build.stamp" PARENT_SCOPE)
+    else()
+        add_custom_target(${codegen_target})
+    endif()
 endfunction()
 
 mua_declare_module(mua1-gold marvel_ultimate_alliance_mua1_gold_codegen)

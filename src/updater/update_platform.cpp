@@ -211,17 +211,18 @@ std::filesystem::path CurrentExecutablePath() {
 }
 
 bool HasOriginalAppImage(std::filesystem::path& path) {
-  const char* value = std::getenv("APPIMAGE");
-  if (!value || !*value) {
+  const char* appimage = std::getenv("APPIMAGE");
+  const char* appdir = std::getenv("APPDIR");
+  if (!appimage || !*appimage || !appdir || !*appdir) {
+    return false;
+  }
+  const std::filesystem::path candidate(appimage);
+  if (!IsRunningAppImage(candidate, appdir, CurrentExecutablePath())) {
     return false;
   }
   std::error_code ec;
-  const std::filesystem::path candidate = std::filesystem::weakly_canonical(std::filesystem::path(value), ec);
-  if (ec || !IsRegularFile(candidate)) {
-    return false;
-  }
-  path = candidate;
-  return true;
+  path = std::filesystem::weakly_canonical(candidate, ec);
+  return !ec;
 }
 
 bool LaunchApplication(const std::filesystem::path& executable, const std::vector<std::string>& arguments,

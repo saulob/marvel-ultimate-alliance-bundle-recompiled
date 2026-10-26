@@ -17,6 +17,7 @@
 #include <intrin.h>
 #endif
 #else
+#include <gnu/libc-version.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
@@ -157,10 +158,8 @@ std::string OsDescription() {
   utsname info{};
   const std::string distribution = LinuxDistribution();
   std::string name = distribution.empty() ? "Linux" : "Linux " + distribution;
-  if (uname(&info) == 0 && info.release[0] != '\0') {
-    name += " (kernel " + std::string(info.release) + ")";
-  }
-  return name;
+  const std::string kernel = uname(&info) == 0 && info.release[0] != '\0' ? std::string(info.release) : "unknown";
+  return name + " (kernel " + kernel + ", glibc " + gnu_get_libc_version() + ")";
 #endif
 }
 

@@ -5,5 +5,9 @@
 # The runtime patches are applied with git apply.
 patches/rexglue-sdk/* text eol=lf
 patches/trg-launcher/* text eol=lf
+
+# Linux packaging runs on Linux; line endings must stay LF.
+packaging/linux/* text eol=lf
+patches/appimage-runtime/* text eol=lf
 patches/**/*.patch -whitespace
 src/updater/third_party/** -whitespace

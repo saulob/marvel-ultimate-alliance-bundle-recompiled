@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -19,6 +20,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 #include <rex/audio/audio_history.h>
 #include <rex/hook.h>
@@ -198,7 +200,7 @@ class WindowHost final : public rex::ui::WindowListener, public rex::ui::WindowI
       UpdateCursor();
       return;
     }
-    // DEBUG_SAULO: the key still reaches the game, so a binding on F9 keeps working.
+    // F9 logs the recent audio history; the key still reaches the game, so a binding on F9 keeps working.
     if (e.virtual_key() == rex::ui::VirtualKey::kF9 && !e.prev_state()) {
       rex::audio::history::Dump("F9");
     }
@@ -262,6 +264,7 @@ mua::WindowSize CurrentDrawableSize(rex::ui::Window* window) {
   if (window == nullptr) {
     return {};
   }
+#if defined(_WIN32)
   if (const HWND handle = static_cast<HWND>(window->GetNativeWindowHandle()); handle != nullptr) {
     RECT rect{};
     if (GetClientRect(handle, &rect)) {
@@ -272,6 +275,7 @@ mua::WindowSize CurrentDrawableSize(rex::ui::Window* window) {
       }
     }
   }
+#endif
   return {int(window->GetActualPhysicalWidth()), int(window->GetActualPhysicalHeight())};
 }
 

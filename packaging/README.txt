@@ -60,9 +60,17 @@ settings with it. To update by hand, extract the new version over the old
 folder, or move "user_data" (and "game") into the new one: deleting the old
 folder deletes "user_data" with it.
 
-If a game does not start or crashes, please attach the newest file from the
-"logs" folder to a report at
+REPORTING A PROBLEM
+-------------------
+If a game does not start, crashes, runs slowly, or has a graphics, audio,
+save, controller or launcher problem, please attach the newest
+marvel_ultimate_alliance_*.log file from the "logs" folder (the launcher's
+About page opens it) to a report at
 https://github.com/saulob/marvel-ultimate-alliance-recompiled/issues
+and say which game you played and what you were doing. The log already holds
+your Windows version, CPU, graphics card, settings and the frame rate. For an
+audio glitch, press F9 right after it happens, then attach the log. After a
+crash, the same log ends with a CRASH REPORT section.
 
 
 WINDOWS SMARTSCREEN

@@ -162,7 +162,7 @@ void TestText() {
 
 void TestParsing() {
   std::printf("saved values and presenter effect\n");
-  CHECK(ParseUpscaler("fsr") == Upscaler::kFsr1);
+  CHECK(ParseUpscaler("fsr") == (kUpscalerAvailable ? Upscaler::kFsr1 : Upscaler::kOff));
   CHECK(ParseUpscaler("off") == Upscaler::kOff);
   CHECK(ParseUpscaler("") == Upscaler::kOff);
   CHECK(ParseUpscaler("nis") == Upscaler::kOff);

@@ -201,7 +201,8 @@ void TestBuildWiring() {
 
   for (const auto& entry : std::filesystem::directory_iterator(MUA_SRC_DIR)) {
     const std::string name = entry.path().filename().string();
-    if (name == "launcher.cpp" || name == "launcher_header_art.h") {
+    // The updater's bundle list names the files it requires in a release package.
+    if (name == "launcher.cpp" || name == "launcher_header_art.h" || name == "update_bundle.h") {
       continue;
     }
     const std::string text = ReadFile(entry.path());

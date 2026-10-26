@@ -99,6 +99,13 @@ void TestClassification() {
 
   CHECK(mua::ShouldLogInMinimalMode(info, "core", "Marvel Ultimate Alliance port 0.1.0"));
   CHECK(mua::ShouldLogInMinimalMode(info, "core", "Build: RelWithDebInfo x86-64 | ReXGlue SDK 0.10.0"));
+  CHECK(mua::ShouldLogInMinimalMode(info, "core", "Program: mua2"));
+  CHECK(mua::ShouldLogInMinimalMode(info, "core", "Selected game: Marvel Ultimate Alliance 2 | profile=mua2-x360"));
+  CHECK(mua::ShouldLogInMinimalMode(info, "core", "Game paths: game=mua2 data=game/mua2"));
+  CHECK(mua::ShouldLogInMinimalMode(info, "core", "HD text: On | scale=2x"));
+  CHECK(mua::ShouldLogInMinimalMode(info, "core", "Launcher handoff: marvel_ultimate_alliance_mua2.exe pid=1"));
+  CHECK(!mua::ShouldLogInMinimalMode(info, "core", "Content create: user=0 root=save"));
+  CHECK(!mua::ShouldLogInMinimalMode(info, "core", "Game timing: frame rate=60"));
   CHECK(mua::ShouldLogInMinimalMode(info, "core", "User data: portable path selected"));
   CHECK(mua::ShouldLogInMinimalMode(info, "core", "Player settings: settings.toml"));
   CHECK(mua::ShouldLogInMinimalMode(info, "core", "Game files: valid (profile mua-gold-x360, default.xex 3981312 bytes)"));

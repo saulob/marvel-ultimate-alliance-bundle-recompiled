@@ -1,5 +1,5 @@
-// DEBUG_SAULO: samples the delta the game's World::Update used, bounded to one log line per 10 seconds and at most
-// 12 lines, to check the frame model (variable delta from the wall clock) in a real run at each frame rate.
+// Times World::Update for the GPU plugin's Performance line and logs, every 10 seconds, the delta the game stepped by
+// (variable, from the wall clock), so a report shows whether game time keeps up with real time.
 
 #include <algorithm>
 #include <atomic>
@@ -20,12 +20,14 @@
 
 namespace {
 
-constexpr int kMaxReports = 12;
+constexpr int kMaxPresentReports = 12;
 constexpr uint32_t kGameFrameIntervalOffset = 24;
+constexpr double kSlowWorldUpdateMs = 50.0;
+constexpr int kMaxSlowWorldUpdateReports = 40;
 
 std::mutex g_report_mutex;
 mua::PacingReport g_report;
-int g_reports = 0;
+std::atomic<int> g_slow_update_reports{0};
 
 std::mutex g_present_mutex;
 mua::CallRateReport g_present_report;
@@ -37,39 +39,14 @@ double NowSeconds() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-}  // namespace
-
-namespace {
-
-#if defined(MUA_RUNTIME_MUA1)
-constexpr int kMaxTimingReports = 90;
-constexpr double kSlowWorldUpdateMs = 50.0;
-constexpr int kMaxSlowWorldUpdateReports = 40;
-
-std::mutex g_timing_mutex;
-mua::WorldUpdateTiming g_timing;
-int g_timing_reports = 0;
-int g_slow_update_reports = 0;
-#endif
-
-// World::Update host time for the GPU plugin's Performance line; MUA1 also logs it (DEBUG_SAULO).
+// A slow update next to a Hitch line puts the hitch on the game thread rather than the GPU.
 void NoteWorldUpdateTime(std::chrono::steady_clock::duration elapsed) {
   mua::AddGuestFrameTime(mua::GuestFrameTime::kWorldUpdate, elapsed);
-#if defined(MUA_RUNTIME_MUA1)
   const double ms = std::chrono::duration<double, std::milli>(elapsed).count();
-  std::lock_guard lock(g_timing_mutex);
-  if (ms >= kSlowWorldUpdateMs && g_slow_update_reports < kMaxSlowWorldUpdateReports) {
-    ++g_slow_update_reports;
-    REXLOG_WARN("DEBUG_SAULO slow world update: {:.1f} ms", ms);
+  if (ms >= kSlowWorldUpdateMs &&
+      g_slow_update_reports.fetch_add(1, std::memory_order_relaxed) < kMaxSlowWorldUpdateReports) {
+    REXLOG_WARN("Slow world update: {:.1f} ms", ms);
   }
-  if (g_timing_reports >= kMaxTimingReports) {
-    return;
-  }
-  if (const auto line = g_timing.Add(ms, NowSeconds())) {
-    ++g_timing_reports;
-    REXLOG_INFO("DEBUG_SAULO {}", *line);
-  }
-#endif
 }
 
 }  // namespace
@@ -80,22 +57,18 @@ REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
   const auto update_start = std::chrono::steady_clock::now();
   MUA_GUEST_ORIGINAL(MUA_GUEST_WORLD_UPDATE)(ctx, base);
   NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);
-  if (g_reports >= kMaxReports) {
-    return;
-  }
   const double delta = std::bit_cast<float>(mua::LoadBE32(base, world + mua::guest::kWorldDeltaOffset));
   const double now =
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   std::lock_guard lock(g_report_mutex);
   if (const auto line = g_report.Add(delta, now)) {
-    ++g_reports;
-    REXLOG_INFO("DEBUG_SAULO frame pacing: frame rate={} | {}",
+    REXLOG_INFO("Game timing: frame rate={} | {}",
                 mua::FrameRateLabel(mua::ConfiguredFrameRate(), mua::RuntimeFramePolicy()), *line);
   }
 }
 
-// DEBUG_SAULO: the game's max_fps option follows the launcher rate; the interval is stored at options + 24. A game
-// paced by the host limiter keeps its own interval.
+// The game's max_fps option follows the launcher rate; the interval is stored at options + 24. A game paced by the
+// host limiter keeps its own interval.
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_OPTIONS_INIT));
 REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT) {
   const uint32_t options = ctx.r3.u32;
@@ -103,7 +76,7 @@ REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT) {
   const mua::FramePolicy& policy = mua::RuntimeFramePolicy();
   const int launcher = mua::ConfiguredFrameRate();
   if (policy.host_limiter) {
-    REXLOG_INFO("DEBUG_SAULO game max_fps: launcher={} game interval={:.6f} s (host limiter at {})",
+    REXLOG_INFO("Game max_fps: launcher={} game interval={:.6f} s (host limiter at {})",
                 mua::FrameRateLabel(launcher, policy),
                 std::bit_cast<float>(mua::LoadBE32(base, options + kGameFrameIntervalOffset)),
                 mua::ProjectLimiterRate(launcher, policy));
@@ -112,7 +85,7 @@ REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT) {
   const int effective = mua::GameMaxFpsFor(launcher, policy);
   const float interval = mua::GameFrameInterval(effective);
   mua::StoreBE32(base, options + kGameFrameIntervalOffset, std::bit_cast<uint32_t>(interval));
-  REXLOG_INFO("DEBUG_SAULO game max_fps: launcher={} native={} effective={} interval={:.6f} s",
+  REXLOG_INFO("Game max_fps: launcher={} native={} effective={} interval={:.6f} s",
               mua::FrameRateLabel(launcher, policy), policy.native_max_fps,
               effective > 0 ? std::to_string(effective) : std::string("Unlimited"), interval);
 }
@@ -121,7 +94,7 @@ namespace mua {
 
 void CountPresentForDiagnostics() {
   std::lock_guard lock(g_present_mutex);
-  if (g_present_reports >= kMaxReports) {
+  if (g_present_reports >= kMaxPresentReports) {
     return;
   }
   const double now = NowSeconds();
@@ -131,7 +104,7 @@ void CountPresentForDiagnostics() {
   t_last_present_seconds = now;
   if (const auto rate = g_present_report.Add(now)) {
     ++g_present_reports;
-    REXLOG_INFO("DEBUG_SAULO frame pacing: presents/s={:.1f} | fastest present interval={:.1f} ms", *rate,
+    REXLOG_INFO("Presents: presents/s={:.1f} | fastest present interval={:.1f} ms", *rate,
                 1000.0 * g_fastest_present_seconds);
     g_fastest_present_seconds = 1e9;
   }

@@ -1,0 +1,18 @@
+Ported unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0019-linux-command-thread-wait.linux.patch (the same patch in hard-corps-uprising-, geometry-wars-retro-evolved-2- and crackdown-xbox360-recompiled).
+
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 058e186..3d94ed4 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -266,8 +266,9 @@ void CommandProcessor::WorkerThreadMain() {
+           loop_count++;
+         } else {
+           // Background work needs timely polling; thread calls posted without a write pointer
+-          // update are only noticed when the wait times out.
+-          rex::thread::Wait(write_ptr_index_event_.get(), true,
++          // update are only noticed when the wait times out. Not alertable: this thread has no
++          // APCs, and an alertable wait is polled in 1 ms slices on POSIX.
++          rex::thread::Wait(write_ptr_index_event_.get(), false,
+                             std::chrono::milliseconds(poll_background_work ? 1 : 5));
+         }
+         write_ptr_index = write_ptr_index_.load();

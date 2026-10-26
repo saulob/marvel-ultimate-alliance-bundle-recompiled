@@ -1,0 +1,45 @@
+Adds four running-total perf counters the title's host code feeds in every configuration (world update time and
+count, host frame limiter wait, guest GPU fence wait). The D3D12 Performance line (0136) and the audio history
+(0138) read them.
+
+diff --git a/include/rex/perf/counter.h b/include/rex/perf/counter.h
+--- a/include/rex/perf/counter.h
++++ b/include/rex/perf/counter.h
+@@ -49,6 +49,12 @@
+   kPipelineCacheHits,
+   kPipelineCacheMisses,
+ 
++  // Guest frame, running totals the title's host code adds to in every configuration
++  kGuestUpdateNs,
++  kGuestUpdates,
++  kGuestLimiterWaitNs,
++  kGuestFenceWaitNs,
++
+   kCount  // sentinel -- must be last
+ };
+ 
+diff --git a/src/core/perf/counter.cpp b/src/core/perf/counter.cpp
+--- a/src/core/perf/counter.cpp
++++ b/src/core/perf/counter.cpp
+@@ -50,6 +50,10 @@
+     "texture_cache_misses",
+     "pipeline_cache_hits",
+     "pipeline_cache_misses",
++    "guest_update_ns",
++    "guest_updates",
++    "guest_limiter_wait_ns",
++    "guest_fence_wait_ns",
+ };
+ static_assert(std::size(kCounterNames) == kNumCounters, "kCounterNames must match CounterId enum");
+ 
+@@ -73,6 +77,10 @@
+     false,  // kTextureCacheMisses
+     false,  // kPipelineCacheHits
+     false,  // kPipelineCacheMisses
++    true,   // kGuestUpdateNs        (running total)
++    true,   // kGuestUpdates         (running total)
++    true,   // kGuestLimiterWaitNs   (running total)
++    true,   // kGuestFenceWaitNs     (running total)
+ };
+ static_assert(std::size(kIsGauge) == kNumCounters, "kIsGauge must match CounterId enum");
+ 

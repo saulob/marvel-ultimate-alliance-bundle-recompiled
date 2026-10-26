@@ -180,6 +180,29 @@ void TestGuestAndRuntimeState() {
   CHECK(Has(text, "display=2560x1440 | window=1280x720"));
   CHECK(Has(text, "timing=guest 60Hz | host VBlank (VSync On)"));
   CHECK(Has(text, "renderer=render=100% 1280x720 | msaa=2x native"));
+  CHECK(!Has(text, "Guest thread:"));
+  CHECK(!Has(text, "Guest data address:"));
+}
+
+void TestGuestThreadState() {
+  std::printf("guest thread registers and the guest address a fault referenced\n");
+  mua::CrashReport report = BaseReport();
+  report.guest_thread.known = true;
+  report.guest_thread.thread_id = 0x1A;
+  report.guest_thread.lr = 0x8248A2B8;
+  report.guest_thread.r1 = 0x7004FC40;
+  for (uint32_t i = 0; i < 10; ++i) {
+    report.guest_thread.r3_to_r12[i] = 0x100 + i;
+  }
+  report.guest_thread.data_address_known = true;
+  report.guest_thread.data_address = 0x00000010;
+  std::string text = Format(report);
+  CHECK(Has(text, "Guest thread: 0x0000001A"));
+  CHECK(Has(text, "Guest registers: lr=0x8248A2B8 r1=0x7004FC40 r3=0x00000100 r4=0x00000101"));
+  CHECK(Has(text, "r12=0x00000109\n"));
+  CHECK(Has(text, "Guest data address: 0x00000010 (virtual)"));
+  report.guest_thread.data_address_physical = true;
+  CHECK(Has(Format(report), "Guest data address: 0x00000010 (physical)"));
 }
 
 void TestRecursionGuard() {
@@ -405,6 +428,7 @@ int main() {
   TestStackFrames();
   TestParametersBounded();
   TestGuestAndRuntimeState();
+  TestGuestThreadState();
   TestRecursionGuard();
 #if defined(_WIN32)
   TestInstallOnce();

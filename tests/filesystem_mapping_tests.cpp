@@ -2,6 +2,7 @@
 // only with an update root. Scratch folders, and the real game folder when a path is given.
 // Run: mua_filesystem_mapping_tests [game folder]
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <filesystem>
@@ -107,6 +108,12 @@ std::string SoundPath(const std::string& file) {
   return "sounds\\eng\\" + file.substr(0, 1) + "\\" + (file[1] == '_' ? "_" : file.substr(1, 1)) + "\\" + file;
 }
 
+fs::path HostSoundPath(const std::string& file) {
+  std::string path = SoundPath(file);
+  std::replace(path.begin(), path.end(), '\\', '/');
+  return path;
+}
+
 // Gold Edition's own voice banks: its eight downloadable heroes and the downloadable missions' voices.
 constexpr std::array kGoldOnlyStreams = {"cyclps_v.zss", "doom_v.zss",  "hulk_v.zss",  "mgneto_v.zss",
                                          "ntcrwl_v.zss", "sabrth_v.zss", "venom_v.zss", "x_vce_dlc.zss"};
@@ -118,10 +125,10 @@ void TestGoldSoundRoots() {
   const fs::path root = fs::temp_directory_path() / "mua_filesystem_mapping_tests_gold";
   fs::remove_all(root);
   for (const char* file : {"x_common.zsm", "x_voice.zss", "x_vce_dlc.zss", "venom_m.zsm", "venom_v.zss"}) {
-    Touch(root / "game" / fs::path(SoundPath(file)));
+    Touch(root / "game" / HostSoundPath(file));
   }
-  Touch(root / "update" / fs::path(SoundPath("x_voice.zsm")));
-  Touch(root / "update" / fs::path(SoundPath("x_common.zsm")));
+  Touch(root / "update" / HostSoundPath("x_voice.zsm"));
+  Touch(root / "update" / HostSoundPath("x_common.zsm"));
 
   auto vfs = Mount(root / "game", {});
   CHECK(vfs->ResolvePath("update:\\" + SoundPath("x_voice.zsm")) == nullptr);

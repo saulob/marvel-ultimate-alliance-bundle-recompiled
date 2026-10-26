@@ -539,7 +539,11 @@ void ApplyDynamicPageStreaming(std::optional<GameId> game) {
   constexpr char kKey[] = "gpu_stream_dynamic_pages";
   const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(kKey);
   if (!info) {
+#if defined(_WIN32)
     REXLOG_WARN("Dynamic page streaming: {} is not in this runtime", kKey);
+#else
+    REXLOG_INFO("Dynamic page streaming: off (Direct3D 12 only)");
+#endif
     return;
   }
   if (game && info->source == rex::cvar::Source::kDefault) {
@@ -726,7 +730,11 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.graphics.anti_aliasing = diagnostics.launcher_graphics.anti_aliasing;
   diagnostics.graphics.texture_filtering = diagnostics.launcher_graphics.texture_filtering;
   diagnostics.graphics.allow_invalid_fetch_constants = CvarText("gpu_allow_invalid_fetch_constants", "false");
+#if defined(_WIN32)
   diagnostics.graphics.render_target_path = CvarText("render_target_path_d3d12", "default");
+#else
+  diagnostics.graphics.render_target_path = CvarText("render_target_path_vulkan", "default");
+#endif
 
   diagnostics.input.keyboard_mode = settings.GetBool("mnk_mode", true) ? "On" : "Off";
   diagnostics.input.controller = window.controller;

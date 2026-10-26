@@ -5,11 +5,10 @@
 
 namespace mua {
 
-// Single-Log Windows Crash Reporting: an unhandled exception appends one CRASH REPORT block to the
-// log file of the current run (Windows Crash Reporting, SetUnhandledExceptionFilter / Unhandled
-// Exception Filter). A bug report only needs that same log, so no crash-*.txt and no minidump is
-// written. The Windows write path avoids the logger, the heap and application locks; the block
-// formatter stays pure so its layout is tested without a real crash. A no-op outside Windows.
+// An unhandled exception appends one CRASH REPORT block to the log file of the current run. A bug
+// report only needs that same log, so no crash-*.txt and no minidump is written. The Windows write
+// path avoids the logger, the heap and application locks; the block formatter stays pure so its
+// layout is tested without a real crash. A no-op outside Windows.
 
 struct CrashLogTime {
   int year = 0;
@@ -41,6 +40,19 @@ struct CrashGuestRef {
   bool known = false;
 };
 
+// The PowerPC state of the guest thread that crashed and, for a fault inside guest memory, the guest address it
+// referenced.
+struct CrashGuestThread {
+  bool known = false;
+  uint32_t thread_id = 0;
+  uint32_t lr = 0;
+  uint32_t r1 = 0;
+  uint32_t r3_to_r12[10] = {};
+  bool data_address_known = false;
+  bool data_address_physical = false;
+  uint32_t data_address = 0;
+};
+
 struct CrashReport {
   CrashLogTime time;
   uint32_t code = 0;
@@ -57,6 +69,7 @@ struct CrashReport {
   const char* build_config = nullptr;
   uint64_t uptime_ms = 0;
   CrashGuestRef guest_function;
+  CrashGuestThread guest_thread;
   bool has_context = false;
   uint64_t instruction_pointer = 0;
   uint64_t stack_pointer = 0;
@@ -75,6 +88,11 @@ void SetCrashRuntimeState(const char* gpu, const char* display, const char* timi
 // Resolves a native instruction address to a recompiled guest function. Installed by the guest-function lookup.
 using CrashGuestFunctionResolver = void (*)(uint64_t host_address, CrashGuestRef* out);
 void SetCrashGuestFunctionResolver(CrashGuestFunctionResolver resolver);
+
+// Reads the crashing thread's guest state; `referenced_address` is the host address an access violation touched, or 0.
+// Runs inside the crash handler, so it must not allocate or lock.
+using CrashGuestThreadResolver = void (*)(uint64_t referenced_address, CrashGuestThread* out);
+void SetCrashGuestThreadResolver(CrashGuestThreadResolver resolver);
 
 // Symbolic name of a common Windows exception code ("STATUS_HEAP_CORRUPTION" for 0xC0000374), or
 // nullptr for codes outside the short table.

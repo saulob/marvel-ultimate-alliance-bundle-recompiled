@@ -19,7 +19,6 @@
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
-#include <rex/system/user_module.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/windowed_app_context.h>
 #include <rex/version.h>
@@ -60,6 +59,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   using rex::ReXApp::ReXApp;
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(rex::ui::WindowedAppContext& ctx) {
+    mua::SetApplicationId();
     const mua::RecompiledImage& image = mua::GetRecompiledImage();
     if (image.available) {
       mua::InstallGuestFunctionTable(image.info.func_mappings);
@@ -82,6 +82,22 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       rex::cvar::SetFlagFromCommandLine("log_file", mua::Utf8(*inherited));
       mua::InstallCrashReports();
     }
+    // ReXGlue writes its logs beside the executable, which is read-only inside an AppImage.
+    if (InsideAppImage() && rex::cvar::GetFlagByName("log_file").empty()) {
+      const std::filesystem::path logs = mua::LogsFolder(port_folder, paths.user_data_root, {}, true);
+      if (const std::filesystem::path file = mua::NextLogFile(logs, "marvel_ultimate_alliance"); !file.empty()) {
+        rex::cvar::SetFlagByName("log_file", mua::Utf8(file));
+      }
+    }
+  }
+
+  bool SetupPresentation() override {
+    if (rex::ReXApp::SetupPresentation()) {
+      return true;
+    }
+    REXLOG_WARN("Graphics unavailable; opening the launcher without graphics");
+    mua::RunLauncherWithoutGraphics(DescribeSelectedGame());
+    return false;
   }
 
   void OnPostInitLogging() override {
@@ -97,6 +113,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     mua::ApplyDetailedLogging();
     mua::InstallSessionLogCleanup();
     mua::RemoveDiscardedSessionLogs();
+    mua::RemoveOldSessionLogs();
     const mua::ApplicationIdentity identity{
         .product = "Marvel Ultimate Alliance",
         .version = MUA_PORT_VERSION,
@@ -107,20 +124,17 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     };
     REXLOG_INFO("{}", mua::FormatApplicationVersion(identity));
     REXLOG_INFO("{}", mua::FormatBuildIdentity(identity));
-    if (!mua::GetRecompiledImage().available) {
+    const mua::RecompiledImage& image = mua::GetRecompiledImage();
+    REXLOG_INFO("Program: {}", ImageKey(image));
+    if (image.game && !image.available) {
       REXLOG_WARN("Recompiled game code is not part of this build");
     }
     mua::ApplyGraphicsAdapter();
   }
 
   void OnPostLoadXexImage() override {
-    const mua::RecompiledImage& image = mua::GetRecompiledImage();
-    const auto module = runtime()->kernel_state()->GetExecutableModule();
-    REXLOG_INFO("DEBUG_SAULO xex loaded: module={} image base={:08X} size={:X} code={:08X}+{:X} entry={:08X}",
-                ImageKey(image), image.info.image_base, image.info.image_size, image.info.code_base,
-                image.info.code_size, module ? module->entry_point() : 0u);
 #if MUA_HAS_RECOMPILED_CODE
-    mua::LogGuestHooks(image.info.func_mappings);
+    mua::LogGuestHooks(mua::GetRecompiledImage().info.func_mappings);
 #endif
   }
 
@@ -152,9 +166,6 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     }
     const mua::GameId selected = game_settings_.SelectedGame();
     REXLOG_INFO("{}", mua::SelectedGameLogText(library_->State(selected), RuntimeBlocker(mua::Game(selected))));
-    const mua::RecompiledImage& image = mua::GetRecompiledImage();
-    REXLOG_INFO("DEBUG_SAULO runtime: module={} selected={} xex sha256={}", ImageKey(image), mua::Game(selected).key,
-                library_->State(selected).check.xex_sha256);
     if (IsLauncher()) {
       show_launcher_ = mua::ShouldShowLauncher(
           mua::BootableGame(*library_, selected, RuntimeBlocker(mua::Game(selected))) != nullptr);
@@ -173,6 +184,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     if (window()) {
       window()->SetTitle(kWindowTitle);
     }
+    mua::ApplyWindowIcon();
     game_settings_.CaptureLateRegistered();
     const mua::GameState selected = library_->State(game_settings_.SelectedGame());
     if (!IsLauncher()) {
@@ -221,7 +233,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     };
     const std::filesystem::path port_folder = mua::PortFolder();
     const std::filesystem::path logs_dir =
-        mua::LogsFolder(port_folder, defaults.user_data_root, mua::ActiveLogFile(), false);
+        mua::LogsFolder(port_folder, defaults.user_data_root, mua::ActiveLogFile(), InsideAppImage());
     mua::LauncherPaths paths{defaults.user_data_root,
                              mua::PlayerSettingsPath(defaults.user_data_root),
                              logs_dir,
@@ -255,7 +267,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+#if defined(_WIN32)
     REXLOG_INFO("Scheduling: {}", trg::TuneProcessScheduling());
+#endif
     // The game volume is mounted and the title has not opened its archive yet.
     if (const auto game = mua::GetRecompiledImage().game) {
       mua::hd_text::InstallHdText(runtime()->file_system(), *game,
@@ -334,6 +348,22 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
 
   static bool IsLauncher() { return !mua::GetRecompiledImage().game; }
 
+  static bool InsideAppImage() { return mua::PortFolder() != rex::filesystem::GetExecutableFolder(); }
+
+  // What the launcher without graphics shows: the game this start would run.
+  mua::GraphicsFallbackInfo DescribeSelectedGame() const {
+    mua::GraphicsFallbackInfo info;
+    if (!library_) {
+      return info;
+    }
+    const mua::GameState& state = library_->State(game_settings_.SelectedGame());
+    info.game_name = std::string(state.game->display_name);
+    info.game_dir = mua::Utf8(state.data_dir);
+    info.game_files_ready = mua::CanPlay(state, RuntimeBlocker(*state.game));
+    info.game_files_status = info.game_files_ready ? "Ready" : "Not ready to play";
+    return info;
+  }
+
   static std::string_view ImageKey(const mua::RecompiledImage& image) {
     return image.game ? mua::Game(*image.game).key : std::string_view("launcher");
   }
@@ -362,7 +392,6 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     return std::format("The {} runtime is not part of this build.", game.display_name);
   }
 
-  // DEBUG_SAULO: the achievements the game's XDBF lists and the store they persist to.
   void LogAchievementStore(const mua::RecompiledImage& image) {
     if (!image.game || !runtime() || !runtime()->kernel_state()) {
       return;
@@ -370,31 +399,32 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     auto& achievements = runtime()->kernel_state()->achievements();
     const auto listed = achievements.ListAchievements();
     const auto unlocked = std::ranges::count_if(listed, [&](const auto& info) { return achievements.IsUnlocked(info.id); });
-    REXLOG_INFO("[DEBUG_SAULO][Achievement] store: module={} listed={} unlocked={} store={}", ImageKey(image), listed.size(),
-                unlocked, mua::Utf8(mua::AchievementStoreFile(mua::Game(*image.game), user_data_.root)));
+    REXLOG_INFO("Achievements: listed={} unlocked={} store={}", listed.size(), unlocked,
+                mua::Utf8(mua::AchievementStoreFile(mua::Game(*image.game), user_data_.root)));
     static std::atomic<int> logged{0};
-    achievements.RegisterUnlockCallback([key = std::string(ImageKey(image))](const rex::system::AchievementEvent& event) {
+    achievements.RegisterUnlockCallback([](const rex::system::AchievementEvent& event) {
       if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
-        REXLOG_INFO("[DEBUG_SAULO][Achievement] unlocked: module={} id={} label={}", key, event.achievement.id,
-                    event.achievement.label);
+        REXLOG_INFO("Achievement unlocked: id={} label={}", event.achievement.id, event.achievement.label);
       }
     });
   }
 
-  // DEBUG_SAULO: the files the GPU plugin builds its pipelines from; size 0/missing means a cold build.
+  // Missing or empty storage means the pipelines are built during play, a common cause of first-run stutter.
   static void LogPipelineStorage(const std::filesystem::path& cache_root, uint32_t title_id) {
+    std::string text;
     for (const char* suffix : {"xsh", "rov.d3d12.xpso", "rtv.d3d12.xpso"}) {
       const std::filesystem::path file = cache_root / "shaders" / "shareable" / std::format("{:08X}.{}", title_id, suffix);
       std::error_code ec;
       const auto size = std::filesystem::file_size(file, ec);
-      REXLOG_INFO("DEBUG_SAULO pipeline storage: module={} {} {}", ImageKey(mua::GetRecompiledImage()),
-                  mua::Utf8(file.filename()), ec ? std::string("missing") : std::format("{} bytes", size));
+      text += std::format("{}{} {}", text.empty() ? "" : " | ", mua::Utf8(file.filename()),
+                          ec ? std::string("missing") : std::format("{} bytes", size));
     }
+    REXLOG_INFO("Pipeline storage: {}", text);
   }
 
   static bool StartRuntime(const mua::GameState& game) {
     const std::filesystem::path executable = mua::PortFolder() / std::string(game.game->executable);
-    REXLOG_INFO("DEBUG_SAULO starting {} in {}", game.game->key, mua::Utf8(executable));
+    REXLOG_INFO("Starting {}", mua::Utf8(executable));
     return mua::RelaunchExecutable(executable, L"--mua_skip_launcher=true");
   }
 
@@ -420,8 +450,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       paths.game_data_root = game.data_dir;
       paths.user_data_root = mua::GameUserDataRoot(*game.game, defaults.user_data_root);
       paths.cache_root = mua::GameCacheRoot(*game.game, defaults.cache_root);
-      REXLOG_INFO("DEBUG_SAULO routed: game={} data={} saves={} cache={}", game.game->key,
-                  mua::Utf8(paths.game_data_root), mua::Utf8(paths.user_data_root), mua::Utf8(paths.cache_root));
+      REXLOG_INFO("Game paths: game={} data={} saves={} cache={}", game.game->key, mua::Utf8(paths.game_data_root),
+                  mua::Utf8(paths.user_data_root), mua::Utf8(paths.cache_root));
     } else {
       paths.game_data_root.clear();
       REXLOG_ERROR("{} cannot be started: refusing to boot it", game.game->display_name);

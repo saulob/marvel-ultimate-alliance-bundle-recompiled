@@ -266,6 +266,30 @@ bool IsRegularFile(const std::filesystem::path& path) {
   return !IsLinkReparsePoint(path);
 }
 
+bool IsRunningAppImage(const std::filesystem::path& appimage, const std::filesystem::path& appdir,
+                       const std::filesystem::path& executable) {
+  if (appimage.empty() || appdir.empty() || executable.empty()) {
+    return false;
+  }
+  std::error_code ec;
+  const std::filesystem::path file = std::filesystem::weakly_canonical(appimage, ec);
+  if (ec || file.empty()) {
+    return false;
+  }
+  const std::string name = file.filename().string();
+  constexpr std::string_view kPrefix = "MarvelUltimateAlliance-v";
+  constexpr std::string_view kSuffix = "-x86_64.AppImage";
+  if (name.size() <= kPrefix.size() + kSuffix.size() || !std::string_view(name).starts_with(kPrefix) ||
+      !std::string_view(name).ends_with(kSuffix)) {
+    return false;
+  }
+  const std::string version = name.substr(kPrefix.size(), name.size() - kPrefix.size() - kSuffix.size());
+  if (!std::all_of(version.begin(), version.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); })) {
+    return false;
+  }
+  return IsRegularFile(file) && !PathIsWithin(file, appdir) && PathIsWithin(executable, appdir);
+}
+
 bool HasReparseAncestor(const std::filesystem::path& path, const std::filesystem::path& root) {
   std::error_code ec;
   const std::filesystem::path relative = path.lexically_relative(root);

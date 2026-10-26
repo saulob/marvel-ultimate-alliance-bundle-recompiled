@@ -12,8 +12,8 @@ Each game keeps its saves, profiles, achievement progress and own settings in it
 `mua1_gold` and `mua2`. Earlier layouts (`user_data\games`, and Gold Edition's title folder directly
 in `user_data`) are moved there at the next start unless the new folder already exists.
 
-Status: bring-up. The launcher detects the game files, the generated recompiled code builds and the runtime boots into guest
-code; the first rendered frame has not been confirmed yet.
+Status: the three games run on Windows 10 and 11 (x64, Direct3D 12). A native Linux x86_64 build (Vulkan) ships as one
+AppImage with the launcher and the three games; it is experimental, see [docs/linux.md](docs/linux.md).
 
 ## Game files
 
@@ -44,7 +44,7 @@ XUID, saves and achievements stay where they are.
 
 The Graphics page also has Upscaling: AMD FSR 1 scales the game's picture to the window, and its Quality, Balanced and
 Performance choices make the game draw a smaller back buffer, 1.5, 1.7 and 2 times smaller along each axis than the
-Render resolution, which costs less GPU time. Off, the default, keeps the plain scaling.
+Render resolution, which costs less GPU time. Off, the default, keeps the plain scaling. Upscaling is Windows only.
 
 The Graphics page's HD Text (Marvel Ultimate Alliance and Gold Edition, On by default) rebuilds the game's text and
 controller icons at higher resolution: the games draw them from font atlases sized for 720p. At Render resolution 2x the
@@ -56,8 +56,26 @@ with the port. They take about 6 MB of memory at 2x and 24 MB at 3x and 4x. At 1
 [mua1|mua1-gold]` (CMake target `hd_text_preview`) writes the original and rebuilt atlases as PNG files without starting
 the game.
 
-While playing, F2 shows or hides the frame counter, and the window title shows the frame rate (Gameplay page). F10 and F12
-are reserved and do nothing yet; F9 is unassigned.
+While playing, F2 shows or hides the frame counter, F7 opens the achievements, and the window title shows the frame rate
+(Gameplay page). F9 writes the last seconds of audio activity to the log; the key still reaches the game. F10 and F12 are
+reserved and do nothing yet.
+
+## Reporting a problem
+
+If a game does not start, crashes, runs slowly, or has a graphics, audio, save, controller or launcher problem, please
+open an [issue](https://github.com/saulob/marvel-ultimate-alliance-recompiled/issues). Attach the newest
+`marvel_ultimate_alliance_*.log` from the `logs` folder next to the program (the launcher's About page opens it), and say
+which game you played and what you were doing. The log already records the port version and build, the program and game,
+the game files' fingerprint, Windows version, CPU, graphics card, display, the Display and Graphics settings, the frame
+rate and where each frame's time goes every 10 seconds, shader compilation stalls, the audio device and the save calls,
+so there is no need to list them. For an audio glitch, press F9 right after it and then attach the log.
+
+On Linux the log also records the distribution, kernel, glibc, Vulkan device and driver and the SDL video driver; please
+say whether you start the AppImage from Steam.
+
+**Detailed logging** (About page) is on by default; turned off, a normal session still writes a shorter log but discards
+it on exit, while a crash keeps it. After a crash the same log ends with a `CRASH REPORT` section; no separate crash file
+or minidump is written. The launcher and the game it starts share one log, and the newest 30 sessions are kept.
 
 ## Updates
 
@@ -68,7 +86,9 @@ the release asset's digest or the matching `.sha256` asset and must match before
 replaces the whole bundle together (the launcher, the three game programs, `trg-updater.exe`, the runtime and GPU plugin,
 the shipped config, the launcher assets and the licenses) through `trg-updater.exe`, which waits for the launcher to exit,
 backs up what it replaces, rolls back on any failure and restarts `marvel_ultimate_alliance.exe`. `game`, `user_data`,
-`logs`, `cache` and `settings.toml` are never part of a package and are refused if one carries them.
+`logs`, `cache` and `settings.toml` are never part of a package and are refused if one carries them. The Linux
+AppImage looks for `MarvelUltimateAlliance-v<version>-x86_64.AppImage` and its `.sha256` instead, replaces itself after
+the same check and starts the new AppImage; the folders next to it are not touched.
 
 `.\tools\package-release.ps1` builds the Release configuration into `build-release` and writes the package and its
 `.sha256` into `dist`; the updater only finds a package named for a plain version, so a release sets `MUA_VERSION_SUFFIX`
@@ -79,6 +99,14 @@ copy of the build under `%TEMP%\mua-update-test`, serves the release on 127.0.0.
 `MUA_UPDATE_TEST=1` and `MUA_UPDATE_TEST_RELEASE_JSON`. In that mode only, the package may come from `http://127.0.0.1`;
 the SHA-256 check is the normal one. `MUA_UPDATE_TEST_CURRENT_VERSION` and `MUA_UPDATE_TEST_ASSET_SHA256` override the
 installed version and the expected digest. See the script's help for the steps, including a forced rollback.
+
+## Linux
+
+The Linux AppImage, `MarvelUltimateAlliance-v<version>-x86_64.AppImage`, needs x86_64 Linux with glibc 2.31 or newer
+(Ubuntu 20.04 or later) and a Vulkan driver. Make it executable and run it; `game`, `logs` and `user_data` stay next to
+it. Where FUSE is unavailable it unpacks itself and runs. [docs/linux.md](docs/linux.md) has the details, the known
+limits and how releases are built (`tools/package-linux.sh` on Ubuntu 20.04, `tools/build.sh` and `tools/test.sh` for
+plain builds). The Linux build compiles the code `tools/codegen.ps1` generated on Windows.
 
 ## Build (Windows)
 

@@ -35,13 +35,6 @@
 #include <fmt/format.h>
 
 #include "path_utf8.h"
-
-#if defined(MUA_RUNTIME_MUA1)
-#include <array>
-#include <unordered_map>
-
-#include <rex/cvar.h>
-#endif
 #endif
 
 namespace mua {
@@ -205,23 +198,22 @@ bool InitSymbols(HANDLE process) {
   return symbols;
 }
 
-// module!function+offset, or the bare address.
+// module!function+offset; without symbols (a release has no PDB) module+offset, which the build's PDB resolves later.
 std::string FrameName(HANDLE process, DWORD64 address) {
+  IMAGEHLP_MODULEW64 module{};
+  module.SizeOfStruct = sizeof(module);
+  const bool has_module = SymGetModuleInfoW64(process, address, &module) != FALSE;
   alignas(SYMBOL_INFOW) uint8_t buffer[sizeof(SYMBOL_INFOW) + 256 * sizeof(wchar_t)] = {};
   auto* symbol = reinterpret_cast<SYMBOL_INFOW*>(buffer);
   symbol->SizeOfStruct = sizeof(SYMBOL_INFOW);
   symbol->MaxNameLen = 255;
   DWORD64 displacement = 0;
   if (!SymFromAddrW(process, address, &displacement, symbol)) {
-    return fmt::format("{:016X}", address);
+    return has_module ? fmt::format("{}+0x{:X}", Utf8(module.ModuleName), address - module.BaseOfImage)
+                      : fmt::format("{:016X}", address);
   }
   std::string text = Utf8(std::wstring(symbol->Name, symbol->NameLen)) + fmt::format("+0x{:X}", displacement);
-  IMAGEHLP_MODULEW64 module{};
-  module.SizeOfStruct = sizeof(module);
-  if (SymGetModuleInfoW64(process, address, &module)) {
-    text = Utf8(module.ModuleName) + "!" + text;
-  }
-  return text;
+  return has_module ? Utf8(module.ModuleName) + "!" + text : text;
 }
 
 bool IsGuestFrame(const std::string& name) {
@@ -303,13 +295,9 @@ void Watch(HWND window) {
   }
 }
 
-#if defined(MUA_RUNTIME_MUA1)
-REXCVAR_DEFINE_BOOL(mua_debug_render_profile, false, "Marvel Ultimate Alliance",
-                    "DEBUG_SAULO: sample the presenting thread and log where it spends its time")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-// DEBUG_SAULO: where the presenting thread is once a frame stays open kHitchSampleAfter, and its stack and the other
-// threads running guest code once it stays open kHitchStackAfter.
+#if MUA_HAS_RECOMPILED_CODE
+// Where the presenting thread is once a frame stays open kHitchSampleAfter, and its stack and the other threads
+// running guest code once it stays open kHitchStackAfter.
 constexpr auto kHitchPoll = std::chrono::milliseconds(20);
 constexpr auto kHitchSampleAfter = std::chrono::milliseconds(150);
 constexpr auto kHitchStackAfter = std::chrono::milliseconds(500);
@@ -331,7 +319,7 @@ void LogHitchSample(HANDLE process, DWORD thread, int64_t open_ms) {
       break;
     }
   }
-  REXLOG_WARN("DEBUG_SAULO hitch: {} ms open | top {} | guest {}", open_ms,
+  REXLOG_WARN("Hitch sample: {} ms open | top {} | guest {}", open_ms,
               stack.count ? FrameName(process, stack.frames[0]) : std::string("unknown"), first_guest);
 }
 
@@ -342,7 +330,7 @@ void LogHitchStacks(HANDLE process, DWORD thread, int64_t open_ms) {
   std::string busy;
   for (const ThreadStack& stack : stacks) {
     if (stack.id == thread) {
-      REXLOG_WARN("DEBUG_SAULO hitch stack ({} ms): {}", open_ms, StackText(process, stack));
+      REXLOG_WARN("Hitch stack ({} ms): {}", open_ms, StackText(process, stack));
     } else if (stack.count && !IsWaiting(FrameName(process, stack.frames[0]))) {
       for (size_t i = 0; i < stack.count; ++i) {
         const std::string name = FrameName(process, stack.frames[i]);
@@ -353,7 +341,7 @@ void LogHitchStacks(HANDLE process, DWORD thread, int64_t open_ms) {
       }
     }
   }
-  REXLOG_WARN("DEBUG_SAULO hitch other guest threads running: {}", busy.empty() ? "none" : busy);
+  REXLOG_WARN("Hitch: other guest threads running: {}", busy.empty() ? "none" : busy);
 }
 
 void SampleHitches(HWND window) {
@@ -399,134 +387,7 @@ void SampleHitches(HWND window) {
   }
 }
 
-// DEBUG_SAULO, off by default since each sample suspends the thread: samples the presenting thread every
-// kProfilePeriod and logs, every kProfileWindow, the functions it was found in most: self is the innermost frame,
-// inclusive anywhere on its stack.
-constexpr auto kProfilePeriod = std::chrono::milliseconds(2);
-constexpr auto kProfileWindow = std::chrono::seconds(10);
-constexpr auto kProfileOffPoll = std::chrono::seconds(1);
-constexpr int kMaxProfileReports = 60;
-constexpr size_t kProfileSelfTop = 16;
-constexpr size_t kProfileInclusiveTop = 24;
-
-// The function a frame is in: return addresses (every frame but the innermost) point past their call.
-DWORD64 FunctionStart(DWORD64 address) {
-  DWORD64 image_base = 0;
-  if (PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(address, &image_base, nullptr)) {
-    return image_base + entry->BeginAddress;
-  }
-  return address;
-}
-
-std::string FunctionName(HANDLE process, DWORD64 address) {
-  std::string name = FrameName(process, address);
-  if (const size_t offset = name.rfind("+0x"); offset != std::string::npos) {
-    name.resize(offset);
-  }
-  if (name.starts_with("marvel_ultimate_alliance")) {
-    name.erase(0, name.find('!') + 1);
-  }
-  return name;
-}
-
-class RenderProfile {
- public:
-  void Add(HANDLE process, const ThreadStack& stack) {
-    std::array<uint32_t, kMaxFrames> ids{};
-    {
-      std::lock_guard lock(g_dbghelp_mutex);
-      for (size_t i = 0; i < stack.count; ++i) {
-        ids[i] = Id(process, FunctionStart(i ? stack.frames[i] - 1 : stack.frames[i]));
-      }
-    }
-    ++self_[ids[0]];
-    std::sort(ids.begin(), ids.begin() + stack.count);
-    const auto unique_end = std::unique(ids.begin(), ids.begin() + stack.count);
-    for (auto it = ids.begin(); it != unique_end; ++it) {
-      ++inclusive_[*it];
-    }
-    ++samples_;
-  }
-
-  void Report() {
-    if (samples_) {
-      REXLOG_INFO("DEBUG_SAULO render thread profile ({} samples, {} ms apart): self: {} | inclusive: {}", samples_,
-                  kProfilePeriod.count(), Top(self_, kProfileSelfTop), Top(inclusive_, kProfileInclusiveTop));
-    }
-    std::fill(self_.begin(), self_.end(), 0);
-    std::fill(inclusive_.begin(), inclusive_.end(), 0);
-    samples_ = 0;
-  }
-
- private:
-  uint32_t Id(HANDLE process, DWORD64 function) {
-    if (const auto known = by_address_.find(function); known != by_address_.end()) {
-      return known->second;
-    }
-    InitSymbols(process);
-    std::string name = FunctionName(process, function);
-    auto [named, inserted] = by_name_.try_emplace(name, uint32_t(names_.size()));
-    if (inserted) {
-      names_.push_back(std::move(name));
-      self_.push_back(0);
-      inclusive_.push_back(0);
-    }
-    by_address_.emplace(function, named->second);
-    return named->second;
-  }
-
-  std::string Top(const std::vector<uint32_t>& counts, size_t limit) const {
-    std::vector<uint32_t> order(counts.size());
-    std::iota(order.begin(), order.end(), 0);
-    const size_t shown = std::min(limit, order.size());
-    std::partial_sort(order.begin(), order.begin() + shown, order.end(),
-                      [&](uint32_t a, uint32_t b) { return counts[a] > counts[b]; });
-    std::string text;
-    for (size_t i = 0; i < shown && counts[order[i]]; ++i) {
-      text += fmt::format("{}{} {:.1f}%", i ? ", " : "", names_[order[i]], 100.0 * counts[order[i]] / samples_);
-    }
-    return text;
-  }
-
-  std::unordered_map<DWORD64, uint32_t> by_address_;
-  std::unordered_map<std::string, uint32_t> by_name_;
-  std::vector<std::string> names_;
-  std::vector<uint32_t> self_;
-  std::vector<uint32_t> inclusive_;
-  uint32_t samples_ = 0;
-};
-
-void ProfileRenderThread(HWND window) {
-  HANDLE process = GetCurrentProcess();
-  RenderProfile profile;
-  auto window_start = std::chrono::steady_clock::now();
-  for (int reports = 0; reports < kMaxProfileReports;) {
-    if (!REXCVAR_GET(mua_debug_render_profile)) {
-      std::this_thread::sleep_for(kProfileOffPoll);
-      if (!IsWindow(window)) {
-        return;
-      }
-      profile.Report();
-      window_start = std::chrono::steady_clock::now();
-      continue;
-    }
-    std::this_thread::sleep_for(kProfilePeriod);
-    if (!IsWindow(window)) {
-      return;
-    }
-    const DWORD thread = g_frame_thread.load(std::memory_order_relaxed);
-    ThreadStack stack;
-    if (thread && CaptureThread(thread, stack) && stack.count) {
-      profile.Add(process, stack);
-    }
-    if (std::chrono::steady_clock::now() - window_start >= kProfileWindow) {
-      profile.Report();
-      window_start = std::chrono::steady_clock::now();
-      ++reports;
-    }
-  }
-}
-#endif  // MUA_RUNTIME_MUA1
+#endif  // MUA_HAS_RECOMPILED_CODE
 #endif
 
 }  // namespace
@@ -568,9 +429,8 @@ void StartHangWatchdog(void* native_window) {
     return;
   }
   std::thread(Watch, static_cast<HWND>(native_window)).detach();
-#if defined(MUA_RUNTIME_MUA1)
+#if MUA_HAS_RECOMPILED_CODE
   std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();
-  std::thread(ProfileRenderThread, static_cast<HWND>(native_window)).detach();
 #endif
 #else
   (void)native_window;

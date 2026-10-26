@@ -544,9 +544,12 @@ void TestZipLimitsAndMalformed() {
   CHECK(!ExtractZip(temp.path / "dupe.zip", temp.path / "dupe", {}, error));
   CHECK(Contains(error, "twice"));
 
+#if defined(_WIN32)
+  // Names that differ only in case are the same file on Windows; the AppImage has no archive to unpack.
   WriteFile(temp.path / "case.zip", MakeZip({{"rexruntime.dll", "1"}, {"RexRuntime.DLL", "2"}}));
   CHECK(!ExtractZip(temp.path / "case.zip", temp.path / "case", {}, error));
   CHECK(Contains(error, "twice"));
+#endif
 
   WriteFile(temp.path / "dot-dupe.zip", MakeZip({{"a.txt", "1"}, {"./a.txt", "2"}}));
   CHECK(!ExtractZip(temp.path / "dot-dupe.zip", temp.path / "dot-dupe", {}, error));
@@ -963,13 +966,17 @@ void TestNoStaleNames() {
     }
   }
   for (const char* extra : {"/update_config.cpp", "/update_config.h", "/update_bundle.h", "/../tools/package-release.ps1",
-                            "/../packaging/README.txt"}) {
+                            "/../packaging/README.txt", "/../tools/package-linux.sh", "/../tools/build.sh",
+                            "/../tools/test.sh", "/../tools/build-patched-rexruntime.sh", "/../tools/check-guest-code.sh",
+                            "/../packaging/linux/AppRun",
+                            "/../packaging/linux/io.github.saulob.marvel-ultimate-alliance.desktop"}) {
     files.emplace_back(src + extra);
   }
   const std::vector<std::string> stale = {
       std::string("Geometry") + "Wars", std::string("geometry") + "_wars", std::string("GW") + "2",
       std::string("Hard") + "Corps",    std::string("hard") + "-corps",    std::string("HC") + "U",
-      std::string("584108") + "FF",     std::string("Retro") + "Evolved",
+      std::string("584108") + "FF",     std::string("Retro") + "Evolved",  std::string("SSF2") + "T",
+      std::string("ssf2") + "t",        std::string("Crackdown") + "Recompiled", std::string("crackdown") + "_",
   };
   CHECK(files.size() > 20);
   for (const std::filesystem::path& file : files) {
@@ -982,6 +989,89 @@ void TestNoStaleNames() {
       CHECK(!Contains(text, name));
     }
   }
+}
+
+// The Linux bundle follows the release conventions of the other ports: clang 20, glibc 2.31, one AppImage named
+// like the Windows package, with the launcher and the three game programs.
+void TestLinuxPackaging() {
+  std::printf("Linux packaging conventions\n");
+  const std::string src = MUA_SRC_DIR;
+  const std::string package = ReadFile(src + "/../tools/package-linux.sh");
+  CHECK(Contains(package, "MAX_GLIBC=2.31"));
+  CHECK(Contains(package, "NAME=\"MarvelUltimateAlliance-v$VERSION-x86_64\""));
+  CHECK(Contains(package, "sha256sum \"$NAME.AppImage\" > \"$NAME.sha256\""));
+  CHECK(Contains(package, "GAME_PROGRAMS=(marvel_ultimate_alliance_mua1 marvel_ultimate_alliance_mua1_gold marvel_ultimate_alliance_mua2)"));
+  CHECK(Contains(package, "fail \"$f needs $glibc, above the glibc $MAX_GLIBC baseline\""));
+  CHECK(Contains(package, "SDK_LINUX_ZIP_SHA256"));
+  for (const char* name : {"user_data", "default.xex", "settings.toml", "*.pdb", "*.xex", "*.iso"}) {
+    CHECK(Contains(package, name));
+  }
+  const std::string runtime = ReadFile(src + "/../tools/build-patched-rexruntime.sh");
+  CHECK(Contains(runtime, "CC=clang-20"));
+  CHECK(Contains(runtime, "CXX=clang++-20"));
+  CHECK(Contains(runtime, "MAX_GLIBC=2.31"));
+  CHECK(Contains(runtime, "\"share/rexglue/rex_app.cpp:src/ui/rex_app.cpp\""));
+  const std::string presets = ReadFile(src + "/../CMakePresets.json");
+  CHECK(Contains(presets, "\"CMAKE_CXX_COMPILER\": \"clang++-20\""));
+  for (const char* preset : {"linux-amd64-release", "linux-amd64-relwithdebinfo", "linux-amd64-debug"}) {
+    CHECK(Contains(presets, preset));
+  }
+  const std::string baseline = ReadFile(src + "/../patches/rexglue-sdk/baseline.env");
+  CHECK(Contains(baseline, "SDK_LINUX_ZIP_SHA256=0388edb3f8fb1444f1b0ad5d440cb02d9690ac20a76b04fd6b7dcc19f59328a6"));
+  const std::string appimage_runtime = ReadFile(src + "/../patches/appimage-runtime/baseline.env");
+  CHECK(Contains(appimage_runtime, "RUNTIME_COMMIT=dd6cebedcbddde9c82f89b011e8e1d40b6e43868"));
+  CHECK(Contains(appimage_runtime, "RUNTIME_SHA256=9e458da0e30e2dd06a206af0f345d98a872bf7c1ce69eba31d44e139488e4ab8"));
+  const std::string platform = ReadFile(src + "/platform.cpp");
+  CHECK(Contains(platform, "constexpr char kApplicationId[] = \"io.github.saulob.marvel-ultimate-alliance\";"));
+  const std::string desktop = ReadFile(src + "/../packaging/linux/io.github.saulob.marvel-ultimate-alliance.desktop");
+  CHECK(Contains(desktop, "StartupWMClass=io.github.saulob.marvel-ultimate-alliance"));
+  CHECK(Contains(desktop, "Exec=marvel_ultimate_alliance"));
+}
+
+void TestAppImageTarget() {
+  std::printf("the updater replaces only the AppImage the running program was started from\n");
+  TempDir dir;
+  const std::filesystem::path root = dir.path;
+  const std::filesystem::path appimage = root / "MarvelUltimateAlliance-v0.1.0-x86_64.AppImage";
+  WriteFile(appimage, "appimage");
+  const std::filesystem::path mount = root / "mount";
+  const std::filesystem::path program = mount / "usr" / "bin" / "marvel_ultimate_alliance";
+  WriteFile(program, "program");
+  CHECK(IsRunningAppImage(appimage, mount, program));
+  // The game programs run from the same AppImage.
+  CHECK(IsRunningAppImage(appimage, mount, mount / "usr" / "bin" / "marvel_ultimate_alliance_mua2"));
+
+  const std::filesystem::path extracted = root / ".extract" / "squashfs-root";
+  const std::filesystem::path extracted_program = extracted / "usr" / "bin" / "marvel_ultimate_alliance";
+  WriteFile(extracted_program, "program");
+  CHECK(IsRunningAppImage(appimage, extracted, extracted_program));
+
+  const std::filesystem::path build = root / "build" / "marvel_ultimate_alliance";
+  WriteFile(build, "program");
+  CHECK(!IsRunningAppImage(appimage, mount, build));
+
+  const std::filesystem::path other = root / "Other-v1.0.0-x86_64.AppImage";
+  WriteFile(other, "other");
+  CHECK(!IsRunningAppImage(other, mount, program));
+  const std::filesystem::path empty_version = root / "MarvelUltimateAlliance-v-x86_64.AppImage";
+  WriteFile(empty_version, "other");
+  CHECK(!IsRunningAppImage(empty_version, mount, program));
+  const std::filesystem::path odd_version = root / "MarvelUltimateAlliance-vx-x86_64.AppImage";
+  WriteFile(odd_version, "other");
+  CHECK(!IsRunningAppImage(odd_version, mount, program));
+
+  const std::filesystem::path inside = mount / "MarvelUltimateAlliance-v0.1.0-x86_64.AppImage";
+  WriteFile(inside, "appimage");
+  CHECK(!IsRunningAppImage(inside, mount, program));
+
+  CHECK(!IsRunningAppImage({}, mount, program));
+  CHECK(!IsRunningAppImage(appimage, {}, program));
+  CHECK(!IsRunningAppImage(appimage, mount, {}));
+  CHECK(!IsRunningAppImage(appimage, root / "not-a-mount", program));
+
+  const SemanticVersion version = *ParseVersion("v0.1.0");
+  CHECK(mua::UpdateAppImageName(version) == "MarvelUltimateAlliance-v0.1.0-x86_64.AppImage");
+  CHECK(mua::UpdateAppImageChecksumName(version) == "MarvelUltimateAlliance-v0.1.0-x86_64.sha256");
 }
 
 }  // namespace
@@ -1002,6 +1092,8 @@ int main() {
   TestPaths();
   TestSourceWiring();
   TestNoStaleNames();
+  TestAppImageTarget();
+  TestLinuxPackaging();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

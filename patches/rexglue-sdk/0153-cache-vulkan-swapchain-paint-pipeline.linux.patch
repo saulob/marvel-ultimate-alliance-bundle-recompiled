@@ -1,0 +1,16 @@
+Ported unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0035-cache-vulkan-swapchain-paint-pipeline.linux.patch (the same patch in hard-corps-uprising-, geometry-wars-retro-evolved-2- and crackdown-xbox360-recompiled).
+
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..3396ec7 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -1840,6 +1840,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+                 swapchain_effect, paint_context_.swapchain_render_pass);
+             if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
+               guest_output_flow.effect_count = 0;
++            } else {
++              swapchain_effect_pipeline.swapchain_format =
++                  paint_context_.swapchain_render_pass_format;
+             }
+           }
+         }

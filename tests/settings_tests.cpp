@@ -18,6 +18,7 @@
 #include "graphics_adapters.h"
 #include "platform.h"
 #include "settings.h"
+#include "upscaling.h"
 
 namespace fs = std::filesystem;
 
@@ -469,7 +470,7 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   reopened.SelectGame(mua::GameId::kMua1);
   CHECK(reopened.Get("mua_upscale_quality") == "balanced");
   mua::ApplyUpscaler(reopened);
-  CHECK(rex::cvar::GetFlagByName("present_effect") == "fsr");
+  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::kUpscalerAvailable ? "fsr" : effect));
   reopened.ApplyGameSettings();
   mua::LogUpscaling();
   CHECK(rex::cvar::GetFlagByName("window_width") == window_width);

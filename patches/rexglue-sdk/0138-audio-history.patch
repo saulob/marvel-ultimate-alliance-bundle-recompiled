@@ -1,10 +1,10 @@
-DEBUG_SAULO, temporary: a fixed ring of 65536 compact audio events (packets and frames the XMA contexts decode, FFmpeg
-errors by kind, buffer advances and swaps, waits for the other input buffer, guest input buffer changes, loop jumps,
-decoder reopens, stalls, full or starved output, context allocate/clear/release, slow XMADisableContext, late guest
+A fixed ring of 65536 compact audio events (packets and frames the XMA contexts decode, FFmpeg errors by kind,
+buffer advances and swaps, waits for the other input buffer, guest input buffer changes, loop jumps, decoder
+reopens, stalls, full or starved output, context allocate/clear/release, slow XMADisableContext, late guest
 submits, late or empty output callbacks and the output queue depth every 100 ms). Writers take a slot with one
-fetch_add and publish it with a sequence number, without locks. history::Dump() starts a thread that logs the last
-5 seconds between "DEBUG_SAULO AUDIO SNAPSHOT BEGIN" and "... END", waits 2 seconds and logs what followed between
-"DEBUG_SAULO AUDIO SNAPSHOT POST" and "... POST END". The port calls it on F9.
+fetch_add and publish it with a sequence number, without locks. history::Dump() starts a thread that logs the
+last 5 seconds between "AUDIO SNAPSHOT BEGIN" and "... END", waits 2 seconds and logs what followed between
+"AUDIO SNAPSHOT POST" and "... POST END". The port calls it on F9.
 
 diff --git a/include/rex/audio/audio_history.h b/include/rex/audio/audio_history.h
 new file mode 100644
@@ -12,7 +12,7 @@ new file mode 100644
 +++ b/include/rex/audio/audio_history.h
 @@ -0,0 +1,70 @@
 +/**
-+ * DEBUG_SAULO, temporary: a bounded in-memory history of audio events. Dump() logs the last five seconds of it and,
++ * A bounded in-memory history of audio events. Dump() logs the last five seconds of it and,
 + * two seconds later, what came after the request.
 + */
 +
@@ -86,7 +86,7 @@ new file mode 100644
 --- /dev/null
 +++ b/src/audio/audio_history.cpp
 @@ -0,0 +1,353 @@
-+// DEBUG_SAULO, temporary: see audio_history.h.
++// See audio_history.h.
 +
 +#include <rex/audio/audio_history.h>
 +
@@ -324,11 +324,11 @@ new file mode 100644
 +  int64_t oldest_ns = 0;
 +  const std::vector<Entry> before = Collect(trigger_ns - kBeforeNs, trigger_ns, &oldest_ns);
 +  REXAPU_INFO(
-+      "DEBUG_SAULO AUDIO SNAPSHOT BEGIN reason={} guest uptime {} ms guest updates {} | {} event(s) from {:.0f} ms "
++      "AUDIO SNAPSHOT BEGIN reason={} guest uptime {} ms guest updates {} | {} event(s) from {:.0f} ms "
 +      "before the request (history holds {:.0f} ms)",
 +      reason, guest_ms, guest_updates, before.size(), kBeforeNs / 1e6, (trigger_ns - oldest_ns) / 1e6);
-+  LogSection("DEBUG_SAULO AUDIO", before, trigger_ns);
-+  REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT END reason={}", reason);
++  LogSection("AUDIO", before, trigger_ns);
++  REXAPU_INFO("AUDIO SNAPSHOT END reason={}", reason);
 +
 +  bool stopped;
 +  {
@@ -336,10 +336,10 @@ new file mode 100644
 +    stopped = g_dump_wake.wait_for(lock, std::chrono::nanoseconds(kAfterNs), [] { return g_stopping; });
 +  }
 +  const std::vector<Entry> after = Collect(trigger_ns + 1, trigger_ns + kAfterNs, &oldest_ns);
-+  REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT POST reason={} | {} event(s) in the {:.0f} ms after the request{}", reason,
++  REXAPU_INFO("AUDIO SNAPSHOT POST reason={} | {} event(s) in the {:.0f} ms after the request{}", reason,
 +              after.size(), kAfterNs / 1e6, stopped ? " (cut short by shutdown)" : "");
-+  LogSection("DEBUG_SAULO AUDIO POST", after, trigger_ns);
-+  REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT POST END reason={}", reason);
++  LogSection("AUDIO POST", after, trigger_ns);
++  REXAPU_INFO("AUDIO SNAPSHOT POST END reason={}", reason);
 +
 +  std::lock_guard lock(g_dump_mutex);
 +  g_dump_running = false;
@@ -421,7 +421,7 @@ new file mode 100644
 +  {
 +    std::lock_guard lock(g_dump_mutex);
 +    if (g_dump_running || g_stopping) {
-+      REXAPU_INFO("DEBUG_SAULO AUDIO SNAPSHOT SKIPPED reason={}: the previous snapshot is still being written", reason);
++      REXAPU_INFO("AUDIO SNAPSHOT SKIPPED reason={}: the previous snapshot is still being written", reason);
 +      return;
 +    }
 +    g_dump_running = true;
@@ -457,7 +457,7 @@ diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
    void UpdateLoopStatus(XMA_CONTEXT_DATA* data);
    void ClearLocked(XMA_CONTEXT_DATA* data);
    void ResetDecoderState();
-+  void NoteInputBuffers(const XMA_CONTEXT_DATA& data);  // DEBUG_SAULO
++  void NoteInputBuffers(const XMA_CONTEXT_DATA& data);
  
    memory::RingBuffer PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data);
    int PrepareDecoder(int sample_rate, bool is_two_channel);
@@ -465,7 +465,7 @@ diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
    uint32_t pending_packet_ = 0;
    uint8_t pending_packet_buffer_ = 0;
  
-+  // DEBUG_SAULO: last input buffers and packet put in the audio history.
++  // Last input buffers and packet put in the audio history.
 +  uint64_t history_input_key_ = 0;
 +  uint32_t history_packet_ = UINT32_MAX;
 +
@@ -518,7 +518,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
 +
  }  // namespace
  
- void DebugSauloSetInlineKick(bool inline_kick) {
+ void NoteXmaInlineKick(bool inline_kick) {
 @@ -245,6 +275,9 @@
      message.remove_suffix(1);
    }
@@ -528,7 +528,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
 +  }
    if (!trace) {
      if (g_error_lines.fetch_add(1) < kMaxErrorLines) {
-       REXAPU_INFO("DEBUG_SAULO XMA error outside a traced decode: '{}'", message);
+       REXAPU_INFO("XMA error outside a traced decode: '{}'", message);
 @@ -271,6 +304,15 @@
        XMA_CONTEXT_DATA::LoadWord(trace->context_ptr, 0), t_inline_kick ? "inline" : "worker");
  }
@@ -549,7 +549,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
    auto context_ptr = memory()->TranslateVirtual(guest_ptr());
    XMA_CONTEXT_DATA data(context_ptr);
    const XMA_CONTEXT_DATA initial_data = data;
-+  NoteInputBuffers(data);  // DEBUG_SAULO
++  NoteInputBuffers(data);
  
    if (!data.output_buffer_valid) {
      return true;
@@ -560,16 +560,16 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
 +      history::Record(history::Event::kNoProgress, id(), InputBufferBits(data), data.input_buffer_read_offset,
 +                      data.output_buffer_read_offset | data.output_buffer_write_offset << 8 |
 +                          data.output_buffer_block_count << 16,
-+                      uint32_t(remaining_subframe_blocks_in_output_buffer_));  // DEBUG_SAULO
++                      uint32_t(remaining_subframe_blocks_in_output_buffer_));
        break;
      }
    }
 @@ -403,6 +450,8 @@
      // Starved on input: some titles use write_offset == read_offset as their
      // stall detector, so make them equal.
-     g_starved.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO
+     g_starved.fetch_add(1, std::memory_order_relaxed);
 +    history::Record(history::Event::kStarved, id(), data.output_buffer_read_offset,
-+                    data.output_buffer_write_offset);  // DEBUG_SAULO
++                    data.output_buffer_write_offset);
      data.output_buffer_write_offset = data.output_buffer_read_offset;
      data.output_buffer_valid = 0;
    }
@@ -578,7 +578,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
    if (remaining_subframe_blocks_in_output_buffer_ == 0 && output_rb.empty()) {
      data.output_buffer_valid = 0;
 +    history::Record(history::Event::kOutputInvalid, id(), data.output_buffer_read_offset,
-+                    data.output_buffer_write_offset, data.output_buffer_block_count);  // DEBUG_SAULO
++                    data.output_buffer_write_offset, data.output_buffer_block_count);
    }
  
    StoreContextMerged(data, initial_data, context_ptr);
@@ -586,7 +586,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
  void XmaContext::Clear() {
    std::lock_guard<std::mutex> lock(lock_);
    REXAPU_NOISY_DEBUG("XmaContext: reset context {}", id());
-+  history::Record(history::Event::kClear, id());  // DEBUG_SAULO
++  history::Record(history::Event::kClear, id());
  
    auto context_ptr = memory()->TranslateVirtual(guest_ptr());
    XMA_CONTEXT_DATA data(context_ptr);
@@ -594,7 +594,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
    loop_frame_output_limit_ = 0;
    loop_start_skip_pending_ = false;
    pending_packet_ = 0;
-+  history_packet_ = UINT32_MAX;  // DEBUG_SAULO
++  history_packet_ = UINT32_MAX;
  }
  
  void XmaContext::Disable() {
@@ -602,7 +602,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
    assert_true(is_allocated());
  
    set_is_allocated(false);
-+  history::Record(history::Event::kRelease, id());  // DEBUG_SAULO
++  history::Record(history::Event::kRelease, id());
    ResetDecoderState();
    auto context_ptr = memory()->TranslateVirtual(guest_ptr());
    std::memset(context_ptr, 0, sizeof(XMA_CONTEXT_DATA));
@@ -611,7 +611,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
      data->loop_count--;
    }
 +  history::Record(history::Event::kLoop, id(), data->loop_count, data->loop_start, data->loop_end,
-+                  data->loop_subframe_skip | data->loop_subframe_end << 8);  // DEBUG_SAULO
++                  data->loop_subframe_skip | data->loop_subframe_end << 8);
  }
  
  int XmaContext::GetSampleRate(int id) {
@@ -619,13 +619,13 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
                                           packet * kBytesPerPacket);
        });
  
-+  const uint32_t from_buffer = data->current_buffer;  // DEBUG_SAULO
++  const uint32_t from_buffer = data->current_buffer;
    for (uint32_t i = 0; i < next.buffers_finished; ++i) {
      SwapInputBuffer(data);
    }
 +  history::Record(history::Event::kAdvance, id(), from_buffer | packet_index << 1, next.buffers_finished,
 +                  next.found ? next.read_offset : UINT32_MAX, next.found ? 0 : next.pending_packet,
-+                  InputBufferBits(*data));  // DEBUG_SAULO
++                  InputBufferBits(*data));
    if (next.found) {
      data->input_buffer_read_offset = next.read_offset;
      return;
@@ -633,7 +633,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
    if (data.current_buffer != initial_data.current_buffer) {
      XMA_CONTEXT_DATA::UpdateWord(context_ptr, 4, 1u << 31, uint32_t(data.current_buffer) << 31);
    }
-+  history_input_key_ = InputBuffersKey(data);  // DEBUG_SAULO
++  history_input_key_ = InputBuffersKey(data);
  }
  
  void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
@@ -641,7 +641,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
        REXAPU_ERROR("XmaContext: Failed to reopen FFmpeg context");
        return -1;
      }
-+    history::Record(history::Event::kCodecOpen, id(), uint32_t(sample_rate), channels);  // DEBUG_SAULO
++    history::Record(history::Event::kCodecOpen, id(), uint32_t(sample_rate), channels);
      return 1;
    }
    return 0;
@@ -650,7 +650,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
    if (!data->IsCurrentInputBufferValid()) {
      SwapInputBuffer(data);
 +    history::Record(history::Event::kSwap, id(), uint32_t(history::SwapReason::kCurrentInvalid),
-+                    data->current_buffer, InputBufferBits(*data), data->input_buffer_read_offset);  // DEBUG_SAULO
++                    data->current_buffer, InputBufferBits(*data), data->input_buffer_read_offset);
      if (!data->IsCurrentInputBufferValid()) {
        return;
      }
@@ -659,15 +659,14 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
        data->input_buffer_read_offset == kBitsPerPacketHeader) {
      AdvanceToPacket(data, pending_packet);
 +    history::Record(history::Event::kPendingPacket, id(), data->current_buffer, pending_packet,
-+                    data->input_buffer_read_offset);  // DEBUG_SAULO
++                    data->input_buffer_read_offset);
      return;
    }
  
-@@ -886,6 +952,12 @@
+@@ -886,6 +952,11 @@
  
    uint8_t* packet = current_input_buffer + (packet_index * kBytesPerPacket);
    const uint32_t packet_first_frame_offset = xma::GetPacketFrameOffset(packet);
-+  // DEBUG_SAULO
 +  if (const uint32_t location = data->current_buffer | uint32_t(packet_index) << 1; location != history_packet_) {
 +    history_packet_ = location;
 +    history::Record(history::Event::kPacket, id(), data->current_buffer, uint32_t(packet_index),
@@ -681,12 +680,12 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
        // The rest of the header comes with the other buffer; dropping this one would lose the frame.
        if (IsContinuationPending(data, next_packet_index, current_input_packet_count)) {
 +        history::Record(history::Event::kContinuationWait, id(), trace.buffer | trace.packet_index << 1,
-+                        next_packet_index, current_input_packet_count, 1);  // DEBUG_SAULO
++                        next_packet_index, current_input_packet_count, 1);
          return;
        }
        SwapInputBuffer(data);
 +      history::Record(history::Event::kSwap, id(), uint32_t(history::SwapReason::kSplitHeaderOutOfRange),
-+                      data->current_buffer, InputBufferBits(*data), data->input_buffer_read_offset);  // DEBUG_SAULO
++                      data->current_buffer, InputBufferBits(*data), data->input_buffer_read_offset);
        return;
      }
      std::memcpy(input_buffer_.data(), packet + kBytesPerPacketHeader, kBytesPerPacketData);
@@ -695,7 +694,7 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
      REXAPU_ERROR("XmaContext {}: There are no bits to copy!", id());
      SwapInputBuffer(data);
 +    history::Record(history::Event::kSwap, id(), uint32_t(history::SwapReason::kNoBitsToCopy), data->current_buffer,
-+                    InputBufferBits(*data), data->input_buffer_read_offset);  // DEBUG_SAULO
++                    InputBufferBits(*data), data->input_buffer_read_offset);
      return;
    }
  
@@ -704,18 +703,18 @@ diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
          // The frame's tail comes with the other buffer, which the guest has not refilled yet.
          if (IsContinuationPending(data, next_packet_index, current_input_packet_count)) {
 +          history::Record(history::Event::kContinuationWait, id(), trace.buffer | trace.packet_index << 1,
-+                          next_packet_index, current_input_packet_count, 2);  // DEBUG_SAULO
++                          next_packet_index, current_input_packet_count, 2);
            return;
          }
          data->error_status = 4;
 @@ -1006,8 +1086,10 @@
-   trace.frame_size = packet_info.current_frame_size_;  // DEBUG_SAULO
+   trace.frame_size = packet_info.current_frame_size_;
    g_decodes.fetch_add(1, std::memory_order_relaxed);
    t_trace = &trace;
-+  const bool loop_start_frame = loop_start_skip_pending_;  // DEBUG_SAULO
++  const bool loop_start_frame = loop_start_skip_pending_;
    const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
    t_trace = nullptr;
-+  RecordFrame(id(), *data, trace, next_packet_index, decoded, is_loop_end_frame, loop_start_frame);  // DEBUG_SAULO
++  RecordFrame(id(), *data, trace, next_packet_index, decoded, is_loop_end_frame, loop_start_frame);
    if (decoded) {
      ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
                   decoded_frame_.data());
@@ -734,7 +733,7 @@ diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
    }
  
    worker_running_ = false;
-+  history::Shutdown();  // DEBUG_SAULO
++  history::Shutdown();
  
    if (work_event_) {
      work_event_->Set();
@@ -742,7 +741,7 @@ diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
    XmaContext& context = contexts_[index];
    assert_false(context.is_allocated());
    context.set_is_allocated(true);
-+  history::Record(history::Event::kAllocate, uint32_t(index));  // DEBUG_SAULO
++  history::Record(history::Event::kAllocate, uint32_t(index));
    return context.guest_ptr();
  }
  
@@ -754,7 +753,7 @@ diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
 +          history::Record(history::Event::kDisableWait, context_id, uint32_t(lock_ms * 1000.0));
 +        }
          if (lock_ms >= 5.0) {
-           DebugSauloNoteLockWait(context_id, lock_ms);
+           NoteXmaLockWait(context_id, lock_ms);
          }
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
 --- a/src/audio/sdl/sdl_audio_driver.cpp
@@ -820,8 +819,8 @@ diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver
 @@ -169,6 +213,7 @@
      frames_queued_.push(output_frame);
      PROFILE_BUFFER_QUEUE_DEPTH(static_cast<int64_t>(frames_queued_.size()));
-     NoteQueuedFrames(frames_queued_.size());  // DEBUG_SAULO
-+    NoteSubmit(frames_queued_.size());        // DEBUG_SAULO
+     NoteQueuedFrames(frames_queued_.size());
++    NoteSubmit(frames_queued_.size());
    }
  }
  
@@ -829,16 +828,16 @@ diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver
    const StereoFold fold = GetStereoFold();
    const SurroundMix mix = GetSurroundMix();
    const float gain = GetOutputGain();
-+  size_t queued_at_start = SIZE_MAX;  // DEBUG_SAULO
++  size_t queued_at_start = SIZE_MAX;
 +  uint32_t silent_frames = 0;
    while (additional_amount > 0) {
      static uint32_t sdl_callback_count = 0;
      std::unique_lock<std::mutex> guard(driver->frames_mutex_);
 +    if (queued_at_start == SIZE_MAX) {
-+      queued_at_start = driver->frames_queued_.size();  // DEBUG_SAULO
++      queued_at_start = driver->frames_queued_.size();
 +    }
      if (driver->frames_queued_.empty()) {
-       g_underruns.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO
+       g_underruns.fetch_add(1, std::memory_order_relaxed);
 +      ++silent_frames;
        if (sdl_callback_count < 10) {
          REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
@@ -846,7 +845,7 @@ diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver
 @@ -264,6 +315,7 @@
    }
    SDL_stack_free(data);
-   MaybeLogUnderruns();  // DEBUG_SAULO
+   MaybeLogUnderruns();
 +  NoteCallback(queued_at_start == SIZE_MAX ? 0 : queued_at_start, silent_frames);
  }
  

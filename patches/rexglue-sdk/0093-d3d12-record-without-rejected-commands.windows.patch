@@ -33,7 +33,7 @@ index 837feed..f8bb8f8 100644
 +               size_t command_limit = SIZE_MAX,
 +               const std::vector<size_t>* skipped_commands = nullptr);
 +  size_t GetCommandCount() const;
-   // DEBUG_SAULO: how many of each command are recorded, and the arguments of the last few, for
+   // How many of each command are recorded, and the arguments of the last few, for
    // the log when the runtime rejects the submission.
    std::string Describe(size_t tail_commands) const;
 +  std::string DescribeCommand(size_t index) const;
@@ -56,7 +56,7 @@ index 2b1eae1..df62d81 100644
    }
  }
  
--// DEBUG_SAULO: closes and executes one submission. The recording errors the D3D12 runtime detects
+-// Closes and executes one submission. The recording errors the D3D12 runtime detects
 -// make Close fail, and executing such a list removes the device with INVALID_CALL - so it is left
 -// out, and logged with what it holds. A removal the queue reports right after the execute is logged
 -// with the submission that raised it.

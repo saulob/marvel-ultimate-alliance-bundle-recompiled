@@ -1,13 +1,11 @@
 #include "frame_limiter.h"
 
-#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
-#include <rex/logging.h>
 
 #include "guest_frame_counters.h"
 #include "guest_map.h"
@@ -57,11 +55,6 @@ uint32_t PresentArgument(uint32_t argument) {
 // do not need a faster vblank.
 REX_EXTERN(MUA_GUEST_ORIGINAL(MUA_GUEST_PRESENT_CALLBACK));
 REX_HOOK_RAW(MUA_GUEST_PRESENT_CALLBACK) {
-  static std::atomic<int> reports{0};
-  if (reports.fetch_add(1, std::memory_order_relaxed) < 4) {
-    REXLOG_INFO("DEBUG_SAULO present callback argument={:08X} -> {:08X}", ctx.r3.u32,
-                mua::PresentArgument(ctx.r3.u32));
-  }
   ctx.r3.u32 = mua::PresentArgument(ctx.r3.u32);
   MUA_GUEST_ORIGINAL(MUA_GUEST_PRESENT_CALLBACK)(ctx, base);
 }

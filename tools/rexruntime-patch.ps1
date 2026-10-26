@@ -1,7 +1,6 @@
 # Shared by build.ps1, build-patched-rexruntime.ps1 and package-release.ps1: the pinned ReXGlue baseline, the
-# runtime, GPU plugin and code generator patches (those for Windows; the Linux ones are for
-# build-patched-rexruntime.sh), the check that an SDK folder holds the files built from them, and the check that a
-# build folder holds the SDK's files.
+# runtime, GPU plugin and code generator patches (those for Windows; the Linux ones are for build-patched-rexruntime.sh),
+# the check that an SDK folder holds the files built from them, and the check that a build folder holds the SDK's files.
 
 $RuntimePatchDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'patches\rexglue-sdk'
 $RuntimeStampName = 'rexruntime-patch.txt'

@@ -1,7 +1,10 @@
-// DEBUG_SAULO: bounded state logs for the profile and save wrappers; remove after the save flow is verified.
+// Bounded logs of the profile and save calls: every failure, the content (save) operations, and once the title
+// settings the profile holds, so a save or profile report shows what the game asked for and what it got.
 
 #include <atomic>
 #include <cstdint>
+#include <format>
+#include <string>
 
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -29,6 +32,10 @@ bool Budget(std::atomic<int>& used, int limit) {
   return used.fetch_add(1, std::memory_order_relaxed) < limit;
 }
 
+bool Succeeded(uint32_t status) {
+  return status == kErrorSuccess || status == kErrorIoPending;
+}
+
 const uint8_t* Memory(uint8_t* base) {
   return rex::memory::GuestPtr<const uint8_t*>(base, 0);
 }
@@ -39,20 +46,19 @@ std::string GuestString(const uint8_t* memory, uint32_t address) {
   return std::string(text, strnlen(text, 32));
 }
 
-void LogProfileRead(const uint8_t* memory, uint32_t user, uint32_t count, uint32_t buffer, uint32_t status) {
-  static std::atomic<int> used{0};
-  if (!Budget(used, 12)) return;
-  if (!buffer) {
-    REXLOG_INFO("[DEBUG_SAULO][Profile] read size query: user={} settings={} status={}", user, count, status);
-    return;
-  }
-  REXLOG_INFO("[DEBUG_SAULO][Profile] read: user={} settings={} status={}", user, count, status);
-  if (status != kErrorSuccess) return;
+// The title settings of the first profile read that returns any, in one line.
+void LogTitleSettings(const uint8_t* memory, uint32_t user, uint32_t count, uint32_t buffer) {
+  static std::atomic<bool> logged{false};
+  if (logged.load(std::memory_order_relaxed)) return;
+  std::string text;
   mua::ProfileSettingView setting;
   for (uint32_t i = 0; i < count; ++i) {
     if (!mua::ReadProfileSetting(memory, buffer, i, setting) || !setting.title_specific) continue;
-    REXLOG_INFO("[DEBUG_SAULO][Profile] read setting {:08X}: source={} type={} size={}", setting.id, setting.source,
-                setting.type, setting.size);
+    text += (text.empty() ? "" : ", ") + std::format("{:08X}", setting.id) +
+            (setting.source ? std::format(" {} bytes", setting.size) : std::string(" unset"));
+  }
+  if (!text.empty() && !logged.exchange(true)) {
+    REXLOG_INFO("Profile title settings: user={} {}", user, text);
   }
 }
 
@@ -67,31 +73,30 @@ int64_t EnumeratorItems(const uint8_t* memory, uint32_t handle_out, uint32_t sta
 }  // namespace
 
 REX_HOOK_RAW(MUA_GUEST_PROFILE_READ) {
+  static std::atomic<int> failures{0};
   const uint32_t user = ctx.r4.u32;
   const uint32_t count = ctx.r5.u32;
   const uint32_t buffer = ctx.r8.u32;
   MUA_GUEST_ORIGINAL(MUA_GUEST_PROFILE_READ)(ctx, base);
-  uint32_t status = ctx.r3.u32;
-  if (status != kErrorInsufficientBuffer && status != kErrorSuccess && status != kErrorIoPending) {
-    REXLOG_INFO("[DEBUG_SAULO][Profile] read failed: status={}", status);
-    return;
+  const uint32_t status = ctx.r3.u32;
+  if (status == kErrorSuccess && buffer) {
+    LogTitleSettings(Memory(base), user, count, buffer);
+  } else if (!Succeeded(status) && status != kErrorInsufficientBuffer && Budget(failures, 12)) {
+    REXLOG_WARN("Profile settings read failed: user={} settings={} status={}", user, count, status);
   }
-  LogProfileRead(Memory(base), user, count, buffer, status);
 }
 
 REX_HOOK_RAW(MUA_GUEST_PROFILE_WRITE) {
-  static std::atomic<int> used{0};
+  static std::atomic<int> failures{0};
   const uint32_t user = ctx.r3.u32;
   const uint32_t count = ctx.r4.u32;
   const uint32_t settings = ctx.r5.u32;
-  const bool log = Budget(used, 12);
-  if (log && count == 1) {
-    const uint8_t* memory = Memory(base);
-    REXLOG_INFO("[DEBUG_SAULO][Profile] write: user={} setting={:08X} size={}", user,
-                mua::LoadBE32(memory, settings + 16), mua::LoadBE32(memory, settings + 32));
-  }
+  const uint32_t first_setting = count && settings ? mua::LoadBE32(Memory(base), settings + 16) : 0u;
   MUA_GUEST_ORIGINAL(MUA_GUEST_PROFILE_WRITE)(ctx, base);
-  if (log) REXLOG_INFO("[DEBUG_SAULO][Profile] write status={}", ctx.r3.u32);
+  if (!Succeeded(ctx.r3.u32) && Budget(failures, 12)) {
+    REXLOG_WARN("Profile settings write failed: user={} settings={} first={:08X} status={}", user, count,
+                first_setting, ctx.r3.u32);
+  }
 }
 
 REX_HOOK_RAW(MUA_GUEST_CONTENT_CREATE) {
@@ -101,27 +106,35 @@ REX_HOOK_RAW(MUA_GUEST_CONTENT_CREATE) {
   const uint32_t data = ctx.r5.u32;
   const uint32_t flags = ctx.r6.u32;
   const uint32_t disposition = ctx.r7.u32;
-  const bool log = Budget(used, 24);
   const uint8_t* memory = Memory(base);
-  if (log) {
-    REXLOG_INFO("[DEBUG_SAULO][Content] create: user={} root={} device={} type={} file={} flags={}", user,
-                GuestString(memory, root), mua::LoadBE32(memory, data), mua::LoadBE32(memory, data + 4),
-                mua::ContentFileName(memory, data), flags & 0xF);
-  }
+  const std::string root_name = GuestString(memory, root);
+  const uint32_t device = data ? mua::LoadBE32(memory, data) : 0u;
+  const uint32_t type = data ? mua::LoadBE32(memory, data + 4) : 0u;
+  const std::string file = data ? mua::ContentFileName(memory, data) : std::string();
   MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_CREATE)(ctx, base);
-  if (log) {
-    REXLOG_INFO("[DEBUG_SAULO][Content] create status={} disposition={}", ctx.r3.u32,
-                disposition ? mua::LoadBE32(memory, disposition) : 0u);
+  const uint32_t status = ctx.r3.u32;
+  if (!Budget(used, 24) && Succeeded(status)) {
+    return;
+  }
+  const std::string text = std::format("user={} root={} device={} type={} file={} flags={} status={} disposition={}",
+                                       user, root_name, device, type, file, flags & 0xF, status,
+                                       disposition ? mua::LoadBE32(memory, disposition) : 0u);
+  if (Succeeded(status)) {
+    REXLOG_INFO("Content create: {}", text);
+  } else {
+    REXLOG_WARN("Content create failed: {}", text);
   }
 }
 
 REX_HOOK_RAW(MUA_GUEST_CONTENT_CLOSE) {
   static std::atomic<int> used{0};
   const uint32_t root = ctx.r3.u32;
-  const bool log = Budget(used, 24);
+  const std::string root_name = GuestString(Memory(base), root);
   MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_CLOSE)(ctx, base);
-  if (log) {
-    REXLOG_INFO("[DEBUG_SAULO][Content] close: root={} status={}", GuestString(Memory(base), root), ctx.r3.u32);
+  if (!Succeeded(ctx.r3.u32)) {
+    REXLOG_WARN("Content close failed: root={} status={}", root_name, ctx.r3.u32);
+  } else if (Budget(used, 24)) {
+    REXLOG_INFO("Content close: root={} status={}", root_name, ctx.r3.u32);
   }
 }
 
@@ -131,11 +144,10 @@ REX_HOOK_RAW(MUA_GUEST_CONTENT_ENUMERATE) {
   const uint32_t device = ctx.r4.u32;
   const uint32_t type = ctx.r5.u32;
   const uint32_t handle_out = ctx.r9.u32;
-  const bool log = Budget(used, 12);
   MUA_GUEST_ORIGINAL(MUA_GUEST_CONTENT_ENUMERATE)(ctx, base);
-  if (log) {
-    REXLOG_INFO("[DEBUG_SAULO][Content] enumerate: user={} device={} type={} status={} items={}", user, device, type,
-                ctx.r3.u32, EnumeratorItems(Memory(base), handle_out, ctx.r3.u32));
+  if (Budget(used, 12)) {
+    REXLOG_INFO("Content enumerate: user={} device={} type={} status={} items={}", user, device, type, ctx.r3.u32,
+                EnumeratorItems(Memory(base), handle_out, ctx.r3.u32));
   }
 }
 
@@ -144,10 +156,9 @@ REX_HOOK_RAW(MUA_GUEST_DEVICE_SELECTOR) {
   const uint32_t user = ctx.r3.u32;
   const uint32_t type = ctx.r4.u32;
   const uint32_t device = ctx.r7.u32;
-  const bool log = Budget(used, 12);
   MUA_GUEST_ORIGINAL(MUA_GUEST_DEVICE_SELECTOR)(ctx, base);
-  if (log) {
-    REXLOG_INFO("[DEBUG_SAULO][Content] device selector: user={} type={} status={} device={}", user, type, ctx.r3.u32,
+  if (Budget(used, 12)) {
+    REXLOG_INFO("Content device selector: user={} type={} status={} device={}", user, type, ctx.r3.u32,
                 device ? mua::LoadBE32(Memory(base), device) : 0u);
   }
 }

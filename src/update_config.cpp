@@ -15,6 +15,7 @@ namespace mua {
 namespace {
 
 std::optional<std::string> Environment(const char* name) {
+#if defined(_WIN32)
   char* value = nullptr;
   size_t size = 0;
   if (_dupenv_s(&value, &size, name) != 0 || !value) {
@@ -26,6 +27,13 @@ std::optional<std::string> Environment(const char* name) {
     return std::nullopt;
   }
   return result;
+#else
+  const char* value = std::getenv(name);
+  if (!value || !*value) {
+    return std::nullopt;
+  }
+  return std::string(value);
+#endif
 }
 
 bool TestMode() {
@@ -50,6 +58,7 @@ trg::update::UpdateConfig MakeUpdateConfig(const std::filesystem::path& install_
   config.install_dir = install_dir;
   config.restart_arguments = UpdateRestartArguments(trg::update::CurrentProcessArguments());
 
+#if defined(_WIN32)
   config.package_kind = trg::update::UpdatePackageKind::kZip;
   config.asset_name = UpdateAssetName;
   config.checksum_asset_name = UpdateChecksumAssetName;
@@ -60,6 +69,19 @@ trg::update::UpdateConfig MakeUpdateConfig(const std::filesystem::path& install_
     config.install_unsupported_reason =
         "The update helper is missing from this installation. Reinstall this release to enable automatic updates.";
   }
+#else
+  config.package_kind = trg::update::UpdatePackageKind::kAppImage;
+  config.asset_name = UpdateAppImageName;
+  config.checksum_asset_name = UpdateAppImageChecksumName;
+  std::filesystem::path appimage;
+  if (trg::update::HasOriginalAppImage(appimage)) {
+    config.appimage_path = appimage;
+    config.restart_executable = appimage;
+    config.install_supported = true;
+  } else {
+    config.install_unsupported_reason = "Automatic installation is available in the AppImage build.";
+  }
+#endif
 
   config.log = [](std::string_view text) { REXLOG_INFO("Updater: {}", text); };
 

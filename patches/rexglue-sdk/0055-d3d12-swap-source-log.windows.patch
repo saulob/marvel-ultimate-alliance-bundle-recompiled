@@ -57,7 +57,7 @@ index 0983cee..a253d6e 100644
      return;
    }
    D3D12_RESOURCE_DESC swap_texture_desc = swap_texture_resource->GetDesc();
-+  // DEBUG_SAULO
++  // Frame log: what the swap reads.
 +  if (frame_logged) {
 +    const uint32_t fetch_base =
 +        uint32_t(register_file_->GetTextureFetch(0).base_address) << 12;

@@ -42,6 +42,7 @@ char g_runtime_display[96] = {};
 char g_runtime_timing[128] = {};
 char g_runtime_renderer[160] = {};
 std::atomic<CrashGuestFunctionResolver> g_guest_resolver{nullptr};
+std::atomic<CrashGuestThreadResolver> g_guest_thread_resolver{nullptr};
 
 void CopyText(char* out, size_t size, const char* text) {
   if (out == nullptr || size == 0) {
@@ -314,6 +315,11 @@ void FillReport(CrashReport& report, const EXCEPTION_POINTERS* info) {
       resolver != nullptr) {
     resolver(report.address, &report.guest_function);
   }
+  if (const CrashGuestThreadResolver resolver = g_guest_thread_resolver.load(std::memory_order_acquire);
+      resolver != nullptr) {
+    const bool access_violation = record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record.NumberParameters >= 2;
+    resolver(access_violation ? record.ExceptionInformation[1] : 0, &report.guest_thread);
+  }
   FillRuntimeState(report);
 }
 
@@ -530,6 +536,31 @@ size_t FormatCrashReport(const CrashReport& report, char* buffer, size_t size) {
     writer.Hex(report.guest_function.address, 8);
     writer.Char('\n');
   }
+  if (report.guest_thread.known) {
+    Prefix(writer, report);
+    writer.Text("Guest thread: ");
+    writer.Hex(report.guest_thread.thread_id, 8);
+    writer.Char('\n');
+    Prefix(writer, report);
+    writer.Text("Guest registers: lr=");
+    writer.Hex(report.guest_thread.lr, 8);
+    writer.Text(" r1=");
+    writer.Hex(report.guest_thread.r1, 8);
+    for (uint32_t i = 0; i < 10; ++i) {
+      writer.Text(" r");
+      writer.Dec(i + 3);
+      writer.Char('=');
+      writer.Hex(report.guest_thread.r3_to_r12[i], 8);
+    }
+    writer.Char('\n');
+  }
+  if (report.guest_thread.data_address_known) {
+    Prefix(writer, report);
+    writer.Text("Guest data address: ");
+    writer.Hex(report.guest_thread.data_address, 8);
+    writer.Text(report.guest_thread.data_address_physical ? " (physical)" : " (virtual)");
+    writer.Char('\n');
+  }
 
   if (report.has_context) {
     Prefix(writer, report);
@@ -631,6 +662,10 @@ void SetCrashRuntimeState(const char* gpu, const char* display, const char* timi
 
 void SetCrashGuestFunctionResolver(CrashGuestFunctionResolver resolver) {
   g_guest_resolver.store(resolver, std::memory_order_release);
+}
+
+void SetCrashGuestThreadResolver(CrashGuestThreadResolver resolver) {
+  g_guest_thread_resolver.store(resolver, std::memory_order_release);
 }
 
 bool CrashReportingInstalled() {

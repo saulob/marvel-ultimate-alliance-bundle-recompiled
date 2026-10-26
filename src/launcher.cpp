@@ -349,11 +349,6 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     state.capturing_key = launcher_->capturing_key();
     state.popup_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     state.starting = starting_;
-    if (state.s_pressed) {
-      REXLOG_INFO("DEBUG_SAULO Ctrl+S: ctrl={} text={} capture={} popup={} starting={} fires={} game={}",
-                  state.ctrl_down, state.text_input, state.capturing_key, state.popup_open, state.starting,
-                  SaveShortcutFires(state), Selected().game->key);
-    }
     if (SaveShortcutFires(state)) {
       launcher_->Save();
     }
@@ -1015,7 +1010,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     }
   }
 
-  bool UpscalingApplies() const { return Selected().game != nullptr; }
+  bool UpscalingApplies() const { return kUpscalerAvailable && Selected().game != nullptr; }
 
   bool HdTextApplies() const { return Selected().game && hd_text::AssetsFor(Selected().game->id); }
 

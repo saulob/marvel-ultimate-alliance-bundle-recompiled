@@ -219,7 +219,7 @@ void TestZeroSizeProfileSettings(const fs::path& patches, const fs::path& source
 
 int main() {
   const fs::path source = MUA_SDK_SOURCE_DIR;
-  TestZeroSizeProfileSettings(source / "../../patches/rexglue-sdk", source);
+  TestZeroSizeProfileSettings(fs::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk", source);
   if (!fs::exists(source / "src/core/clock.cpp")) {
     std::printf("skipped: the patched ReXGlue source is not staged (%s)\n", source.string().c_str());
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

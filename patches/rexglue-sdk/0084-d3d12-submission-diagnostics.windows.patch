@@ -28,7 +28,7 @@ index 84cdea3..837feed 100644
    // stream to its thread and keeps an empty one with its capacity).
    void SwapStream(DeferredCommandList& other) { command_stream_.swap(other.command_stream_); }
    void Execute(ID3D12GraphicsCommandList* command_list, ID3D12GraphicsCommandList1* command_list_1);
-+  // DEBUG_SAULO: how many of each command are recorded, and the arguments of the last few, for
++  // How many of each command are recorded, and the arguments of the last few, for
 +  // the log when the runtime rejects the submission.
 +  std::string Describe(size_t tail_commands) const;
  
@@ -124,7 +124,7 @@ index dc941ef..7d6afae 100644
    REXGPU_ERROR("D3D12 device removed: HRESULT 0x{:08X} - {}", static_cast<unsigned>(reason),
                 reason_str);
  
-+  // DEBUG_SAULO: DRED output, every query reported on its own.
++  // DRED output, every query reported on its own.
    Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData> dred;
 -  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {
 +  HRESULT result = device->QueryInterface(IID_PPV_ARGS(&dred));
@@ -197,7 +197,7 @@ index dc941ef..7d6afae 100644
 +  }
 +}
 +
-+// DEBUG_SAULO: closes and executes one submission. The recording errors the D3D12 runtime detects
++// Closes and executes one submission. The recording errors the D3D12 runtime detects
 +// make Close fail, and executing such a list removes the device with INVALID_CALL - so it is left
 +// out, and logged with what it holds. A removal the queue reports right after the execute is logged
 +// with the submission that raised it.
@@ -464,7 +464,7 @@ index 306118e..e9026ed 100644
 -  command_list->Close();
 -  ID3D12CommandList* execute_command_list = command_list;
 -  provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
-+  // DEBUG_SAULO: executing a list that failed to close removes the device, so it is left out.
++  // Executing a list that failed to close removes the device, so it is left out.
 +  const HRESULT close_result = command_list->Close();
 +  const bool paint_list_closed = SUCCEEDED(close_result);
 +  if (paint_list_closed) {
@@ -507,7 +507,7 @@ index 7f30a54..ded627c 100644
 -            "Failed to enable DRED - device removal diagnostics will be "
 -            "limited");
 -      }
-+  // DEBUG_SAULO: DRED names the command list operation a device removal happened at; scaled rendering turns
++  // DRED names the command list operation a device removal happened at; scaled rendering turns
 +  // it on without the debug layer.
 +  if (debug || std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()) > 1) {
 +    Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;

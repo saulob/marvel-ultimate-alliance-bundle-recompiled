@@ -45,7 +45,7 @@ REX_HOOK_RAW(__imp__VdSwap) {
   if (!repeat) {
     static std::atomic<bool> first_present{true};
     if (first_present.exchange(false)) {
-      REXLOG_INFO("DEBUG_SAULO first guest present");
+      REXLOG_INFO("First guest frame presented");
     }
     mua::NoteGuestFrame();
     mua::CountPresentForDiagnostics();

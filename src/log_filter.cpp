@@ -25,6 +25,9 @@ namespace {
 constexpr std::string_view kEssentialInfo[] = {
     "Marvel Ultimate Alliance port ",
     "Build:",
+    "Program:",
+    "Selected game:",
+    "Game paths:",
     "Launcher Display:",
     "Launcher Graphics:",
     "Runtime ",
@@ -33,6 +36,9 @@ constexpr std::string_view kEssentialInfo[] = {
     "Game files:",
     "Graphics card:",
     "Upscaling:",
+    "Aspect ratio:",
+    "HD text:",
+    "Dynamic page streaming:",
     "Guest back buffer:",
     "DXGI adapter:",
     "Vulkan device:",
@@ -43,6 +49,8 @@ constexpr std::string_view kEssentialInfo[] = {
     "Window closing",
     "Title terminated",
     "Launcher closed",
+    "Launcher handoff:",
+    "Started the game's own program",
     "Restarted in a new window",
 };
 

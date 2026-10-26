@@ -1,7 +1,8 @@
-// DEBUG_SAULO: checks that every guest function the hooks replace is the one the module's function table runs.
+// Checks that every guest function the hooks replace is the one the module's function table runs.
 
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
 #include <string>
 
 #include <rex/logging.h>
@@ -169,15 +170,19 @@ bool IsRegistered(const PPCFuncMapping* mappings, const HookEntry& hook) {
 }  // namespace
 
 void LogGuestHooks(const PPCFuncMapping* mappings) {
-  std::string registered;
+  size_t registered = 0;
   std::string missing;
   for (const HookEntry& hook : kHooks) {
-    std::string& list = IsRegistered(mappings, hook) ? registered : missing;
-    list += std::string(list.empty() ? "" : " ") + (hook.role + sizeof("MUA_GUEST_") - 1) + "=" + (hook.symbol + 4);
+    if (IsRegistered(mappings, hook)) {
+      ++registered;
+    } else {
+      missing += std::string(missing.empty() ? "" : " ") + (hook.role + sizeof("MUA_GUEST_") - 1) + "=" +
+                 (hook.symbol + 4);
+    }
   }
-  REXLOG_INFO("DEBUG_SAULO guest hooks registered: {}", registered);
+  REXLOG_INFO("Guest hooks: {} of {} registered", registered, std::size(kHooks));
   if (!missing.empty()) {
-    REXLOG_WARN("DEBUG_SAULO guest hooks NOT registered: {}", missing);
+    REXLOG_WARN("Guest hooks NOT registered: {}", missing);
   }
 }
 

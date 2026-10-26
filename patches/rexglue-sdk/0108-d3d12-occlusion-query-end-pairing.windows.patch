@@ -1,4 +1,4 @@
-Adapted from crackdown-recomp (Unowa001) origin/main patches/sdk/0005 (BEGIN/END pairing, point 1 of that patch; its deferred write is already 0075). Direct3D 9 gives a query's BEGIN and END their own sample count blocks (Crackdown: END 0x20 bytes before BEGIN) and subtracts the two snapshots, but the END handler required the BEGIN's address, so the first END disabled host occlusion queries for the rest of the session and every result was the fake count. END now pairs with the active query, and a BEGIN without an END, or a nested BEGIN, abandons only that query. A query that a forced EndSubmission splits still gets the fake count (0075 already avoids ending a submission early while a query is active). DEBUG_SAULO: the first 8 BEGIN/END events are logged with their addresses.
+Adapted from crackdown-recomp (Unowa001) origin/main patches/sdk/0005 (BEGIN/END pairing, point 1 of that patch; its deferred write is already 0075). Direct3D 9 gives a query's BEGIN and END their own sample count blocks (Crackdown: END 0x20 bytes before BEGIN) and subtracts the two snapshots, but the END handler required the BEGIN's address, so the first END disabled host occlusion queries for the rest of the session and every result was the fake count. END now pairs with the active query, and a BEGIN without an END, or a nested BEGIN, abandons only that query. A query that a forced EndSubmission splits still gets the fake count (0075 already avoids ending a submission early while a query is active).
 
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
 index 2a22dc2..2075595 100644
@@ -25,18 +25,10 @@ index 1a47387..1369e5d 100644
      return true;
    }
  
-@@ -304,25 +304,29 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
+@@ -304,25 +304,21 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
        sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
    bool is_end = is_end_via_z_pass || is_end_via_z_fail;
  
-+  // DEBUG_SAULO: the first BEGIN/END pairs, to see the guest's sample count block layout.
-+  static std::atomic<uint32_t> zpd_logged{0};
-+  if (zpd_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
-+    REXGPU_INFO("DEBUG_SAULO occlusion {} at {:08X}, active query at {:08X}",
-+                is_end ? "END" : "BEGIN", sample_count_addr,
-+                active_occlusion_query_.valid ? active_occlusion_query_.sample_count_address : 0u);
-+  }
-+
    if (!is_end) {
      // Direct3D 9 snapshots the counters into separate begin and end blocks and subtracts them, so
      // the begin block reads as zero (as in the fallback result) and only the end block carries the

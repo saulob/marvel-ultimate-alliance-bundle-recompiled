@@ -300,12 +300,15 @@ void TestOptionalHooksFollowTheirFlags() {
   CHECK(report.find("#if MUA_GUEST_HAS_MEMMOVE") != std::string::npos);
   CHECK(declaration.find("#if MUA_GUEST_HAS_D3D_STATE_FILTER") != std::string::npos);
   const std::string watchdog = ReadSource(kSources / "hang_watchdog.cpp");
-  for (const char* off : {"mua_debug_verify_native_upload, false", "mua_debug_d3d_filter_stats, false",
-                          "mua_skip_redundant_shader_constants, false"}) {
-    CHECK(declaration.find(off) != std::string::npos);
+  CHECK(declaration.find("mua_skip_redundant_shader_constants, false") != std::string::npos);
+  for (const std::string* source : {&declaration, &watchdog, &report}) {
+    CHECK(source->find("mua_debug_") == std::string::npos);
+    CHECK(source->find("DEBUG_SAULO") == std::string::npos);
   }
-  CHECK(watchdog.find("mua_debug_render_profile, false") != std::string::npos);
-  CHECK(ReadSource(kSources / "gpu_producer_counters.cpp").find("mua_debug_gpu_producers, false") != std::string::npos);
+  CHECK(!std::filesystem::exists(kSources / "gpu_producer_counters.cpp"));
+  // Every game, MUA1 included, runs the native uploads through the same hooks.
+  CHECK(declaration.find("MUA_RUNTIME_") == std::string::npos);
+  CHECK(declaration.find("REX_HOOK_RAW(MUA_GUEST_UPLOAD_REGISTERS)") != std::string::npos);
   const std::string alchemy = ReadSource(kSources / "alchemy_native.cpp");
   for (const char* flag : {"#if MUA_GUEST_HAS_ALCHEMY_CORE", "#if MUA_GUEST_HAS_ALCHEMY_HELPERS",
                            "#if MUA_GUEST_HAS_OBJECT_HANDLES"}) {

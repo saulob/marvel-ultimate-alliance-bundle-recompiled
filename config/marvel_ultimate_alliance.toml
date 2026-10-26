@@ -10,9 +10,11 @@ hid_mappings_file = ""
 # ReXGlue's compatibility option: use texture fetch constants of invalid type instead of rejecting the fetch.
 gpu_allow_invalid_fetch_constants = true
 
-# EDRAM in pixel shaders (rasterizer-ordered views) instead of host render targets, whose EDRAM dumps lose the movie
-# render target. ReXGlue falls back to host render targets on GPUs without rasterizer-ordered views.
+# EDRAM in pixel shaders (rasterizer-ordered views on Direct3D 12, fragment shader interlock on Vulkan) instead of host
+# render targets, whose EDRAM dumps lose the movie render target. ReXGlue falls back to host render targets on GPUs
+# without them.
 render_target_path_d3d12 = "rov"
+render_target_path_vulkan = "fsi"
 # A frame may wait this long in total for pipelines prepared in the background before drawing without them (patch 0048).
 # The game sets it from the Frame rate choice: half a frame at the cap, 16 ms at 30 FPS down to 4 ms.
 async_shader_wait_ms = 16

@@ -6,6 +6,13 @@
 add_custom_target(mua_headless_tests)
 add_custom_target(mua_runtime_tests)
 
+# Windows system libraries a test names; a Linux build drops them.
+set(MUA_WINDOWS_SYSTEM_LIBS shell32 ole32 comdlg32 winmm user32 winhttp ws2_32 dxgi d3d12 dbghelp shcore synchronization)
+if(NOT WIN32)
+    # glibc 2.31 keeps pthread_create in libpthread, which std::thread needs.
+    find_package(Threads REQUIRED)
+endif()
+
 function(mua_add_test name group)
     cmake_parse_arguments(T "" "" "SOURCES;LIBS;DEFINES" ${ARGN})
     set(_target mua_${name})
@@ -13,6 +20,10 @@ function(mua_add_test name group)
     target_include_directories(${_target} PRIVATE src)
     target_include_directories(${_target} SYSTEM PRIVATE "${MUA_SDK_DIR}/include" "${_trg_patched_dir}/include")
     target_compile_definitions(${_target} PRIVATE MUA_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src" ${T_DEFINES})
+    if(NOT WIN32)
+        list(REMOVE_ITEM T_LIBS ${MUA_WINDOWS_SYSTEM_LIBS})
+        list(APPEND T_LIBS Threads::Threads)
+    endif()
     if(T_LIBS)
         target_link_libraries(${_target} PRIVATE ${T_LIBS})
     endif()
@@ -20,6 +31,9 @@ function(mua_add_test name group)
         add_custom_command(TARGET ${_target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE_DIR:${_target}>"
             VERBATIM)
+        if(NOT WIN32)
+            set_target_properties(${_target} PROPERTIES BUILD_RPATH "$ORIGIN")
+        endif()
     endif()
     add_dependencies(mua_${group}_tests ${_target})
 endfunction()
@@ -52,7 +66,9 @@ mua_add_test(d3d12_async_submission_tests headless)
 mua_add_test(d3d12_sampler_memo_tests headless)
 mua_add_test(render_scale_tests headless)
 mua_add_test(upscaling_tests headless)
-mua_add_test(d3d12_copy_validation_tests headless LIBS d3d12 dxgi)
+if(WIN32)
+    mua_add_test(d3d12_copy_validation_tests headless LIBS d3d12 dxgi)
+endif()
 mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp)
 mua_add_test(keyboard_tests headless)
 mua_add_test(relaunch_tests headless)
@@ -86,9 +102,14 @@ add_library(mua_trg_net_support STATIC EXCLUDE_FROM_ALL
 target_include_directories(mua_trg_net_support PUBLIC "${_trg_patched_dir}/include")
 set_target_properties(mua_trg_net_support PROPERTIES CXX_STANDARD 17)
 target_compile_definitions(mua_trg_net_support PRIVATE _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(mua_trg_net_support PUBLIC shell32 ole32 comdlg32 winmm user32 winhttp)
-mua_add_test(update_controller_tests headless
-    SOURCES ${MUA_UPDATER_TEST_SOURCES} src/updater/update_controller.cpp LIBS mua_trg_net_support ws2_32)
+if(WIN32)
+    target_link_libraries(mua_trg_net_support PUBLIC shell32 ole32 comdlg32 winmm user32 winhttp)
+endif()
+# Serves its test releases from a Winsock loopback server.
+if(WIN32)
+    mua_add_test(update_controller_tests headless
+        SOURCES ${MUA_UPDATER_TEST_SOURCES} src/updater/update_controller.cpp LIBS mua_trg_net_support ws2_32)
+endif()
 mua_add_test(game_library_tests headless
     SOURCES src/game_definition.cpp src/game_files.cpp src/game_library.cpp src/game_profile.cpp src/xex_identity.cpp)
 mua_add_test(game_install_tests headless
@@ -124,7 +145,7 @@ mua_add_test(runtime_config_tests headless
 mua_add_test(active_log_tests runtime SOURCES src/active_log.cpp src/log_filter.cpp LIBS rex::runtime)
 mua_add_test(frame_stats_tests runtime SOURCES src/hang_watchdog.cpp LIBS rex::runtime dbghelp)
 mua_add_test(log_filter_tests runtime
-    SOURCES src/active_log.cpp src/crash_report.cpp src/log_filter.cpp src/session_log.cpp
+    SOURCES src/active_log.cpp src/crash_report.cpp src/log_filter.cpp src/log_path.cpp src/session_log.cpp
     LIBS rex::runtime shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(physical_heap_stress runtime LIBS rex::runtime)
 mua_add_test(vmsum_tests runtime LIBS rex::runtime
@@ -136,6 +157,7 @@ mua_add_test(filesystem_mapping_tests runtime LIBS rex::runtime)
 mua_add_test(settings_tests runtime
     SOURCES src/settings.cpp src/crash_report.cpp src/diagnostics.cpp src/game_definition.cpp src/game_files.cpp
             src/game_profile.cpp src/graphics_adapters.cpp src/input_summary.cpp src/log_filter.cpp
-            src/active_log.cpp src/platform.cpp src/session_log.cpp src/system_info.cpp src/xex_identity.cpp
+            src/active_log.cpp src/log_path.cpp src/platform.cpp src/session_log.cpp src/system_info.cpp
+            src/xex_identity.cpp
     LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization
     DEFINES ${MUA_TEST_BUILD_DEFINES})

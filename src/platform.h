@@ -11,11 +11,11 @@
 
 namespace mua {
 
-// The folder the player sees the port in: the executable's.
+// The folder the player sees the port in: the executable's, or the AppImage's.
 std::filesystem::path PortFolder();
 
-// Caches the current run's log file and installs the unhandled exception filter that appends
-// a CRASH REPORT block to it.
+// Windows: caches the current run's log file and installs the unhandled exception filter that appends
+// a CRASH REPORT block to it. A no-op on Linux.
 void InstallCrashReports();
 
 // The architecture this build runs as ("x86-64", "arm64", ...), for the startup log line.
@@ -29,7 +29,30 @@ struct UiFontFiles {
 };
 UiFontFiles FindUiFonts();
 
-// True while Shift is held.
+// Gives the window the program's icon. Windows takes it from the executable's resources already; on Linux SDL
+// does not, so the icon the AppImage carries for the program is loaded.
+void ApplyWindowIcon();
+
+// Names the application to the Linux desktop: SDL uses it as the Wayland app_id and the X11 WM_CLASS class. It has to
+// be set before the window is created. A no-op on Windows.
+void SetApplicationId();
+
+// Linux: tells the player, in a window that needs no GPU, that graphics could not start; the SDK only logs it. A no-op
+// on Windows.
+void ReportGraphicsFailure();
+
+struct GraphicsFallbackInfo {
+  std::string game_name;
+  std::string game_dir;
+  std::string game_files_status;
+  bool game_files_ready = false;
+};
+
+// Linux: the launcher's window when graphics cannot start, drawn on an SDL surface with no GPU. It shows the selected
+// game and its files; Play reports the graphics failure. Returns when the player closes it. A no-op on Windows.
+void RunLauncherWithoutGraphics(const GraphicsFallbackInfo& info);
+
+// True while Shift is held. On Linux SDL only knows the keyboard once a window has focus.
 bool ShiftHeld();
 
 struct MonitorInfo {
@@ -67,13 +90,15 @@ struct PreShowResult {
   WindowPlacement applied;
 };
 
-// Applies the plan to the next top-level window of this thread before it is first shown.
+// Applies the plan to the next top-level window of this thread before it is first shown. Windows only: elsewhere
+// the launcher places the window once it exists.
 void InstallPreShowPlacement(const PreShowPlan& plan, const WindowPlacement& saved);
 
 // Set once the window has been shown; empty when no window was placed.
 std::optional<PreShowResult> TakePreShowResult();
 
 // Starts `executable` with this run's command line plus `extra_args`, restored and allowed to take the foreground.
+// Inside an AppImage the AppImage file is started again and runs `executable` from its new mount.
 bool RelaunchExecutable(const std::filesystem::path& executable, std::wstring_view extra_args);
 
 // In a program the launcher started: brings its window forward once.

@@ -1,10 +1,12 @@
 #include "log_path.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
-#include <cstdlib>
+#include <set>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace mua {
 namespace {
@@ -22,22 +24,62 @@ std::filesystem::path NextLogFile(const std::filesystem::path& folder, std::stri
   if (!std::filesystem::is_directory(folder, ec)) {
     return {};
   }
-  const std::string prefix = std::string(name) + "_";
   int last = 0;
-  for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
-    const std::string file = entry.path().filename().string();
-    if (!file.starts_with(prefix) || !file.ends_with(".log")) {
-      continue;
-    }
-    const std::string_view number =
-        std::string_view(file).substr(prefix.size(), file.size() - prefix.size() - sizeof(".log") + 1);
-    if (IsNumber(number)) {
-      last = std::max(last, std::atoi(std::string(number).c_str()));
-    }
+  for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+    last = std::max(last, SessionLogNumber(it->path().filename().string(), name));
   }
   char number[16];
-  std::snprintf(number, sizeof(number), "%03d.log", last + 1);
-  return folder / (prefix + number);
+  std::snprintf(number, sizeof(number), "_%03d.log", last + 1);
+  return folder / (std::string(name) + number);
+}
+
+int SessionLogNumber(std::string_view file_name, std::string_view name) {
+  constexpr std::string_view kSuffix = ".log";
+  if (file_name.size() <= name.size() + 1 + kSuffix.size() || !file_name.starts_with(name) ||
+      file_name[name.size()] != '_' || !file_name.ends_with(kSuffix)) {
+    return 0;
+  }
+  std::string_view number = file_name.substr(name.size() + 1, file_name.size() - name.size() - 1 - kSuffix.size());
+  if (const size_t dot = number.find('.'); dot != std::string_view::npos) {
+    if (!IsNumber(number.substr(dot + 1))) {
+      return 0;
+    }
+    number = number.substr(0, dot);
+  }
+  int session = 0;
+  if (!IsNumber(number) || std::from_chars(number.data(), number.data() + number.size(), session).ec != std::errc()) {
+    return 0;
+  }
+  return session;
+}
+
+std::vector<std::filesystem::path> OldSessionLogs(const std::filesystem::path& folder, std::string_view name,
+                                                  const std::filesystem::path& active, size_t keep) {
+  const int active_session = SessionLogNumber(active.filename().string(), name);
+  std::vector<std::pair<int, std::filesystem::path>> logs;
+  std::set<int> sessions;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code type_ec;
+    if (!it->is_regular_file(type_ec)) {
+      continue;
+    }
+    if (const int session = SessionLogNumber(it->path().filename().string(), name); session != 0) {
+      logs.emplace_back(session, it->path());
+      sessions.insert(session);
+    }
+  }
+  std::set<int> kept;
+  for (auto it = sessions.rbegin(); it != sessions.rend() && kept.size() < keep; ++it) {
+    kept.insert(*it);
+  }
+  std::vector<std::filesystem::path> old;
+  for (const auto& [session, path] : logs) {
+    if (session != active_session && !kept.contains(session)) {
+      old.push_back(path);
+    }
+  }
+  return old;
 }
 
 std::filesystem::path LogsFolder(const std::filesystem::path& port_folder,

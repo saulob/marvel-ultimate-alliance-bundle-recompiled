@@ -28,7 +28,7 @@ inline double GameSecondsPlayed(double frame_interval, double real_seconds, doub
   return frames * WorldDelta(frame_interval, minimum);
 }
 
-// DEBUG_SAULO: a line about the world updates every kReportSeconds, to check the frame model against a real run.
+// One line about the world updates every kReportSeconds: how fast game time runs against real time.
 class PacingReport {
  public:
   static constexpr double kReportSeconds = 10.0;
@@ -68,7 +68,7 @@ class PacingReport {
   uint32_t clamped_ = 0;
 };
 
-// DEBUG_SAULO: calls per second of a candidate function, reported once per kReportSeconds window.
+// Calls per second of a guest function, reported once per kReportSeconds window.
 class CallRateReport {
  public:
   static constexpr double kReportSeconds = 10.0;
@@ -95,48 +95,7 @@ class CallRateReport {
   uint32_t calls_ = 0;
 };
 
-// DEBUG_SAULO: host time spent inside World::Update, reported once per kReportSeconds window.
-class WorldUpdateTiming {
- public:
-  static constexpr double kReportSeconds = 10.0;
-
-  std::optional<std::string> Add(double update_ms, double now_seconds) {
-    if (!started_) {
-      started_ = true;
-      window_start_ = now_seconds;
-    }
-    ++calls_;
-    total_ms_ += update_ms;
-    max_ms_ = std::max(max_ms_, update_ms);
-    over_5ms_ += update_ms > 5.0 ? 1 : 0;
-    over_10ms_ += update_ms > 10.0 ? 1 : 0;
-    const double elapsed = now_seconds - window_start_;
-    if (elapsed < kReportSeconds) {
-      return std::nullopt;
-    }
-    char text[200];
-    std::snprintf(text, sizeof(text),
-                  "world update: calls/s=%.1f | avg=%.2f ms | max=%.2f ms | >5 ms=%u | >10 ms=%u | busy=%.1f%% of "
-                  "real time",
-                  calls_ / elapsed, total_ms_ / calls_, max_ms_, over_5ms_, over_10ms_,
-                  100.0 * total_ms_ / (1000.0 * elapsed));
-    *this = WorldUpdateTiming{};
-    started_ = true;
-    window_start_ = now_seconds;
-    return std::string(text);
-  }
-
- private:
-  bool started_ = false;
-  double window_start_ = 0.0;
-  uint32_t calls_ = 0;
-  double total_ms_ = 0.0;
-  double max_ms_ = 0.0;
-  uint32_t over_5ms_ = 0;
-  uint32_t over_10ms_ = 0;
-};
-
-// DEBUG_SAULO: counts one genuine guest present for the presents/s line.
+// Counts one genuine guest present for the presents/s line.
 void CountPresentForDiagnostics();
 
 }  // namespace mua

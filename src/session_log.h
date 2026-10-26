@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -19,6 +20,11 @@ void FinalizeSessionLog();
 // Windows, where the open log cannot be deleted, the next start removes it.
 void DiscardSessionLogBeforeHardExit();
 void RemoveDiscardedSessionLogs();
+
+// Keeps the newest kKeptSessionLogs sessions in the active log's folder; older session logs and their rotated parts
+// are deleted. The active log is never touched.
+inline constexpr size_t kKeptSessionLogs = 30;
+void RemoveOldSessionLogs();
 
 // The launcher and the game share one normal log. A relaunch hands the active log to the next
 // process: Begin sets the inherited path, Cancel clears it when the relaunch fails, and the child

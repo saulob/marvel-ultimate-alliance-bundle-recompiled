@@ -17,6 +17,12 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__linux__)
+#include <cerrno>
+#include <ctime>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 #include <rex/hook.h>
@@ -27,7 +33,7 @@
 #include "guest_frame_counters.h"
 #include "guest_map.h"
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
 
 namespace {
 
@@ -74,7 +80,7 @@ struct WaitState {
 };
 thread_local WaitState t_wait;
 
-std::atomic<int> g_gave_up_reports{0};  // DEBUG_SAULO
+std::atomic<int> g_gave_up_reports{0};
 
 size_t SiteIndex(uint32_t return_address) {
   for (size_t i = 0; i < kSites.size(); ++i) {
@@ -152,6 +158,7 @@ enum class WaitOutcome { kReturned, kTimedOut, kFailed };
 // atomic step, so a store between the caller's read and the sleep is never slept through.
 WaitOutcome WaitWhileEqual(const uint32_t* word, uint32_t undesired, uint32_t timeout_ms) {
   const auto wait_start = std::chrono::steady_clock::now();
+#if defined(_WIN32)
   const bool woke = WaitOnAddress(const_cast<uint32_t*>(word), &undesired, sizeof(undesired), timeout_ms);
   const DWORD error = woke ? ERROR_SUCCESS : GetLastError();
   mua::AddGuestFrameTime(mua::GuestFrameTime::kFenceWait, std::chrono::steady_clock::now() - wait_start);
@@ -159,6 +166,22 @@ WaitOutcome WaitWhileEqual(const uint32_t* word, uint32_t undesired, uint32_t ti
     return WaitOutcome::kReturned;
   }
   return error == ERROR_TIMEOUT ? WaitOutcome::kTimedOut : WaitOutcome::kFailed;
+#else
+  const timespec timeout = {0, long(timeout_ms) * 1000000L};
+  const long result = syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, undesired, &timeout, nullptr, 0);
+  const int error = result == 0 ? 0 : errno;
+  mua::AddGuestFrameTime(mua::GuestFrameTime::kFenceWait, std::chrono::steady_clock::now() - wait_start);
+  switch (error) {
+    case 0:
+    case EAGAIN:
+    case EINTR:
+      return WaitOutcome::kReturned;
+    case ETIMEDOUT:
+      return WaitOutcome::kTimedOut;
+    default:
+      return WaitOutcome::kFailed;
+  }
+#endif
 }
 
 // Blocks while the word still holds the value read before the guest last re-checked its condition,
@@ -180,7 +203,7 @@ void BlockUntilWordWritten(size_t site, WaitState& wait) {
     if (current == wait.seen && ++wait.timeouts >= kWaitTimeoutLimit) {
       wait.polling = true;
       if (g_gave_up_reports.fetch_add(1, std::memory_order_relaxed) < 20) {
-        REXLOG_INFO("DEBUG_SAULO GPU wait {}: word {:08X} unchanged for {} blocks, the guest polls this wait",
+        REXLOG_INFO("GPU wait {}: word {:08X} unchanged for {} blocks, the guest polls this wait",
                     kSites[site].name, current, wait.timeouts);
       }
     }
@@ -241,4 +264,4 @@ REX_HOOK_RAW(MUA_GUEST_FENCE_POLL) {
   BlockUntilWordWritten(site, wait);
 }
 
-#endif  // _WIN32
+#endif  // _WIN32 || __linux__

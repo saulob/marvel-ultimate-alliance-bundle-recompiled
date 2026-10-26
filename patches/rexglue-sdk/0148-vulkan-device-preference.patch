@@ -1,0 +1,88 @@
+Ported unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0026-vulkan-device-preference.patch (the same patch in hard-corps-uprising-, geometry-wars-retro-evolved-2- and crackdown-xbox360-recompiled).
+
+diff --git a/src/ui/vulkan/vulkan_provider.cpp b/src/ui/vulkan/vulkan_provider.cpp
+index 9eeb902..392f63a 100644
+--- a/src/ui/vulkan/vulkan_provider.cpp
++++ b/src/ui/vulkan/vulkan_provider.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <vector>
+ 
+ #include <rex/cvar.h>
+@@ -44,6 +45,35 @@ namespace rex {
+ namespace ui {
+ namespace vulkan {
+ 
++namespace {
++
++// The loader and Mesa's device selection layer already put the chosen device first then.
++bool IsPhysicalDeviceSelectedByEnvironment() {
++  for (const char* name : {"DRI_PRIME", "MESA_VK_DEVICE_SELECT", "VK_LOADER_DEVICE_SELECT",
++                           "__NV_PRIME_RENDER_OFFLOAD"}) {
++    const char* value = std::getenv(name);
++    if (value && *value) {
++      return true;
++    }
++  }
++  return false;
++}
++
++uint32_t GetPhysicalDeviceTypeRank(VkPhysicalDeviceType type) {
++  switch (type) {
++    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
++      return 3;
++    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
++      return 2;
++    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
++      return 1;
++    default:
++      return 0;
++  }
++}
++
++}  // namespace
++
+ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emulation,
+                                                        const bool with_presentation) {
+   std::unique_ptr<VulkanProvider> provider(new VulkanProvider());
+@@ -88,9 +118,10 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
+     bool prefer_fragment_stores = REXCVAR_GET(vulkan_prefer_fragment_stores_and_atomics);
+     bool prefer_vertex_stores = REXCVAR_GET(vulkan_prefer_vertex_pipeline_stores_and_atomics);
+     bool prefer_fill_mode_non_solid = REXCVAR_GET(vulkan_prefer_fill_mode_non_solid);
++    bool prefer_device_type = !IsPhysicalDeviceSelectedByEnvironment();
+     if (with_gpu_emulation && physical_devices.size() > 1 &&
+         (prefer_geometry_shader || prefer_fragment_stores || prefer_vertex_stores ||
+-         prefer_fill_mode_non_solid)) {
++         prefer_fill_mode_non_solid || prefer_device_type)) {
+       struct PhysicalDeviceScore {
+         VkPhysicalDevice physical_device;
+         uint32_t score;
+@@ -113,6 +144,13 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
+         if (prefer_fill_mode_non_solid && supported_features.fillModeNonSolid) {
+           ++score;
+         }
++        // Below any feature: a discrete GPU before an integrated one with the same features.
++        score *= 4;
++        if (prefer_device_type) {
++          VkPhysicalDeviceProperties properties;
++          ifn.vkGetPhysicalDeviceProperties(physical_device, &properties);
++          score += GetPhysicalDeviceTypeRank(properties.deviceType);
++        }
+         scored_devices.push_back({physical_device, score});
+       }
+ 
+@@ -145,6 +183,11 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
+       return nullptr;
+     }
+   }
++  VkPhysicalDeviceProperties chosen_properties;
++  ifn.vkGetPhysicalDeviceProperties(provider->vulkan_device_->physical_device(),
++                                    &chosen_properties);
++  REXLOG_INFO("Vulkan device: {} (type {})", chosen_properties.deviceName,
++              uint32_t(chosen_properties.deviceType));
+ 
+   if (with_presentation) {
+     provider->ui_samplers_ = UISamplers::Create(provider->vulkan_device_.get());

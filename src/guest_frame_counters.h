@@ -1,22 +1,16 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 
-// The guest-frame totals the GPU plugin's Performance line reads (ReXGlue patch 0132).
-#if defined(_WIN32)
-#define MUA_GUEST_FRAME_COUNTERS 1
+// The guest-frame totals the GPU plugin's Performance line and the audio history read (ReXGlue patch 0132).
 #include <rex/perf/counter.h>
-#else
-#define MUA_GUEST_FRAME_COUNTERS 0
-#endif
 
 namespace mua {
 
 enum class GuestFrameTime { kWorldUpdate, kLimiterWait, kFenceWait };
 
-inline void AddGuestFrameTime([[maybe_unused]] GuestFrameTime kind,
-                              [[maybe_unused]] std::chrono::steady_clock::duration elapsed) {
-#if MUA_GUEST_FRAME_COUNTERS
+inline void AddGuestFrameTime(GuestFrameTime kind, std::chrono::steady_clock::duration elapsed) {
   using rex::perf::CounterId;
   const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
   switch (kind) {
@@ -31,7 +25,6 @@ inline void AddGuestFrameTime([[maybe_unused]] GuestFrameTime kind,
       rex::perf::IncrementCounter(CounterId::kGuestFenceWaitNs, ns);
       break;
   }
-#endif
 }
 
 }  // namespace mua

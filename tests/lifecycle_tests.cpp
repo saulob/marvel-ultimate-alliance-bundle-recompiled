@@ -4,6 +4,7 @@
 // Run: mua_lifecycle_tests
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -104,6 +105,10 @@ void TestSessionLogFinalizationWiring() {
   const std::string post_init = Between(app, "void OnPostInitLogging(", "void OnConfigureFonts(");
   CHECK(Has(post_init, "mua::InstallSessionLogCleanup();"));
   CHECK(Has(post_init, "mua::RemoveDiscardedSessionLogs();"));
+  // Old sessions go only after the active log exists and the discarded ones are handled.
+  const size_t discarded = post_init.find("mua::RemoveDiscardedSessionLogs();");
+  const size_t old_sessions = post_init.find("mua::RemoveOldSessionLogs();");
+  CHECK(discarded != std::string::npos && old_sessions != std::string::npos && discarded < old_sessions);
 
   const std::string closing =
       Between(app, "void OnClosing(", "std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay");
@@ -135,6 +140,30 @@ void TestNoSeparateCrashArtifacts() {
   }
 }
 
+// DEBUG_SAULO marks temporary investigation code; a release carries none in the port or its runtime patches.
+void TestNoTemporaryDiagnostics() {
+  std::printf("no DEBUG_SAULO instrumentation in the sources or the runtime patches\n");
+  const std::filesystem::path root = std::filesystem::path(MUA_SRC_DIR) / "..";
+  size_t scanned = 0;
+  for (const char* folder : {"src", "patches/rexglue-sdk", "patches/trg-launcher", "config", "packaging"}) {
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(root / folder, ec), end; !ec && it != end; it.increment(ec)) {
+      if (!it->is_regular_file()) {
+        continue;
+      }
+      std::ifstream in(it->path(), std::ios::binary);
+      std::ostringstream text;
+      text << in.rdbuf();
+      ++scanned;
+      if (Has(text.str(), "DEBUG_SAULO") || Has(text.str(), "DebugSaulo")) {
+        std::printf("  temporary diagnostics in %s\n", it->path().string().c_str());
+        CHECK(false);
+      }
+    }
+  }
+  CHECK(scanned > 100);
+}
+
 void TestIntentionalExitsWriteNoCrashBlock() {
   std::printf("window close and normal shutdown never write a crash block\n");
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
@@ -155,6 +184,7 @@ int main() {
   TestSessionLogFinalizationWiring();
   TestNoSeparateCrashArtifacts();
   TestIntentionalExitsWriteNoCrashBlock();
+  TestNoTemporaryDiagnostics();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

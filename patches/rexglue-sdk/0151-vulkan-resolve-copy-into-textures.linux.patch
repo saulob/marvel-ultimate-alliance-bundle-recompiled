@@ -1,0 +1,286 @@
+Ported unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0024-vulkan-resolve-copy-into-textures.linux.patch (the same patch in hard-corps-uprising-, geometry-wars-retro-evolved-2- and crackdown-xbox360-recompiled).
+
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index 9d2a848..6befcc0 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -210,6 +210,21 @@ class DeferredCommandBuffer {
+                 regions, sizeof(VkBufferImageCopy) * region_count);
+   }
+ 
++  VkImageCopy* CmdCopyImageEmplace(VkImage src_image, VkImageLayout src_image_layout,
++                                   VkImage dst_image, VkImageLayout dst_image_layout,
++                                   uint32_t region_count) {
++    const size_t header_size = rex::align(sizeof(ArgsVkCopyImage), alignof(VkImageCopy));
++    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
++        WriteCommand(Command::kVkCopyImage, header_size + sizeof(VkImageCopy) * region_count));
++    auto& args = *reinterpret_cast<ArgsVkCopyImage*>(args_ptr);
++    args.src_image = src_image;
++    args.src_image_layout = src_image_layout;
++    args.dst_image = dst_image;
++    args.dst_image_layout = dst_image_layout;
++    args.region_count = region_count;
++    return reinterpret_cast<VkImageCopy*>(args_ptr + header_size);
++  }
++
+   void CmdVkCopyQueryPoolResults(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count,
+                                  VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
+                                  VkQueryResultFlags flags) {
+@@ -363,6 +378,7 @@ class DeferredCommandBuffer {
+     kVkClearColorImage,
+     kVkCopyBuffer,
+     kVkCopyBufferToImage,
++    kVkCopyImage,
+     kVkCopyQueryPoolResults,
+     kVkDispatch,
+     kVkDraw,
+@@ -484,6 +500,16 @@ class DeferredCommandBuffer {
+     static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
+   };
+ 
++  struct ArgsVkCopyImage {
++    VkImage src_image;
++    VkImageLayout src_image_layout;
++    VkImage dst_image;
++    VkImageLayout dst_image_layout;
++    uint32_t region_count;
++    // Followed by aligned VkImageCopy[].
++    static_assert(alignof(VkImageCopy) <= alignof(uintmax_t));
++  };
++
+   struct ArgsVkCopyQueryPoolResults {
+     VkQueryPool query_pool;
+     uint32_t first_query;
+diff --git a/include/rex/graphics/vulkan/texture_cache.h b/include/rex/graphics/vulkan/texture_cache.h
+index 04856ee..dd02efd 100644
+--- a/include/rex/graphics/vulkan/texture_cache.h
++++ b/include/rex/graphics/vulkan/texture_cache.h
+@@ -129,6 +129,13 @@ class VulkanTextureCache final : public TextureCache {
+                                               length_scaled_alignment_log2);
+   }
+   VkBuffer scaled_resolve_buffer() const { return scaled_resolve_buffer_; }
++
++  // Textures filled from the render target of a resolve instead of being loaded from its memory.
++  // Prepare before the resolve marks its range as resolved, perform after, with the render target
++  // in the transfer source layout.
++  uint32_t PrepareResolveTextureCopies(const draw_util::ResolveTextureCopy& copy,
++                                       VkFormat source_format);
++  void PerformResolveTextureCopies(const draw_util::ResolveTextureCopy& copy, VkImage source);
+   void UseScaledResolveBufferForRead();
+   void UseScaledResolveBufferForWrite(uint64_t written_start_scaled,
+                                       uint64_t written_length_scaled);
+@@ -202,6 +209,7 @@ class VulkanTextureCache final : public TextureCache {
+ 
+     VkImage image() const { return image_; }
+ 
++    Usage usage() const { return usage_; }
+     // Doesn't transition (the caller must insert the barrier).
+     Usage SetUsage(Usage new_usage) {
+       Usage old_usage = usage_;
+@@ -362,6 +370,10 @@ class VulkanTextureCache final : public TextureCache {
+ 
+   std::array<VulkanTextureBinding, xenos::kTextureFetchConstantCount> vulkan_texture_bindings_;
+ 
++  static constexpr uint32_t kMaxResolveTextureCopies = 4;
++  Texture* resolve_copy_textures_[kMaxResolveTextureCopies];
++  uint32_t resolve_copy_texture_count_ = 0;
++
+   // Unsupported texture formats used during this frame (for research and
+   // testing).
+   enum : uint8_t {
+diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
+index aa55a4a..1f87962 100644
+--- a/include/rex/ui/vulkan/functions/device_1_0.inc
++++ b/include/rex/ui/vulkan/functions/device_1_0.inc
+@@ -14,6 +14,7 @@ XE_UI_VULKAN_FUNCTION(vkCmdClearAttachments)
+ XE_UI_VULKAN_FUNCTION(vkCmdClearColorImage)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyBuffer)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyBufferToImage)
++XE_UI_VULKAN_FUNCTION(vkCmdCopyImage)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyImageToBuffer)
+ XE_UI_VULKAN_FUNCTION(vkCmdCopyQueryPoolResults)
+ XE_UI_VULKAN_FUNCTION(vkCmdDispatch)
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index b49e033..c73a8ce 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -156,6 +156,15 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+                 rex::align(sizeof(ArgsVkCopyBufferToImage), alignof(VkBufferImageCopy))));
+       } break;
+ 
++      case Command::kVkCopyImage: {
++        auto& args = *reinterpret_cast<const ArgsVkCopyImage*>(stream);
++        dfn.vkCmdCopyImage(command_buffer, args.src_image, args.src_image_layout, args.dst_image,
++                           args.dst_image_layout, args.region_count,
++                           reinterpret_cast<const VkImageCopy*>(
++                               reinterpret_cast<const uint8_t*>(stream) +
++                               rex::align(sizeof(ArgsVkCopyImage), alignof(VkImageCopy))));
++      } break;
++
+       case Command::kVkCopyQueryPoolResults: {
+         auto& args = *reinterpret_cast<const ArgsVkCopyQueryPoolResults*>(stream);
+         dfn.vkCmdCopyQueryPoolResults(command_buffer, args.query_pool, args.first_query,
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 264dfa0..be197ec 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1273,9 +1273,37 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+           command_processor_.SubmitBarriers(true);
+           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
+ 
++          // Textures sampling the destination must be found while they still match the memory.
++          draw_util::ResolveTextureCopy texture_copy;
++          RenderTarget* texture_copy_source = nullptr;
++          ResolveTextureCopyResult texture_copy_result =
++              GetPath() == Path::kHostRenderTargets
++                  ? PlanResolveTextureCopy(resolve_info, texture_copy, texture_copy_source)
++                  : ResolveTextureCopyResult::kDisabled;
++          if (texture_copy_result == ResolveTextureCopyResult::kEligible &&
++              copy_shader != draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA) {
++            texture_copy_result = ResolveTextureCopyResult::kFormat;
++          }
++          uint32_t texture_copy_count = 0;
++          if (texture_copy_result == ResolveTextureCopyResult::kEligible) {
++            texture_copy_count = texture_cache.PrepareResolveTextureCopies(
++                texture_copy, GetColorVulkanFormat(texture_copy_source->key().GetColorFormat()));
++          }
++
+           // Invalidate textures and mark the range as scaled if needed.
+           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                             resolve_info.copy_dest_extent_length);
++          if (texture_copy_count) {
++            auto& source = *static_cast<VulkanRenderTarget*>(texture_copy_source);
++            command_processor_.PushImageMemoryBarrier(
++                source.image(), ui::vulkan::util::InitializeSubresourceRange(),
++                source.current_stage_mask(), VK_PIPELINE_STAGE_TRANSFER_BIT,
++                source.current_access_mask(), VK_ACCESS_TRANSFER_READ_BIT, source.current_layout(),
++                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++            source.SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++            texture_cache.PerformResolveTextureCopies(texture_copy, source.image());
++          }
+           written_address_out = resolve_info.copy_dest_extent_start;
+           written_length_out = resolve_info.copy_dest_extent_length;
+           copied = true;
+@@ -1968,6 +1996,13 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+       image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+     }
+     image_create_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++    // Resolves of these may be copied into textures (resolve_copy_into_textures).
++    if (key.msaa_samples == xenos::MsaaSamples::k1X &&
++        (color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
++         color_format == xenos::ColorRenderTargetFormat::k_2_10_10_10 ||
++         color_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10)) {
++      image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++    }
+   }
+   if (image_create_info.format == VK_FORMAT_UNDEFINED) {
+     REXGPU_ERROR("VulkanRenderTargetCache: Unknown {} render target format {}",
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index ecbd940..1e7d6c6 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -997,7 +997,14 @@ VkImageView VulkanTextureCache::RequestSwapTexture(uint32_t& width_scaled_out,
+   if (!texture) {
+     return VK_NULL_HANDLE;
+   }
++  // Loaded first: loading gives the texture the memory's component order again.
++  if (!LoadTextureData(*texture)) {
++    return VK_NULL_HANDLE;
++  }
+   uint32_t host_swizzle = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(key));
++  if (texture->content_red_blue_swapped()) {
++    host_swizzle = SwapRedBlueSwizzle(host_swizzle);
++  }
+   if (swap_source_needs_rb_swap_out) {
+     auto swizzle_component = [](uint32_t swizzle,
+                                 uint32_t component_index) -> xenos::XE_GPU_TEXTURE_SWIZZLE {
+@@ -1012,9 +1019,6 @@ VkImageView VulkanTextureCache::RequestSwapTexture(uint32_t& width_scaled_out,
+   if (texture_view == VK_NULL_HANDLE) {
+     return VK_NULL_HANDLE;
+   }
+-  if (!LoadTextureData(*texture)) {
+-    return VK_NULL_HANDLE;
+-  }
+   texture->MarkAsUsed();
+   VulkanTexture::Usage old_usage = texture->SetUsage(VulkanTexture::Usage::kSwapSampled);
+   if (old_usage != VulkanTexture::Usage::kSwapSampled) {
+@@ -1043,6 +1047,78 @@ VkImageView VulkanTextureCache::RequestSwapTexture(uint32_t& width_scaled_out,
+   return texture_view;
+ }
+ 
++uint32_t VulkanTextureCache::PrepareResolveTextureCopies(const draw_util::ResolveTextureCopy& copy,
++                                                         VkFormat source_format) {
++  Texture* found[kMaxResolveTextureCopies];
++  uint32_t found_count = FindResolveCopyTargets(copy, found, kMaxResolveTextureCopies);
++  resolve_copy_texture_count_ = 0;
++  for (uint32_t i = 0; i < found_count; ++i) {
++    auto& texture = *static_cast<VulkanTexture*>(found[i]);
++    const HostFormat& host_format = GetHostFormatPair(texture.key()).format_unsigned;
++    // A transfer destination not used since may still have its previous transfer in flight.
++    if (host_format.format != source_format ||
++        host_format.load_shader != kLoadShaderIndex32bpb ||
++        texture.usage() == VulkanTexture::Usage::kTransferDestination) {
++      continue;
++    }
++    resolve_copy_textures_[resolve_copy_texture_count_++] = found[i];
++  }
++  return resolve_copy_texture_count_;
++}
++
++void VulkanTextureCache::PerformResolveTextureCopies(const draw_util::ResolveTextureCopy& copy,
++                                                     VkImage source) {
++  VkPipelineStageFlags dst_stage_mask;
++  VkAccessFlags dst_access_mask;
++  VkImageLayout new_layout;
++  GetTextureUsageMasks(VulkanTexture::Usage::kTransferDestination, dst_stage_mask,
++                       dst_access_mask, new_layout);
++  for (uint32_t i = 0; i < resolve_copy_texture_count_; ++i) {
++    auto& texture = *static_cast<VulkanTexture*>(resolve_copy_textures_[i]);
++    VkPipelineStageFlags src_stage_mask;
++    VkAccessFlags src_access_mask;
++    VkImageLayout old_layout;
++    GetTextureUsageMasks(texture.SetUsage(VulkanTexture::Usage::kTransferDestination),
++                         src_stage_mask, src_access_mask, old_layout);
++    command_processor_.PushImageMemoryBarrier(
++        texture.image(), ui::vulkan::util::InitializeSubresourceRange(), src_stage_mask,
++        dst_stage_mask, src_access_mask, dst_access_mask, old_layout, new_layout);
++  }
++  command_processor_.SubmitBarriers(true);
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  for (uint32_t i = 0; i < resolve_copy_texture_count_; ++i) {
++    auto& texture = *static_cast<VulkanTexture*>(resolve_copy_textures_[i]);
++    const TextureKey& key = texture.key();
++    draw_util::ResolveTextureCopyRegion regions[draw_util::kMaxResolveTextureCopyRegions];
++    uint32_t region_count = draw_util::GetResolveTextureCopyRegions(
++        copy, key.GetWidth() * draw_resolution_scale_x(),
++        key.GetHeight() * draw_resolution_scale_y(), regions);
++    VkImageCopy* image_copies = command_buffer.CmdCopyImageEmplace(
++        source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, texture.image(),
++        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region_count);
++    for (uint32_t j = 0; j < region_count; ++j) {
++      const draw_util::ResolveTextureCopyRegion& region = regions[j];
++      VkImageCopy& image_copy = image_copies[j];
++      image_copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++      image_copy.srcSubresource.mipLevel = 0;
++      image_copy.srcSubresource.baseArrayLayer = 0;
++      image_copy.srcSubresource.layerCount = 1;
++      image_copy.srcOffset.x = int32_t(region.source_x);
++      image_copy.srcOffset.y = int32_t(region.source_y);
++      image_copy.srcOffset.z = 0;
++      image_copy.dstSubresource = image_copy.srcSubresource;
++      image_copy.dstOffset.x = int32_t(region.dest_x);
++      image_copy.dstOffset.y = int32_t(region.dest_y);
++      image_copy.dstOffset.z = 0;
++      image_copy.extent.width = region.width;
++      image_copy.extent.height = region.height;
++      image_copy.extent.depth = 1;
++    }
++    EndResolveCopyIntoTexture(texture, copy.red_blue_swapped);
++  }
++  resolve_copy_texture_count_ = 0;
++}
++
+ bool VulkanTextureCache::IsSignedVersionSeparateForFormat(TextureKey key) const {
+   const HostFormatPair& host_format_pair = GetHostFormatPair(key);
+   if (host_format_pair.format_unsigned.format == VK_FORMAT_UNDEFINED ||

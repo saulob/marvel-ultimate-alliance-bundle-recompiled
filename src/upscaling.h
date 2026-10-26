@@ -36,8 +36,15 @@ inline constexpr char kUpscalerFsr1[] = "fsr";
 inline constexpr int kBackBufferWidthAlignment = 16;
 inline constexpr int kBackBufferHeightAlignment = 8;
 
+// FSR 1 runs in the Direct3D 12 presenter (SDK patch 0127); the Vulkan presenter only has bilinear.
+#ifdef _WIN32
+inline constexpr bool kUpscalerAvailable = true;
+#else
+inline constexpr bool kUpscalerAvailable = false;
+#endif
+
 inline Upscaler ParseUpscaler(std::string_view value) {
-  return value == kUpscalerFsr1 ? Upscaler::kFsr1 : Upscaler::kOff;
+  return kUpscalerAvailable && value == kUpscalerFsr1 ? Upscaler::kFsr1 : Upscaler::kOff;
 }
 
 inline const UpscaleQualityInfo& QualityInfoFor(UpscaleQuality quality) {

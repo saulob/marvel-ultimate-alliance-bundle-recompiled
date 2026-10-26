@@ -1,0 +1,30 @@
+Ported unchanged from ssf2t-hd-remix-recompiled patches/rexglue-sdk/0047-sdl-video-failure-guidance.linux.patch (the same patch in hard-corps-uprising-, geometry-wars-retro-evolved-2- and crackdown-xbox360-recompiled).
+
+diff --git a/src/ui/windowed_app_context_sdl.cpp b/src/ui/windowed_app_context_sdl.cpp
+index dc0b4c2..2d30a76 100644
+--- a/src/ui/windowed_app_context_sdl.cpp
++++ b/src/ui/windowed_app_context_sdl.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <rex/ui/windowed_app_context_sdl.h>
+ 
++#include <cstdio>
+ #include <cstdlib>
+ #include <string>
+ #include <vector>
+@@ -50,7 +51,13 @@ bool SDLWindowedAppContext::Initialize() {
+   if (!requested_driver.empty()) {
+     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
+   }
+   if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+-    REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", SDL_GetError());
++    const std::string sdl_error = SDL_GetError();
++    REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", sdl_error);
++    std::fprintf(stderr,
++                 "Error: Cannot initialize SDL video: %s\nNo display is available. Run from a graphical "
++                 "session (DISPLAY for X11 or WAYLAND_DISPLAY for Wayland must be set).\n",
++                 sdl_error.empty() ? "unknown SDL error" : sdl_error.c_str());
++    std::fflush(stderr);
+     return false;
+   }
+   const char* video_driver_in_use = SDL_GetCurrentVideoDriver();

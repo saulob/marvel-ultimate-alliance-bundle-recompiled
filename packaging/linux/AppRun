@@ -1,0 +1,25 @@
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+
+# The bundled C++ runtime is used only when the system's is older than the one ReXGlue needs
+# (GLIBCXX_3.4.32, GCC 13): a newer system copy must win, the graphics drivers may need it.
+SYS_CXX="$( (ldconfig -p || /sbin/ldconfig -p) 2>/dev/null | awk '/libstdc\+\+\.so\.6 .*x86-64/ {print $NF; exit}')"
+if [ -z "$SYS_CXX" ]; then
+  for lib in /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib64/libstdc++.so.6 /usr/lib/libstdc++.so.6; do
+    [ -e "$lib" ] && SYS_CXX="$lib" && break
+  done
+fi
+if [ -z "$SYS_CXX" ] || ! grep -q GLIBCXX_3.4.32 "$SYS_CXX" 2>/dev/null; then
+  export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+# The launcher starts a game by starting this AppImage again with MUA_APPIMAGE_PROGRAM naming the game's program
+# (src/relaunch_command.h); anything else runs the launcher.
+case "${MUA_APPIMAGE_PROGRAM:-}" in
+  marvel_ultimate_alliance_mua1 | marvel_ultimate_alliance_mua1_gold | marvel_ultimate_alliance_mua2)
+    PROGRAM="$MUA_APPIMAGE_PROGRAM" ;;
+  *) PROGRAM=marvel_ultimate_alliance ;;
+esac
+unset MUA_APPIMAGE_PROGRAM
+
+exec "$HERE/usr/bin/$PROGRAM" "$@"

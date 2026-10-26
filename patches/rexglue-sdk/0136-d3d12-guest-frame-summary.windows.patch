@@ -1,49 +1,8 @@
-Adds four running-total perf counters the title's host code feeds in every configuration (world update time and
-count, host frame limiter wait, guest GPU fence wait) and shows them per swap on the Performance line. They add
-GUEST / GAME THREAD LIMITED: the command processor idles a quarter of the frame, neither side waits and the world
-update alone takes a quarter of the frame.
+Shows the guest frame counters of 0132 per swap on the Performance line. They add GUEST / GAME THREAD LIMITED: the
+command processor idles a quarter of the frame, neither side waits and the world update alone takes a quarter of
+the frame. FRAME LIMITER: the host waits stay low and the frame limiter alone holds the guest for a quarter of the
+frame, so the frame rate is the configured cap.
 
-diff --git a/include/rex/perf/counter.h b/include/rex/perf/counter.h
---- a/include/rex/perf/counter.h
-+++ b/include/rex/perf/counter.h
-@@ -49,6 +49,12 @@
-   kPipelineCacheHits,
-   kPipelineCacheMisses,
- 
-+  // Guest frame, running totals the title's host code adds to in every configuration
-+  kGuestUpdateNs,
-+  kGuestUpdates,
-+  kGuestLimiterWaitNs,
-+  kGuestFenceWaitNs,
-+
-   kCount  // sentinel -- must be last
- };
- 
-diff --git a/src/core/perf/counter.cpp b/src/core/perf/counter.cpp
---- a/src/core/perf/counter.cpp
-+++ b/src/core/perf/counter.cpp
-@@ -50,6 +50,10 @@
-     "texture_cache_misses",
-     "pipeline_cache_hits",
-     "pipeline_cache_misses",
-+    "guest_update_ns",
-+    "guest_updates",
-+    "guest_limiter_wait_ns",
-+    "guest_fence_wait_ns",
- };
- static_assert(std::size(kCounterNames) == kNumCounters, "kCounterNames must match CounterId enum");
- 
-@@ -73,6 +77,10 @@
-     false,  // kTextureCacheMisses
-     false,  // kPipelineCacheHits
-     false,  // kPipelineCacheMisses
-+    true,   // kGuestUpdateNs        (running total)
-+    true,   // kGuestUpdates         (running total)
-+    true,   // kGuestLimiterWaitNs   (running total)
-+    true,   // kGuestFenceWaitNs     (running total)
- };
- static_assert(std::size(kIsGauge) == kNumCounters, "kIsGauge must match CounterId enum");
- 
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
@@ -55,12 +14,12 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
    uint32_t copies = 0;
    std::array<GpuTargetStats, 16> targets{};
    size_t target_count = 0;
-@@ -136,20 +137,46 @@
+@@ -136,20 +137,48 @@
  };
  GpuWorkSummary g_gpu_work_summary;
  
 -enum class Bottleneck { kUnknown, kCommandProcessor, kGpu, kSynchronization, kMixed };
-+enum class Bottleneck { kUnknown, kCommandProcessor, kGpu, kSynchronization, kGuestThread, kMixed };
++enum class Bottleneck { kUnknown, kCommandProcessor, kGpu, kSynchronization, kGuestThread, kFrameLimiter, kMixed };
 +
 +constexpr std::array<rex::perf::CounterId, 4> kGuestFrameCounters = {
 +    rex::perf::CounterId::kGuestUpdateNs, rex::perf::CounterId::kGuestUpdates,
@@ -87,7 +46,7 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
 -// blocks and is never idle, since idling means the guest or a frame limiter is not feeding it.
 +// blocks and is never idle, since idling means the guest or a frame limiter is not feeding it. The guest thread is the
 +// limit only when the command processor idles, nothing on either side waits, and the world update alone takes a
-+// quarter of the frame.
++// quarter of the frame; the frame limiter when the host waits are low and it alone holds the guest that long.
  Bottleneck ClassifyBottleneck(uint32_t swaps, double frame_ms, double gpu_wait_ms, double submit_wait_ms,
 -                              double idle_ms) {
 +                              double idle_ms, const GuestFrame& guest) {
@@ -104,16 +63,21 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
 +  const bool guest_thread = host_waits_low && guest.available && idle_ms >= frame_ms * 0.25 &&
 +                            guest.limiter_wait_ms < frame_ms * 0.10 && guest.fence_wait_ms < frame_ms * 0.10 &&
 +                            guest.update_ms >= frame_ms * 0.25;
-+  const int limits = int(gpu) + int(synchronization) + int(command_processor) + int(guest_thread);
++  const bool frame_limiter = host_waits_low && guest.available && guest.limiter_wait_ms >= frame_ms * 0.25;
++  const int limits =
++      int(gpu) + int(synchronization) + int(command_processor) + int(guest_thread) + int(frame_limiter);
    if (limits > 1) {
      return Bottleneck::kMixed;
    }
-@@ -159,9 +186,21 @@
+@@ -159,9 +186,24 @@
    if (synchronization) {
      return Bottleneck::kSynchronization;
    }
 +  if (guest_thread) {
 +    return Bottleneck::kGuestThread;
++  }
++  if (frame_limiter) {
++    return Bottleneck::kFrameLimiter;
 +  }
    return command_processor ? Bottleneck::kCommandProcessor : Bottleneck::kUnknown;
  }
@@ -130,12 +94,14 @@ diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/comma
  const char* BottleneckText(Bottleneck bottleneck) {
    switch (bottleneck) {
      case Bottleneck::kCommandProcessor:
-@@ -170,6 +209,8 @@
+@@ -170,6 +209,10 @@
        return "GPU LIMITED";
      case Bottleneck::kSynchronization:
        return "WAIT / SYNCHRONIZATION LIMITED";
 +    case Bottleneck::kGuestThread:
 +      return "GUEST / GAME THREAD LIMITED";
++    case Bottleneck::kFrameLimiter:
++      return "FRAME LIMITER";
      case Bottleneck::kMixed:
        return "MIXED";
      default:

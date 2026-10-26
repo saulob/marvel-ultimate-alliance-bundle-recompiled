@@ -24,6 +24,7 @@
 
 #include "active_log.h"
 #include "log_filter.h"
+#include "log_path.h"
 
 namespace mua {
 namespace {
@@ -208,6 +209,18 @@ void RemoveDiscardedSessionLogs() {
       std::filesystem::remove(file, remove_ec);
     }
     std::filesystem::remove(marker, remove_ec);
+  }
+}
+
+void RemoveOldSessionLogs() {
+  const std::filesystem::path active = ActiveLogFile();
+  if (active.empty()) {
+    return;
+  }
+  for (const std::filesystem::path& file :
+       OldSessionLogs(active.parent_path(), "marvel_ultimate_alliance", active, kKeptSessionLogs)) {
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
   }
 }
 

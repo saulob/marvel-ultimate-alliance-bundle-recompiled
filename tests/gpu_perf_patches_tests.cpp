@@ -7,9 +7,9 @@
 #include <bit>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <set>
-#include <sstream>
 #include <string>
 
 #include <rex/graphics/register_file.h>
@@ -263,6 +263,7 @@ void TestPortedReferenceFixes() {
   CHECK(Has(occlusion, "+  if (!active_occlusion_query_.valid) {"));
   CHECK(Has(occlusion, "-      active_occlusion_query_.sample_count_address != sample_count_addr) {"));
   CHECK(Has(occlusion, "+void D3D12CommandProcessor::AbandonActiveOcclusionQuery() {"));
+  CHECK(!Has(occlusion, "DEBUG_SAULO"));
 
   const std::string fp = ReadFile(dir + "0104-host-fp-exception-mask.patch");
   CHECK(Has(fp, "+  thread_state_->context()->fpscr.InitHost();"));
@@ -421,26 +422,39 @@ void TestPerformanceSummary() {
   const std::string config = ReadFile(std::string(MUA_SRC_DIR) + "/../config/marvel_ultimate_alliance.toml");
   CHECK(Has(config, "audio_maxqframes = 16"));
 
-  // DEBUG_SAULO: the decoder input behind each rejected XMA frame, slow work, lock waits and empty-queue callbacks.
-  const std::string audio = ReadFile(dir + "0131-debug-saulo-audio-diagnostics.patch");
-  CHECK(Has(audio, "+    DebugSauloReportDecodeError(msg);  // DEBUG_SAULO"));
+  // The decoder input behind each rejected XMA frame, slow work, lock waits and empty-queue callbacks.
+  const std::string audio = ReadFile(dir + "0131-audio-diagnostics.patch");
+  CHECK(Has(audio, "+    ReportXmaDecodeError(msg);\n"));
   CHECK(Has(audio, "+  t_trace = &trace;"));
-  CHECK(Has(audio, "+  const WorkTimer work_timer(id());  // DEBUG_SAULO"));
-  CHECK(Has(audio, "+          DebugSauloNoteLockWait(context_id, lock_ms);"));
-  CHECK(Has(audio, "+      g_underruns.fetch_add(1, std::memory_order_relaxed);  // DEBUG_SAULO"));
+  CHECK(Has(audio, "+  const WorkTimer work_timer(id());\n"));
+  CHECK(Has(audio, "+          NoteXmaLockWait(context_id, lock_ms);"));
+  CHECK(Has(audio, "+      g_underruns.fetch_add(1, std::memory_order_relaxed);\n"));
+  CHECK(Has(audio, "\"audio queue 10s: {} silent frame(s) for an empty queue | max queued {}\""));
   CHECK(Has(audio, "source changed {}"));
   CHECK(Has(audio, "+  if (!NoteErrorKind(message) || g_error_lines.fetch_add(1) >= kMaxErrorLines) {"));
   CHECK(Has(audio, "max work {:.2f} ms | lock waits >5ms {} | repeats {}"));
 
-  const std::string pso = ReadFile(dir + "0133-debug-saulo-slow-pipeline-log.windows.patch");
+  const std::string pso = ReadFile(dir + "0133-slow-pipeline-log.windows.patch");
   CHECK(Has(pso, "+      if (elapsed_us >= 10000 && slow_reports.fetch_add(1, std::memory_order_relaxed) < 60) {"));
-  CHECK(Has(pso, "DEBUG_SAULO PSO compile: {:.1f} ms"));
+  CHECK(Has(pso, "\"PSO compile: {:.1f} ms | vs {:016X} ps {:016X} | {}\""));
+  for (const std::string* patch : {&audio, &pso}) {
+    CHECK(!Has(*patch, "DEBUG_SAULO"));
+    CHECK(!Has(*patch, "DebugSaulo"));
+  }
 
-  const std::string guest = ReadFile(dir + "0132-guest-frame-counters.windows.patch");
-  CHECK(Has(guest, "+  kGuestUpdateNs,"));
-  CHECK(Has(guest, "+    true,   // kGuestUpdates         (running total)"));
+  // The counters are common: the audio history (0138) reads them on every platform, the D3D12 line only on Windows.
+  const std::string counters = ReadFile(dir + "0132-guest-frame-counters.patch");
+  CHECK(Has(counters, "+  kGuestUpdateNs,"));
+  CHECK(Has(counters, "+    true,   // kGuestUpdates         (running total)"));
+  CHECK(!Has(counters, "d3d12"));
+  CHECK(!std::filesystem::exists(dir + "0132-guest-frame-counters.windows.patch"));
+  CHECK(Has(ReadFile(dir + "0138-audio-history.patch"), "CounterId::kGuestUpdates"));
+  const std::string guest = ReadFile(dir + "0136-d3d12-guest-frame-summary.windows.patch");
   CHECK(Has(guest, "+      return \"GUEST / GAME THREAD LIMITED\";"));
   CHECK(Has(guest, "+                            guest.update_ms >= frame_ms * 0.25;"));
+  // A frame the host limiter holds a quarter of, with the host waits low, is capped by the setting, not by hardware.
+  CHECK(Has(guest, "+  const bool frame_limiter = host_waits_low && guest.available && guest.limiter_wait_ms >= frame_ms * 0.25;"));
+  CHECK(Has(guest, "+      return \"FRAME LIMITER\";"));
   CHECK(Has(guest, "+    summary.window_first_guest = ReadGuestFrameTotals();"));
 }
 
@@ -571,23 +585,8 @@ void TestDrawFastPathPatches() {
   CHECK(Has(index, "+          if (guest_index_base & ((uint32_t(1) << index_size_log2) - 1)) {"));
   CHECK(Has(index, "+        primitive_processing_result.host_draw_vertex_count, 1, start_index, 0, 0);"));
   CHECK(Has(index, "+    current_index_buffer_view_ = {};"));
-
-  const std::string stats = ReadFile(dir + "0136-debug-saulo-draw-fastpath-stats.windows.patch");
-  CHECK(Has(stats, "DEBUG_SAULO"));
-  CHECK(Has(stats, "+REXCVAR_DEFINE_BOOL(mua_debug_draw_fastpath_stats, false"));
-  CHECK(Has(stats, "+  if (g_draw_fastpath_stats.enabled) [[unlikely]] {"));
-  CHECK(Has(stats, "+  g_draw_fastpath_stats.enabled = REXCVAR_GET(mua_debug_draw_fastpath_stats);"));
-  CHECK(Has(stats, "+    WatchedPageFaultTimer fault_timer;  // DEBUG_SAULO"));
-  CHECK(Has(stats, "+  kGuestWriteFaults,"));
-  // Plain counters: the fault totals go through the perf counter functions, nothing new is atomic or locked.
-  std::string added;
-  std::istringstream lines(stats);
-  for (std::string line; std::getline(lines, line);) {
-    if (line.starts_with("+") && !line.starts_with("+++")) {
-      added += line + "\n";
-    }
-  }
-  CHECK(!Has(added, "atomic") && !Has(added, "mutex") && !Has(added, "Acquire("));
+  // The off-by-default draw fast-path profiler was investigation only.
+  CHECK(!std::filesystem::exists(dir + "0136-debug-saulo-draw-fastpath-stats.windows.patch"));
 
   const std::string sdk = std::string(MUA_SRC_DIR) + "/../out/rexglue-sdk-src/src/graphics/";
   const std::string command_processor = ReadFile(sdk + "d3d12/command_processor.cpp");

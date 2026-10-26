@@ -46,6 +46,7 @@ void TestShippedValues() {
   CHECK(config["gpu_plugin"].value<std::string>() == "xenos");
   CHECK(config["gpu_allow_invalid_fetch_constants"].value<bool>() == true);
   CHECK(config["render_target_path_d3d12"].value<std::string>() == "rov");
+  CHECK(config["render_target_path_vulkan"].value<std::string>() == "fsi");
   CHECK(config["async_shader_wait_ms"].value<int64_t>() == 16);
   CHECK(config["mnk_mode"].value<bool>() == true);
   CHECK(config["hid_mappings_file"].value<std::string>() == "");
@@ -84,9 +85,13 @@ void TestBuiltProgram() {
   const std::string gpu = ReadBytes(staged.parent_path() / MUA_GPU_PLUGIN_NAME);
   const std::string runtime = ReadBytes(staged.parent_path() / MUA_RUNTIME_NAME);
   CHECK(Has(gpu, "gpu_allow_invalid_fetch_constants"));
+#ifdef _WIN32
   CHECK(Has(gpu, "render_target_path_d3d12"));
   CHECK(Has(gpu, "async_shader_wait_ms"));
   CHECK(Has(gpu, "REX_DEV_FRAME_LOG"));
+#else
+  CHECK(Has(gpu, "render_target_path_vulkan"));
+#endif
   CHECK(Has(runtime, "hid_mappings_file"));
   CHECK(Has(runtime, "mnk_mode"));
   CHECK(Has(runtime, "gpu_plugin"));

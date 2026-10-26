@@ -45,6 +45,19 @@ inline std::string UpdateChecksumAssetName(const trg::update::SemanticVersion& v
   return UpdateAssetStem(version) + ".sha256";
 }
 
+// The Linux bundle: one AppImage holding the launcher and the three game programs.
+inline std::string UpdateAppImageStem(const trg::update::SemanticVersion& version) {
+  return std::string(kUpdatePackageName) + "-v" + version.CoreString() + "-x86_64";
+}
+
+inline std::string UpdateAppImageName(const trg::update::SemanticVersion& version) {
+  return UpdateAppImageStem(version) + ".AppImage";
+}
+
+inline std::string UpdateAppImageChecksumName(const trg::update::SemanticVersion& version) {
+  return UpdateAppImageStem(version) + ".sha256";
+}
+
 // The bundle launcher restarts with its window, not the game's program the update was started from.
 inline std::vector<std::string> UpdateRestartArguments(std::vector<std::string> arguments) {
   arguments.erase(std::remove_if(arguments.begin(), arguments.end(),

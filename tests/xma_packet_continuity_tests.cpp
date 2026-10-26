@@ -423,13 +423,13 @@ void TestDecoderSource(const fs::path& source) {
 }
 
 void TestPatches(const fs::path& patches) {
-  std::printf("0137 is a generic patch and 0138 is the temporary audio history\n");
+  std::printf("0137 is a generic patch and 0138 is the F9 audio snapshot\n");
   CHECK(fs::exists(patches / "0137-xma-stream-packet-continuity.patch"));
-  const std::string history = Read(patches / "0138-debug-saulo-audio-history.patch");
-  CHECK(Has(history, "DEBUG_SAULO"));
-  CHECK(Has(history, "DEBUG_SAULO AUDIO SNAPSHOT BEGIN"));
-  CHECK(Has(history, "DEBUG_SAULO AUDIO SNAPSHOT END"));
-  CHECK(Has(history, "DEBUG_SAULO AUDIO SNAPSHOT POST"));
+  const std::string history = Read(patches / "0138-audio-history.patch");
+  CHECK(!Has(history, "DEBUG_SAULO"));
+  CHECK(Has(history, "\"AUDIO SNAPSHOT BEGIN reason={}"));
+  CHECK(Has(history, "\"AUDIO SNAPSHOT END reason={}\""));
+  CHECK(Has(history, "\"AUDIO SNAPSHOT POST reason={}"));
   CHECK(Has(history, "kCapacity = uint64_t(1) << 16;"));
   const size_t record_start = history.find("+void Record(Event event, uint32_t context, uint32_t a, uint32_t b");
   const std::string record = record_start == std::string::npos

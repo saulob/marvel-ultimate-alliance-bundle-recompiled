@@ -191,41 +191,14 @@ void TestReport() {
   CHECK(rate.has_value() && std::fabs(*rate - 120.0) < 1.0);
 }
 
-void TestWorldUpdateTiming() {
-  std::printf("world update timing\n");
-  // Calls 0.125 s apart: the window closes on the 81st, 10 s after the first.
-  WorldUpdateTiming timing;
-  std::string line;
-  double now = 0.0;
-  for (int i = 0; i < 1000 && line.empty(); ++i) {
-    now += 0.125;
-    const double ms = i % 4 == 0 ? 12.0 : (i % 4 == 1 ? 6.0 : 2.0);
-    if (const auto report = timing.Add(ms, now)) {
-      line = *report;
-    }
-  }
-  CHECK(Has(line, "world update: calls/s=8.1"));
-  CHECK(Has(line, "avg=5.58 ms | max=12.00 ms"));
-  CHECK(Has(line, ">5 ms=41 | >10 ms=21"));
-  CHECK(Has(line, "busy=4.5% of real time"));
-  std::string next;
-  for (int i = 0; i < 1000 && next.empty(); ++i) {
-    now += 0.125;
-    if (const auto report = timing.Add(1.0, now)) {
-      next = *report;
-    }
-  }
-  CHECK(Has(next, "max=1.00 ms | >5 ms=0 | >10 ms=0"));
-}
-
 void TestWiring() {
   std::printf("hooks\n");
   const std::string pacing = ReadSource("frame_pacing.cpp");
   CHECK(Has(pacing, "REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE)"));
   CHECK(Has(pacing, "mua::guest::kWorldDeltaOffset"));
-  CHECK(Has(pacing, "DEBUG_SAULO frame pacing"));
+  CHECK(Has(pacing, "Game timing: frame rate={} | {}"));
   CHECK(Has(pacing, "REX_HOOK_RAW(MUA_GUEST_OPTIONS_INIT)"));
-  CHECK(Has(pacing, "kMaxReports = 12"));
+  CHECK(Has(pacing, "kMaxPresentReports = 12"));
   const std::string limiter = ReadSource("frame_limiter.cpp");
   CHECK(Has(limiter, "REX_HOOK_RAW(MUA_GUEST_PRESENT_CALLBACK)"));
   const std::string gold = ReadSource("guest_map_mua1_gold.h");
@@ -244,17 +217,19 @@ void TestWiring() {
   CHECK(!Has(limiter, "interpolat"));
   CHECK(!Has(limiter, "vsync"));
 
-  // Every game times World::Update and publishes it with the limiter and guest fence waits; MUA1 also logs it
-  // (DEBUG_SAULO).
+  // Every game times World::Update, publishes it with the limiter and guest fence waits and logs a slow one.
   CHECK(Has(pacing, "const auto update_start = std::chrono::steady_clock::now();"));
   CHECK(Has(pacing, "NoteWorldUpdateTime(std::chrono::steady_clock::now() - update_start);"));
   CHECK(Has(pacing, "mua::AddGuestFrameTime(mua::GuestFrameTime::kWorldUpdate, elapsed);"));
-  CHECK(Has(pacing, "DEBUG_SAULO slow world update"));
+  CHECK(Has(pacing, "REXLOG_WARN(\"Slow world update: {:.1f} ms\", ms);"));
+  CHECK(!Has(pacing, "MUA_RUNTIME_"));
+  CHECK(!Has(pacing, "DEBUG_SAULO"));
   CHECK(Has(limiter, "AddGuestFrameTime(GuestFrameTime::kLimiterWait, LimiterClock::now() - wait_start);"));
   const std::string fence = ReadSource("gpu_fence_wait.cpp");
   CHECK(Has(fence, "mua::AddGuestFrameTime(mua::GuestFrameTime::kFenceWait"));
   const std::string counters = ReadSource("guest_frame_counters.h");
-  CHECK(Has(counters, "#if defined(_WIN32)\n#define MUA_GUEST_FRAME_COUNTERS 1"));
+  CHECK(Has(counters, "#include <rex/perf/counter.h>"));
+  CHECK(!Has(counters, "_WIN32"));
   CHECK(!Has(counters, "MUA_RUNTIME_"));
   const size_t hook = pacing.find("REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE)");
   const size_t timed = pacing.find("const auto update_start", hook);
@@ -266,7 +241,15 @@ void TestWiring() {
   CHECK(Has(watchdog, "std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();"));
   CHECK(Has(watchdog, "kHitchSampleAfter = std::chrono::milliseconds(150)"));
   CHECK(Has(watchdog, "kHitchStackAfter = std::chrono::milliseconds(500)"));
-  CHECK(Has(watchdog, "DEBUG_SAULO hitch: {} ms open | top {} | guest {}"));
+  CHECK(Has(watchdog, "Hitch sample: {} ms open | top {} | guest {}"));
+  // The hitch sampler runs in every game program, never in the launcher; no profiler is left behind.
+  const size_t sampler = watchdog.find("std::thread(SampleHitches");
+  CHECK(sampler != std::string::npos && watchdog.rfind("#if MUA_HAS_RECOMPILED_CODE", sampler) + 40 > sampler);
+  CHECK(!Has(watchdog, "MUA_RUNTIME_MUA1"));
+  CHECK(!Has(watchdog, "ProfileRenderThread"));
+  CHECK(!Has(watchdog, "DEBUG_SAULO"));
+  // Without a PDB a frame still names its module and offset.
+  CHECK(Has(watchdog, "fmt::format(\"{}+0x{:X}\", Utf8(module.ModuleName), address - module.BaseOfImage)"));
   // Everything goes to the session log: no hang_N.txt or hitch_stacks_N.txt.
   CHECK(!Has(watchdog, "ofstream"));
   CHECK(!Has(watchdog, "hang_\""));
@@ -281,7 +264,6 @@ int main() {
   TestMua2GameSpeedAtEveryRate();
   TestLimiterCadence();
   TestReport();
-  TestWorldUpdateTiming();
   TestWiring();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

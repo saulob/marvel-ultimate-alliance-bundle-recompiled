@@ -1,9 +1,12 @@
 // The logs folder follows the active log, falls back to <user data>/logs for an AppImage, and is
-// created before its first use. Run: mua_log_path_tests
+// created before its first use; only the newest session logs are kept. Run: mua_log_path_tests
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <vector>
 
 #include "log_path.h"
 
@@ -52,17 +55,52 @@ int main() {
   const std::filesystem::path numbered = base / "numbered";
   std::filesystem::create_directories(numbered, ec);
   CHECK(mua::NextLogFile(numbered, "marvel_ultimate_alliance") == numbered / "marvel_ultimate_alliance_001.log");
-
   std::ofstream(numbered / "marvel_ultimate_alliance_001.log") << "one";
   std::ofstream(numbered / "marvel_ultimate_alliance_007.log") << "seven";
   std::ofstream(numbered / "marvel_ultimate_alliance_note.log") << "not numbered";
   std::ofstream(numbered / "other_012.log") << "not this port";
   CHECK(mua::NextLogFile(numbered, "marvel_ultimate_alliance") == numbered / "marvel_ultimate_alliance_008.log");
-
-  std::ofstream(numbered / "marvel_ultimate_alliance_009.log") << "nine";
+  std::ofstream(numbered / "marvel_ultimate_alliance_009.2.log") << "a rotated part of nine";
   CHECK(mua::NextLogFile(numbered, "marvel_ultimate_alliance") == numbered / "marvel_ultimate_alliance_010.log");
   CHECK(mua::NextLogFile(base / "missing" / "logs", "marvel_ultimate_alliance") ==
         base / "missing" / "logs" / "marvel_ultimate_alliance_001.log");
+
+  std::printf("session log names: numbered sessions and their rotated parts\n");
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_007.log", "marvel_ultimate_alliance") == 7);
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_1234.log", "marvel_ultimate_alliance") == 1234);
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_007.1.log", "marvel_ultimate_alliance") == 7);
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_note.log", "marvel_ultimate_alliance") == 0);
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_007.log.discard", "marvel_ultimate_alliance") == 0);
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_007.x.log", "marvel_ultimate_alliance") == 0);
+  CHECK(mua::SessionLogNumber("marvel_ultimate_alliance_.log", "marvel_ultimate_alliance") == 0);
+  CHECK(mua::SessionLogNumber("other_012.log", "marvel_ultimate_alliance") == 0);
+  CHECK(mua::SessionLogNumber("updater.log", "marvel_ultimate_alliance") == 0);
+
+  std::printf("only the newest sessions are kept, with their rotated parts, and never the active one\n");
+  const std::filesystem::path logs = base / "retention";
+  std::filesystem::create_directories(logs, ec);
+  for (const char* name : {"marvel_ultimate_alliance_001.log", "marvel_ultimate_alliance_002.log",
+                           "marvel_ultimate_alliance_002.1.log", "marvel_ultimate_alliance_003.log",
+                           "marvel_ultimate_alliance_010.log", "marvel_ultimate_alliance_011.log",
+                           "marvel_ultimate_alliance_note.log", "updater.log", "other_001.log"}) {
+    std::ofstream(logs / name) << name;
+  }
+  const auto old = [&](const std::filesystem::path& active, size_t keep) {
+    std::vector<std::string> names;
+    for (const std::filesystem::path& file : mua::OldSessionLogs(logs, "marvel_ultimate_alliance", active, keep)) {
+      names.push_back(file.filename().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+  };
+  CHECK(old(logs / "marvel_ultimate_alliance_011.log", 2) ==
+        (std::vector<std::string>{"marvel_ultimate_alliance_001.log", "marvel_ultimate_alliance_002.1.log",
+                                  "marvel_ultimate_alliance_002.log", "marvel_ultimate_alliance_003.log"}));
+  // An older active log (an explicit log_file) stays, beside the newest sessions.
+  CHECK(old(logs / "marvel_ultimate_alliance_002.log", 2) ==
+        (std::vector<std::string>{"marvel_ultimate_alliance_001.log", "marvel_ultimate_alliance_003.log"}));
+  CHECK(old(logs / "marvel_ultimate_alliance_011.log", 30).empty());
+  CHECK(mua::OldSessionLogs(base / "missing", "marvel_ultimate_alliance", {}, 2).empty());
 
   std::filesystem::remove_all(base, ec);
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
