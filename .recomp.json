@@ -1,0 +1,33 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Marvel: Ultimate Alliance",
+  "system": "Xbox 360",
+  "type": "recomp",
+  "project": "Marvel Ultimate Alliance - PC Port",
+  "status": "released",
+  "targets": [
+    "Windows",
+    "Linux",
+    "Steam Deck"
+  ],
+  "toolchain": "Rexglue",
+  "approach": "Static recompilation of the Xbox 360 version to native PC code using ReXGlue",
+  "maintainers": [
+    {
+      "name": "saulob",
+      "link": "https://github.com/saulob"
+    }
+  ],
+  "links": [
+    {
+      "label": "Reddit announcement",
+      "url": "https://www.reddit.com/r/recomps/comments/1xfkbia/marvel_ultimate_alliance_recompiled_for_pc_mua1/"
+    }
+  ],
+  "tags": [
+    "launcher",
+    "ultrawide",
+    "HD Text"
+  ],
+  "notes": "Part of a three-game bundle with Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2, featuring high-refresh support, up to 4x render resolution, ultrawide, HD Text and experimental Linux/Steam Deck builds."
+}
