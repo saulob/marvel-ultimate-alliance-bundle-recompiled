@@ -83,8 +83,6 @@ The launcher checks the Title ID and Media ID when you pick the disc image and c
 
 Windows may warn the first time you run the program, because the release is not digitally signed. Choose **More info**, then **Run anyway**.
 
-<img width="1288" height="774" alt="2026-10-25_22-23" src="https://github.com/user-attachments/assets/3c5a6bd3-fa0e-48f3-b973-7ec885fff9c0" />
-
 ## The launcher
 
 The selector under the header chooses the game, and the pages beside it belong to that game. Your choices are saved to `settings.toml` in the `user_data` folder next to the program; the settings that belong to one game, such as the frame rate, are saved in that game's folder under `user_data`. To turn the launcher off, set **Show this launcher** to **Off** on the Play page. Hold **Shift** while starting to bring it back.
@@ -125,6 +123,10 @@ Achievements are unlocked offline and kept on this PC: 46 in Marvel Ultimate All
 ## Updates
 
 The launcher checks the latest GitHub release once per start. A newer release shows a banner in the header; nothing is installed until **UPDATE NOW** has downloaded and verified the package and **RESTART TO UPDATE** is pressed. On Windows the update is `MarvelUltimateAlliance-v<version>-windows-x64.zip`: its SHA-256 must match the release's checksum before anything is unpacked, and `trg-updater.exe` replaces the launcher, the three game programs, the runtime and the other bundle files together, backs up what it replaces, rolls back on any failure and restarts the launcher. On Linux the AppImage downloads `MarvelUltimateAlliance-v<version>-x86_64.AppImage`, checks it the same way, replaces itself and starts the new AppImage. `game`, `user_data`, saves, settings and logs are never replaced.
+
+## Screenshots
+
+<img width="1288" height="774" alt="2026-10-25_22-23" src="https://github.com/user-attachments/assets/3c5a6bd3-fa0e-48f3-b973-7ec885fff9c0" />
 
 ## Reporting problems
 
