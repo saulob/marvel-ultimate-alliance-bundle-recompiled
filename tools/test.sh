@@ -19,14 +19,14 @@ fi
 [ "$(uname -s)" = Linux ] || { echo "ERROR: runs on Linux only (tools/test.ps1 is the Windows script)" >&2; exit 1; }
 
 HEADLESS=(achievements_overlay aspect_ratio audio_pcm_firewall crash_report diagnostics dpi frame_limiter frame_pacing
-  game_data game_install game_library gpu_perf_patches graphics_adapter guest_map render_scale keyboard
+  game_data game_install game_library gpu_perf_patches graphics_adapter guest_atomics guest_map render_scale keyboard
   launcher_handoff launcher_header_art launcher_quit lifecycle log_path multisampling player_names port_version relaunch
   resolve_order runtime_config save_diagnostics sdk_fix shader_storage_repair skip_intro skip_intro_notice
   sound_stream_ring update user_data window_host window_placement xaudio_barrier xma_packet_continuity
   d3d12_async_submission d3d12_sampler_memo achievement_metadata hd_text main_menu main_menu_mua2 title_shutdown
   upscaling)
-RUNTIME=(active_log_tests filesystem_mapping_tests frame_stats_tests log_filter_tests physical_heap_stress
-  settings_tests shutdown_order_tests title_thread_shutdown_tests vmsum_tests)
+RUNTIME=(active_log_tests filesystem_mapping_tests frame_stats_tests guest_interrupt_lock_tests log_filter_tests
+  physical_heap_stress settings_tests shutdown_order_tests title_thread_shutdown_tests vmsum_tests)
 
 if [ ! -f "$BUILD/build.ninja" ]; then
   (cd "$ROOT" && cmake --preset linux-amd64-release >/dev/null)

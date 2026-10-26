@@ -1,0 +1,67 @@
+A write-watch fault takes the global critical region the way a guest interrupt lock section does since 0157: it
+polls it for up to 20 microseconds before blocking. The fault runs on the thread that wrote the watched page, usually
+a guest thread, and the region's other holders (guest sections, the GPU interrupt, other repairs) release it within
+microseconds, so the fault no longer sleeps behind them. The repair itself, what it holds the region for and the
+order of its invalidation callbacks and page unprotection are unchanged.
+
+diff --git a/include/rex/thread/global_critical_region_polling.h b/include/rex/thread/global_critical_region_polling.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/thread/global_critical_region_polling.h
+@@ -0,0 +1,10 @@
++#pragma once
++
++#include <mutex>
++
++namespace rex::thread {
++
++// The global critical region, taken the way a guest interrupt lock section takes it: polled briefly before blocking.
++std::unique_lock<std::recursive_mutex> AcquireGlobalCriticalRegionPolling();
++
++}  // namespace rex::thread
+diff --git a/src/core/mutex.cpp b/src/core/mutex.cpp
+--- a/src/core/mutex.cpp
++++ b/src/core/mutex.cpp
+@@ -16,6 +16,7 @@
+ #endif
+ 
+ #include <rex/assert.h>
++#include <rex/thread/global_critical_region_polling.h>
+ #include <rex/thread/mutex.h>
+ 
+ namespace rex::thread {
+@@ -75,4 +76,10 @@ void LeaveGuestInterruptLock() {
+   global_critical_region::mutex().unlock();
+ }
+ 
++std::unique_lock<std::recursive_mutex> AcquireGlobalCriticalRegionPolling() {
++  std::recursive_mutex& mutex = global_critical_region::mutex();
++  LockForGuestSection(mutex);
++  return std::unique_lock<std::recursive_mutex>(mutex, std::adopt_lock);
++}
++
+ }  // namespace rex::thread
+diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -19,6 +19,7 @@
+ #include <rex/memory.h>
+ #include <rex/platform.h>
+ #include <rex/system/mmio_handler.h>
++#include <rex/thread/global_critical_region_polling.h>
+ #include <rex/types.h>
+ 
+ using namespace rex::arch;
+@@ -403,9 +404,10 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+   }
+   if (!range) {
+     // Write faults here are almost always write watches: the callback checks the watch bits under
+-    // the lock, so the host page query only runs for writes it does not handle.
++    // the lock, so the host page query only runs for writes it does not handle. The lock is polled
++    // like a guest interrupt lock section polls it, as its holds are short.
+     if (is_write && access_violation_callback_ &&
+-        access_violation_callback_(global_critical_region_.Acquire(),
++        access_violation_callback_(rex::thread::AcquireGlobalCriticalRegionPolling(),
+                                    access_violation_callback_context_, fault_host_address, true)) {
+       return true;
+     }

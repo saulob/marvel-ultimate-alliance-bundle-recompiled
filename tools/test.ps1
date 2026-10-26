@@ -115,15 +115,15 @@ try {
         if ($LASTEXITCODE) { throw "Building $group failed ($LASTEXITCODE)" }
     }
 
-    $headless = @('achievements_overlay', 'aspect_ratio','audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'game_data', 'game_install', 'game_library', 'gpu_perf_patches', 'graphics_adapter', 'guest_map', 'render_scale', 'keyboard', 'launcher_handoff', 'launcher_header_art', 'launcher_quit',
+    $headless = @('achievements_overlay', 'aspect_ratio','audio_pcm_firewall', 'crash_report', 'diagnostics', 'dpi', 'frame_limiter', 'frame_pacing', 'game_data', 'game_install', 'game_library', 'gpu_perf_patches', 'graphics_adapter', 'guest_atomics', 'guest_map', 'render_scale', 'keyboard', 'launcher_handoff', 'launcher_header_art', 'launcher_quit',
                   'lifecycle', 'log_path', 'multisampling', 'player_names', 'port_version', 'relaunch', 'resolve_order', 'runtime_config',
                   'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'skip_intro', 'skip_intro_notice', 'sound_stream_ring', 'update', 'update_controller', 'user_data', 'window_host',
                   'window_placement', 'xaudio_barrier', 'xma_packet_continuity', 'd3d12_async_submission', 'd3d12_sampler_memo',
                   'd3d12_copy_validation', 'achievement_metadata', 'hd_text', 'main_menu', 'main_menu_mua2', 'title_shutdown',
                   'upscaling') | ForEach-Object { "mua_$($_)_tests" }
-    $runtime = @('active_log_tests', 'filesystem_mapping_tests', 'frame_stats_tests', 'log_filter_tests',
-                 'physical_heap_stress', 'settings_tests', 'shutdown_order_tests', 'title_thread_shutdown_tests',
-                 'vmsum_tests') | ForEach-Object { "mua_$_" }
+    $runtime = @('active_log_tests', 'filesystem_mapping_tests', 'frame_stats_tests', 'guest_interrupt_lock_tests',
+                 'log_filter_tests', 'physical_heap_stress', 'settings_tests', 'shutdown_order_tests',
+                 'title_thread_shutdown_tests', 'vmsum_tests') | ForEach-Object { "mua_$_" }
     Write-Host 'Headless tests:'
     foreach ($name in $headless) { Invoke-TestExecutable (Join-Path $BuildDir "$name.exe") @() }
     # Only the shipped helper is run: the CMake-built build\trg-updater.exe is compiled but never executed.

@@ -1,0 +1,68 @@
+A guest interrupt lock section that finds the global critical region held polls it for up to 20 microseconds before
+blocking. Guest sections are a single reservation pair and most host holds (kernel object lookups, write-watch
+repairs, the GPU interrupt) end within a few microseconds, so the waiter usually takes the region without being parked
+and woken. It is the same recursive mutex taken the same way, so exclusion and memory ordering are unchanged; only how
+long a waiter spins before sleeping differs.
+
+diff --git a/src/core/mutex.cpp b/src/core/mutex.cpp
+--- a/src/core/mutex.cpp
++++ b/src/core/mutex.cpp
+@@ -9,6 +9,12 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <chrono>
++
++#if defined(__x86_64__) || defined(_M_X64)
++#include <immintrin.h>
++#endif
++
+ #include <rex/assert.h>
+ #include <rex/thread/mutex.h>
+ 
+@@ -17,9 +23,36 @@ namespace rex::thread {
+ namespace {
+ 
+ constexpr uint64_t kMsrExternalInterruptEnable = 0x8000;
++// Guest sections and most host holds of the global critical region end well before a parked thread is woken.
++constexpr auto kGuestLockPollTime = std::chrono::microseconds(20);
++constexpr int kGuestLockPausesPerPoll = 4;
+ 
+ thread_local int32_t guest_interrupt_lock_depth = 0;
+ 
++void SpinPause() {
++#if defined(__x86_64__) || defined(_M_X64)
++  _mm_pause();
++#elif defined(__aarch64__)
++  __builtin_arm_yield();
++#endif
++}
++
++void LockForGuestSection(std::recursive_mutex& mutex) {
++  if (mutex.try_lock()) {
++    return;
++  }
++  const auto give_up = std::chrono::steady_clock::now() + kGuestLockPollTime;
++  do {
++    for (int i = 0; i < kGuestLockPausesPerPoll; ++i) {
++      SpinPause();
++    }
++    if (mutex.try_lock()) {
++      return;
++    }
++  } while (std::chrono::steady_clock::now() < give_up);
++  mutex.lock();
++}
++
+ }  // namespace
+ 
+ std::recursive_mutex& global_critical_region::mutex() {
+@@ -32,7 +65,7 @@ uint64_t GuestInterruptMsr() {
+ }
+ 
+ void EnterGuestInterruptLock() {
+-  global_critical_region::mutex().lock();
++  LockForGuestSection(global_critical_region::mutex());
+   ++guest_interrupt_lock_depth;
+ }
+ 

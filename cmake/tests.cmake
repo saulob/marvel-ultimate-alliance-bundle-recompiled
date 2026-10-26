@@ -48,6 +48,8 @@ mua_add_test(launcher_quit_tests headless)
 mua_add_test(launcher_header_art_tests headless)
 mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
+mua_add_test(guest_atomics_tests headless
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(guest_map_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(skip_intro_tests headless
@@ -69,7 +71,8 @@ mua_add_test(upscaling_tests headless)
 if(WIN32)
     mua_add_test(d3d12_copy_validation_tests headless LIBS d3d12 dxgi)
 endif()
-mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp)
+mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(keyboard_tests headless)
 mua_add_test(relaunch_tests headless)
 mua_add_test(launcher_handoff_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
@@ -161,6 +164,7 @@ mua_add_test(vmsum_tests runtime LIBS rex::runtime
     DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
             MUA_PCH_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold/marvel_ultimate_alliance_pch.h")
 mua_add_test(shutdown_order_tests runtime LIBS rex::runtime)
+mua_add_test(guest_interrupt_lock_tests runtime LIBS rex::runtime)
 mua_add_test(title_thread_shutdown_tests runtime LIBS rex::runtime)
 mua_add_test(filesystem_mapping_tests runtime LIBS rex::runtime)
 mua_add_test(settings_tests runtime

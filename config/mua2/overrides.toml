@@ -79,3 +79,140 @@ address = 0x82919550
 name = "mua_player_stats_name"
 registers = ["r31", "r28"]
 after_instruction = false
+
+# Lowers the 10 ms floor of the wall-clock step in the game clock's update sub_827ECB38 to the clock's own 10 us floor;
+# f0 holds the floor for the fsubs/fsel that apply it.
+[[midasm_hook]]
+address = 0x827ECCB0
+name = "mua_clock_step_floor_mua2"
+registers = ["f0"]
+after_instruction = false
+
+# The atomic sections of the job scheduler (sub_822EC940, sub_822EC478), its spin lock (sub_822EB1E0) and its block
+# allocator (sub_822EB4F0, sub_822EB5C8, sub_822EB6B8, sub_822EB7E0, sub_822EBAF0), run as native atomics without the
+# global interrupt lock: each hook sits on the section's mfmsr and returns true to skip to the instruction after it.
+[[midasm_hook]]
+address = 0x822EB228
+name = "mua_atomic_cas64_mua2"
+registers = ["r8", "r9", "r31", "r28", "r10", "cr6", "cr0", "xer", "reserved"]
+jump_address_on_true = 0x822EB254
+
+[[midasm_hook]]
+address = 0x822EB548
+name = "mua_atomic_cas64_mua2"
+registers = ["r29", "r30", "r11", "r10", "r9", "cr6", "cr0", "xer", "reserved"]
+jump_address_on_true = 0x822EB574
+
+[[midasm_hook]]
+address = 0x822EB60C
+name = "mua_atomic_cas64_mua2"
+registers = ["r9", "r3", "r6", "r31", "r10", "cr6", "cr0", "xer", "reserved"]
+jump_address_on_true = 0x822EB638
+
+[[midasm_hook]]
+address = 0x822EB670
+name = "mua_atomic_cas64_mua2"
+registers = ["r6", "r7", "r8", "r5", "r11", "cr6", "cr0", "xer", "reserved"]
+jump_address_on_true = 0x822EB69C
+
+[[midasm_hook]]
+address = 0x822EB784
+name = "mua_atomic_add32_mua2"
+registers = ["r7", "r10", "r9", "r8", "r6", "cr0", "reserved"]
+jump_address_on_true = 0x822EB7A0
+
+[[midasm_hook]]
+address = 0x822EB7AC
+name = "mua_atomic_add32_mua2"
+registers = ["r9", "r5", "r10", "r4", "r8", "cr0", "reserved"]
+jump_address_on_true = 0x822EB7C8
+
+[[midasm_hook]]
+address = 0x822EB90C
+name = "mua_atomic_add64_mua2"
+registers = ["r7", "r9", "r8", "r28", "r10", "cr0", "reserved"]
+jump_address_on_true = 0x822EB928
+
+[[midasm_hook]]
+address = 0x822EB944
+name = "mua_atomic_add64_mua2"
+registers = ["r3", "r5", "r4", "r29", "r6", "cr0", "reserved"]
+jump_address_on_true = 0x822EB960
+
+[[midasm_hook]]
+address = 0x822EBBB4
+name = "mua_atomic_cas64_mua2"
+registers = ["r5", "r6", "r7", "r4", "r10", "cr6", "cr0", "xer", "reserved"]
+jump_address_on_true = 0x822EBBE0
+
+[[midasm_hook]]
+address = 0x822EBBF8
+name = "mua_atomic_add32_mua2"
+registers = ["r6", "r9", "r7", "r8", "r5", "cr0", "reserved"]
+jump_address_on_true = 0x822EBC14
+
+[[midasm_hook]]
+address = 0x822EBC24
+name = "mua_atomic_add32_mua2"
+registers = ["r9", "r3", "r10", "r8", "r7", "cr0", "reserved"]
+jump_address_on_true = 0x822EBC40
+
+[[midasm_hook]]
+address = 0x822EBC50
+name = "mua_atomic_add64_mua2"
+registers = ["r11", "r5", "r3", "r9", "r6", "cr0", "reserved"]
+jump_address_on_true = 0x822EBC6C
+
+[[midasm_hook]]
+address = 0x822EBCB4
+name = "mua_atomic_cas64_mua2"
+registers = ["r6", "r7", "r8", "r5", "r11", "cr6", "cr0", "xer", "reserved"]
+jump_address_on_true = 0x822EBCE0
+
+[[midasm_hook]]
+address = 0x822EBCF8
+name = "mua_atomic_add64_mua2"
+registers = ["r7", "r9", "r8", "r6", "r10", "cr0", "reserved"]
+jump_address_on_true = 0x822EBD14
+
+[[midasm_hook]]
+address = 0x822EC5AC
+name = "mua_atomic_increment_mua2"
+registers = ["r7", "r8", "r6", "cr0", "reserved"]
+jump_address_on_true = 0x822EC5C8
+
+[[midasm_hook]]
+address = 0x822EC5DC
+name = "mua_atomic_decrement_mua2"
+registers = ["r3", "r4", "r10", "cr0", "reserved"]
+jump_address_on_true = 0x822EC5F8
+
+[[midasm_hook]]
+address = 0x822EC600
+name = "mua_atomic_increment_mua2"
+registers = ["r8", "r9", "r7", "cr0", "reserved"]
+jump_address_on_true = 0x822EC61C
+
+[[midasm_hook]]
+address = 0x822EC624
+name = "mua_atomic_decrement_mua2"
+registers = ["r5", "r6", "r4", "cr0", "reserved"]
+jump_address_on_true = 0x822EC640
+
+[[midasm_hook]]
+address = 0x822EC64C
+name = "mua_atomic_add32_mua2"
+registers = ["r8", "r3", "r9", "r10", "r7", "cr0", "reserved"]
+jump_address_on_true = 0x822EC668
+
+[[midasm_hook]]
+address = 0x822EC990
+name = "mua_atomic_increment_mua2"
+registers = ["r10", "r11", "r9", "cr0", "reserved"]
+jump_address_on_true = 0x822EC9AC
+
+[[midasm_hook]]
+address = 0x822EC9BC
+name = "mua_atomic_decrement_mua2"
+registers = ["r7", "r8", "r6", "cr0", "reserved"]
+jump_address_on_true = 0x822EC9D8

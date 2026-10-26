@@ -246,6 +246,7 @@ set(MUA_RUNTIME_SOURCES
     src/frame_limiter.cpp
     src/frame_pacing.cpp
     src/gpu_fence_wait.cpp
+    src/guest_atomics.cpp
     src/guest_hook_report.cpp
     src/indirect_tail_calls.cpp
     src/main_menu.cpp
