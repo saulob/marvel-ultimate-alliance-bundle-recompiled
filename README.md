@@ -12,6 +12,8 @@
 
 </div>
 
+<img width="940" height="529" alt="MarvelBundle" src="https://github.com/user-attachments/assets/698fc8fc-23c1-4b56-9309-6330b743f5d0" />
+
 ## Features
 
 - **Three games in one bundle**: Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2, each recompiled from its own game code into its own program, chosen from one launcher.
@@ -80,6 +82,8 @@ The launcher checks the Title ID and Media ID when you pick the disc image and c
 ### Windows SmartScreen
 
 Windows may warn the first time you run the program, because the release is not digitally signed. Choose **More info**, then **Run anyway**.
+
+<img width="1288" height="774" alt="2026-10-25_22-23" src="https://github.com/user-attachments/assets/3c5a6bd3-fa0e-48f3-b973-7ec885fff9c0" />
 
 ## The launcher
 
