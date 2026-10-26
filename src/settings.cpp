@@ -59,9 +59,16 @@ REXCVAR_DEFINE_BOOL(mua_hd_text, true, "Marvel Ultimate Alliance",
 REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
                       "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
 REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance",
-                      "Upscaler from the game's picture to the window: off or fsr (AMD FSR 1, applied at start)");
+                      "Upscaler from the game's picture to the window: off, fsr (AMD FSR 1), or in Marvel Ultimate "
+                      "Alliance also nis (NVIDIA Image Scaling) and cas (AMD CAS sharpening); applied at start");
 REXCVAR_DEFINE_STRING(mua_upscale_quality, "native", "Marvel Ultimate Alliance",
                       "With an upscaler, draw below the Render resolution: native, quality, balanced or performance");
+REXCVAR_DEFINE_INT32(mua_nis_sharpness, 50, "Marvel Ultimate Alliance",
+                     "NVIDIA NIS sharpness in percent (applied at start)")
+    .range(0, 100);
+REXCVAR_DEFINE_INT32(mua_cas_sharpness, 0, "Marvel Ultimate Alliance",
+                     "AMD CAS extra sharpness in percent; 0 is plain CAS (applied at start)")
+    .range(0, 100);
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
                       "Graphics card: the index d3d12_adapter takes; anything else uses the first (applied at start)");
 REXCVAR_DEFINE_STRING(mua_player_1_name, "Player 1", "Marvel Ultimate Alliance",
@@ -104,6 +111,8 @@ std::vector<std::string> GameSettingKeys() {
       "resolution_scale",
       "mua_upscaler",
       "mua_upscale_quality",
+      "mua_nis_sharpness",
+      "mua_cas_sharpness",
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
@@ -128,11 +137,18 @@ std::vector<std::string> GameSettingKeys() {
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
 constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro", "mua_frame_rate", "mua_aspect_ratio",
-                                                 "mua_upscaler", "mua_upscale_quality"};
+                                                 "mua_upscaler", "mua_upscale_quality", "mua_nis_sharpness",
+                                                 "mua_cas_sharpness"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
 }
+
+#if defined(_WIN32)
+constexpr char kGraphicsBackend[] = "Direct3D 12";
+#else
+constexpr char kGraphicsBackend[] = "Vulkan";
+#endif
 
 const std::vector<std::string> kWindowKeys = {
     "window_width",
@@ -580,25 +596,46 @@ void ApplyPlayerNames() {
   }
 }
 
+Upscaler ActiveUpscaler() {
+  const GameDefinition* game = ActiveGame();
+  return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers) : Upscaler::kOff;
+}
+
 void ApplyUpscaler(const GameSettings& settings) {
-  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff));
+  const Upscaler upscaler =
+      ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff), Game(settings.SelectedGame()).upscalers);
   if (const auto effect = PresentEffectFor(upscaler); effect && rex::cvar::GetFlagByName("present_effect") != *effect) {
     rex::cvar::SetFlagByName("present_effect", *effect);
   }
+  const UpscalerInfo& info = UpscalerInfoFor(upscaler);
+  if (!info.sharpness_key) {
+    return;
+  }
+  if (!rex::cvar::GetFlagInfo(info.sharpness_cvar)) {
+    REXLOG_WARN("Upscaling: {} is not in this runtime", info.sharpness_cvar);
+    return;
+  }
+  rex::cvar::SetFlagByName(info.sharpness_cvar,
+                           PresenterSharpness(ParseSharpness(settings.Get(info.sharpness_key), info.sharpness_default)));
 }
 
+// The requested upscaler; the presenter logs the passes that actually run ("Presenter: ... effects:").
 void LogUpscaling() {
-  const Upscaler upscaler = ParseUpscaler(REXCVAR_GET(mua_upscaler));
+  const Upscaler upscaler = ActiveUpscaler();
+  const UpscalerInfo& info = UpscalerInfoFor(upscaler);
   const UpscaleQuality quality = EffectiveQuality(upscaler, ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
   const RenderSizes sizes =
       RenderSizesFor(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)),
                      std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()), upscaler, quality);
-  const bool fsr = upscaler == Upscaler::kFsr1;
-  REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | FSR input: {} | FSR output: {} | Render "
-              "resolution: {} | present_effect={}",
+  const bool on = upscaler != Upscaler::kOff;
+  const std::string sharpness =
+      info.sharpness_cvar ? std::string(info.sharpness_cvar) + "=" + rex::cvar::GetFlagByName(info.sharpness_cvar)
+                          : "none";
+  REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | Upscaler input: {} | Upscaler output: {} | "
+              "Sharpness: {} | Render resolution: {} | present_effect={} | Backend: {}",
               UpscalingText(upscaler, quality), SizeText(sizes.guest), SizeText(sizes.internal),
-              fsr ? SizeText(sizes.internal) : "none", fsr ? "presenter output (Presenter line)" : "none",
-              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"));
+              on ? SizeText(sizes.internal) : "none", on ? "presenter output (Presenter line)" : "none", sharpness,
+              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"), kGraphicsBackend);
 }
 
 void PinGuestVideoMode() {
@@ -639,7 +676,8 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   const AspectRatio aspect = ParseAspectRatio(settings.Get("mua_aspect_ratio", "16:9"));
   const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
   const WindowSize render = RenderSize(aspect, scale);
-  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff));
+  const Upscaler upscaler =
+      ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff), Game(settings.SelectedGame()).upscalers);
   const UpscaleQuality quality =
       EffectiveQuality(upscaler, ParseUpscaleQuality(settings.Get("mua_upscale_quality", "native")));
   const RenderSizes sizes = RenderSizesFor(aspect, scale, upscaler, quality);
@@ -718,9 +756,10 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.graphics.render_height = render.height;
   diagnostics.graphics.internal_width = sizes.internal.width;
   diagnostics.graphics.internal_height = sizes.internal.height;
-  if (upscaler == Upscaler::kFsr1) {
-    diagnostics.graphics.fsr_input_width = sizes.internal.width;
-    diagnostics.graphics.fsr_input_height = sizes.internal.height;
+  if (const auto effect = PresentEffectFor(upscaler)) {
+    diagnostics.graphics.upscaler_input = std::string(*effect);
+    diagnostics.graphics.upscaler_input_width = sizes.internal.width;
+    diagnostics.graphics.upscaler_input_height = sizes.internal.height;
   }
   diagnostics.graphics.present_effect = CvarText("present_effect", "bilinear");
   diagnostics.graphics.upscaling = UpscalingText(upscaler, quality);

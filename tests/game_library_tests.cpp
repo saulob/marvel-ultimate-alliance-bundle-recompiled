@@ -135,6 +135,23 @@ void TestFramePolicies() {
         std::make_pair(std::string("30"), std::string("30 - Original")));
 }
 
+void TestUpscalers() {
+  std::printf("NIS and CAS belong to MUA 1; Gold Edition and MUA 2 keep Off and FSR 1\n");
+  CHECK(Mua1().upscalers == mua::kAllUpscalers);
+  CHECK(Gold().upscalers == mua::kFsr1Upscalers);
+  CHECK(Mua2().upscalers == mua::kFsr1Upscalers);
+  for (const mua::GameDefinition* game : {&Gold(), &Mua2()}) {
+    CHECK(mua::ParseUpscaler(mua::kUpscalerNis, game->upscalers) == mua::Upscaler::kOff);
+    CHECK(mua::ParseUpscaler(mua::kUpscalerCas, game->upscalers) == mua::Upscaler::kOff);
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
+  }
+  CHECK(mua::ParseUpscaler(mua::kUpscalerNis, Mua1().upscalers) ==
+        (mua::kUpscalerAvailable ? mua::Upscaler::kNis : mua::Upscaler::kOff));
+  CHECK(mua::ParseUpscaler(mua::kUpscalerCas, Mua1().upscalers) ==
+        (mua::kUpscalerAvailable ? mua::Upscaler::kCas : mua::Upscaler::kOff));
+}
+
 void TestSaveRoots() {
   std::printf("MUA 1 and Gold Edition share a title ID but not a save root\n");
   const fs::path root = "user_data";
@@ -365,6 +382,7 @@ void TestExplicitRoot() {
 int main() {
   TestDefinitions();
   TestFramePolicies();
+  TestUpscalers();
   TestProfiles();
   TestSaveRoots();
   TestActiveGame();

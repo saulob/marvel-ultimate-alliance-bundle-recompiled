@@ -21,7 +21,7 @@
 - **Display**: Windowed or Borderless Fullscreen (**F11**), window size, monitor and VSync.
 - **Native aspect ratios**: 16:9, 16:10, 21:9 and 32:9 ultrawide, 4:3 and 5:4. The games render at the chosen shape instead of stretching a 16:9 picture.
 - **Render resolution** from the original 720p picture up to 4x, independent of the window size.
-- **Upscaling (Windows)**: AMD FSR 1, with Native, Quality, Balanced and Performance modes that draw the game below the Render resolution and scale it up.
+- **Upscaling (Windows)**: AMD FSR 1, with Native, Quality, Balanced and Performance modes that draw the game below the Render resolution and scale it up. Marvel Ultimate Alliance also has NVIDIA Image Scaling (NIS), with the same modes and a sharpness setting, and AMD CAS sharpening.
 - **HD Text (Marvel Ultimate Alliance and Gold Edition)**: the games' text and controller icons rebuilt at higher resolution to match the Render resolution.
 - **Frame rate**: 30 (the games' original rate), 60 (default), 90, 120, 144, 165, 240 or Unlimited, chosen per game.
 - **Graphics card selection (Windows), anti-aliasing and texture filtering** choices.
@@ -93,7 +93,7 @@ The selector under the header chooses the game, and the pages beside it belong t
 - **Controls**: keyboard on or off, every key remappable, and **Keyboard defaults** to restore the standard layout
 - **About**: versions, folders (game files, saves and settings, logs), the settings file, **Detailed logging** and **Open logs folder**
 
-**Render resolution** draws the game at a multiple of its own picture (Original, 2x, 3x or 4x, sized for the chosen aspect ratio) and then scales it to the window. **Upscaling** (Windows) uses AMD FSR 1 to scale the picture to the window; Quality, Balanced and Performance draw the game 1.5, 1.7 and 2 times smaller along each axis than the Render resolution, which costs less GPU time. On Linux the game always draws at the Render resolution.
+**Render resolution** draws the game at a multiple of its own picture (Original, 2x, 3x or 4x, sized for the chosen aspect ratio) and then scales it to the window. **Upscaling** (Windows) uses AMD FSR 1 to scale the picture to the window; Quality, Balanced and Performance draw the game 1.5, 1.7 and 2 times smaller along each axis than the Render resolution, which costs less GPU time. In Marvel Ultimate Alliance it can also use NVIDIA NIS, with the same modes and a Sharpness slider (50% is NVIDIA's default), or AMD CAS, which keeps the Render resolution and only sharpens. On Linux the game always draws at the Render resolution.
 
 **HD Text** (Marvel Ultimate Alliance and Gold Edition, On by default) rebuilds the games' font atlases at 2x the size at Render resolution 2x, and at 4x the size at 3x and 4x, when the game starts. The layout, colours and animation stay the game's, the game files are not changed, and nothing taken from the game ships with the port. It uses about 6 MB of memory at 2x and 24 MB at 3x and 4x. HD Text is not available for Marvel Ultimate Alliance 2.
 

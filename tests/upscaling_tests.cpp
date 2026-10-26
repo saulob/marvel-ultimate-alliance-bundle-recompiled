@@ -158,22 +158,74 @@ void TestText() {
                     100) == 170);
   CHECK(UpscalingText(Upscaler::kOff, UpscaleQuality::kQuality) == "Off");
   CHECK(UpscalingText(Upscaler::kFsr1, UpscaleQuality::kBalanced) == "AMD FSR 1 Balanced");
+  CHECK(UpscalingText(Upscaler::kNis, UpscaleQuality::kPerformance) == "NVIDIA NIS Performance");
+  CHECK(UpscalingText(Upscaler::kCas, UpscaleQuality::kQuality) == "AMD CAS");
 }
 
 void TestParsing() {
   std::printf("saved values and presenter effect\n");
-  CHECK(ParseUpscaler("fsr") == (kUpscalerAvailable ? Upscaler::kFsr1 : Upscaler::kOff));
-  CHECK(ParseUpscaler("off") == Upscaler::kOff);
-  CHECK(ParseUpscaler("") == Upscaler::kOff);
-  CHECK(ParseUpscaler("nis") == Upscaler::kOff);
+  const auto available = [](Upscaler upscaler) { return kUpscalerAvailable ? upscaler : Upscaler::kOff; };
+  CHECK(ParseUpscaler("fsr", kFsr1Upscalers) == available(Upscaler::kFsr1));
+  CHECK(ParseUpscaler("fsr", kAllUpscalers) == available(Upscaler::kFsr1));
+  CHECK(ParseUpscaler("nis", kAllUpscalers) == available(Upscaler::kNis));
+  CHECK(ParseUpscaler("cas", kAllUpscalers) == available(Upscaler::kCas));
+  CHECK(ParseUpscaler("nis", kFsr1Upscalers) == Upscaler::kOff);
+  CHECK(ParseUpscaler("cas", kFsr1Upscalers) == Upscaler::kOff);
+  CHECK(ParseUpscaler("off", kAllUpscalers) == Upscaler::kOff);
+  CHECK(ParseUpscaler("", kAllUpscalers) == Upscaler::kOff);
+  CHECK(ParseUpscaler("dlss", kAllUpscalers) == Upscaler::kOff);
   CHECK(ParseUpscaleQuality("") == UpscaleQuality::kNative);
   CHECK(ParseUpscaleQuality("ultra_performance") == UpscaleQuality::kNative);
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
     CHECK(ParseUpscaleQuality(info.key) == info.quality);
     CHECK(&QualityInfoFor(info.quality) == &info);
   }
+  for (const UpscalerInfo& info : kUpscalers) {
+    CHECK(&UpscalerInfoFor(info.upscaler) == &info);
+  }
   CHECK(PresentEffectFor(Upscaler::kFsr1) == std::optional<std::string_view>("fsr"));
+  CHECK(PresentEffectFor(Upscaler::kNis) == std::optional<std::string_view>("nis"));
+  CHECK(PresentEffectFor(Upscaler::kCas) == std::optional<std::string_view>("cas"));
   CHECK(!PresentEffectFor(Upscaler::kOff));
+}
+
+void TestNisAndCas() {
+  std::printf("NIS draws below the Render resolution like FSR 1; CAS only sharpens\n");
+  for (const AspectRatioInfo& aspect : kAspectRatios) {
+    const WindowSize canvas = VideoModeSize(aspect.aspect);
+    for (int scale = 1; scale <= 4; ++scale) {
+      for (const UpscaleQualityInfo& info : kUpscaleQualities) {
+        const RenderSizes fsr = RenderSizesFor(aspect.aspect, scale, Upscaler::kFsr1, info.quality);
+        const RenderSizes nis = RenderSizesFor(aspect.aspect, scale, Upscaler::kNis, info.quality);
+        CHECK(Equal(nis.guest, fsr.guest) && Equal(nis.internal, fsr.internal) && Equal(nis.native, fsr.native));
+        const RenderSizes cas = RenderSizesFor(aspect.aspect, scale, Upscaler::kCas, info.quality);
+        CHECK(Equal(cas.internal, RenderSize(aspect.aspect, scale)) && Equal(cas.internal, cas.native));
+        CHECK(Equal(UpscaledBackBuffer(canvas, Upscaler::kCas, info.quality), canvas));
+      }
+    }
+  }
+  CHECK(EffectiveQuality(Upscaler::kNis, UpscaleQuality::kBalanced) == UpscaleQuality::kBalanced);
+  CHECK(EffectiveQuality(Upscaler::kCas, UpscaleQuality::kPerformance) == UpscaleQuality::kNative);
+}
+
+void TestSharpness() {
+  std::printf("NIS and CAS sharpness settings and their presenter values\n");
+  const UpscalerInfo& nis = UpscalerInfoFor(Upscaler::kNis);
+  const UpscalerInfo& cas = UpscalerInfoFor(Upscaler::kCas);
+  CHECK(std::string_view(nis.sharpness_key) == "mua_nis_sharpness" &&
+        std::string_view(nis.sharpness_cvar) == "present_nis_sharpness" && nis.sharpness_default == 50);
+  CHECK(std::string_view(cas.sharpness_key) == "mua_cas_sharpness" &&
+        std::string_view(cas.sharpness_cvar) == "present_cas_additional_sharpness" && cas.sharpness_default == 0);
+  CHECK(!UpscalerInfoFor(Upscaler::kOff).sharpness_key && !UpscalerInfoFor(Upscaler::kFsr1).sharpness_key);
+  CHECK(ParseSharpness("75", 50) == 75);
+  CHECK(ParseSharpness("", 50) == 50);
+  CHECK(ParseSharpness("abc", 0) == 0);
+  CHECK(ParseSharpness("150", 50) == 100);
+  CHECK(ParseSharpness("-5", 50) == 0);
+  CHECK(ParseSharpness("0.5", 50) == 50);
+  CHECK(PresenterSharpness(50) == "0.500000");
+  CHECK(PresenterSharpness(0) == "0.000000");
+  CHECK(PresenterSharpness(100) == "1.000000");
 }
 
 }  // namespace
@@ -187,6 +239,8 @@ int main() {
   TestPixelSavings();
   TestText();
   TestParsing();
+  TestNisAndCas();
+  TestSharpness();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

@@ -699,6 +699,31 @@ void TestPipelineStoragePendingFlush() {
   }
 }
 
+// 0159: NVIDIA Image Scaling beside 0127's FSR 1 and CAS, with its NVIDIA files under src/, which the runtime build
+// cleans before patching again.
+void TestNvidiaImageScaling() {
+  std::printf("NVIDIA Image Scaling presenter patch\n");
+  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
+  const std::string nis = ReadFile(dir + "0159-presenter-nvidia-image-scaling.windows.patch");
+  CHECK(Has(nis, "+    .allowed({\"bilinear\", \"cas\", \"fsr\", \"nis\"})"));
+  CHECK(Has(nis, "+REXCVAR_DEFINE_DOUBLE(present_nis_sharpness,"));
+  CHECK(Has(nis, "+    static constexpr float kNisSharpnessDefault = 0.5f;"));
+  CHECK(Has(nis, "+      flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kNisScale;"));
+  CHECK(Has(nis, "+      flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kNisSharpen;"));
+  CHECK(Has(nis, "+      guest_output_paint_config.SetEffect(GuestOutputPaintConfig::Effect::kFsr);"));
+  CHECK(Has(nis, "present_effect nis uses fsr instead"));
+  CHECK(Has(nis, "+          kViewIndexGuestOutputIntermediate0Srv + kMaxGuestOutputPaintEffects - 1,"));
+  CHECK(Has(nis, "+        NVH4 v = NVH4(coef_scaler[phase][vIdx]);"));
+  CHECK(Has(nis, "+        v = NVH4(coef_usm[phase][vIdx]);"));
+  CHECK(Has(nis, "+const BYTE guest_output_nis_scale_cs[] = {"));
+  CHECK(Has(nis, "+const BYTE guest_output_nis_sharpen_cs[] = {"));
+  CHECK(Has(nis, "+++ b/src/ui/shaders/nis/LICENSE.txt"));
+  CHECK(Has(nis, "+// Copyright(c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved."));
+  CHECK(!Has(nis, "+++ b/thirdparty/"));
+  CHECK(!Has(nis, "\n+      kRTVCount") && !Has(nis, "\n-      kRTVCount"));
+  CHECK(Has(nis, "+    .allowed({\"bilinear\", \"cas\", \"fsr\", \"fsr2\", \"fsr3\", \"nis\"})"));
+}
+
 }  // namespace
 
 int main() {
@@ -716,6 +741,7 @@ int main() {
   TestDrawFastPathPatches();
   TestWriteFaultCallbackFirst();
   TestPipelineStoragePendingFlush();
+  TestNvidiaImageScaling();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

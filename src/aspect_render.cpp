@@ -16,7 +16,7 @@ mua::AspectRatio ConfiguredAspect() {
 }
 
 mua::WindowSize UpscaledBackBufferFor(mua::WindowSize canvas) {
-  return mua::UpscaledBackBuffer(canvas, mua::ParseUpscaler(REXCVAR_GET(mua_upscaler)),
+  return mua::UpscaledBackBuffer(canvas, mua::ActiveUpscaler(),
                                  mua::ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
 }
 
@@ -29,7 +29,7 @@ std::atomic<bool> g_back_buffer_upscaled{false};
 void mua_aspect_back_buffer(PPCRegister& width, PPCRegister& height) {
   const mua::AspectRatio aspect = ConfiguredAspect();
   if (width.s32 != mua::kHdBackBufferWidth || height.s32 != mua::kHdBackBufferHeight) {
-    if (aspect != mua::AspectRatio::k16x9 || mua::ParseUpscaler(REXCVAR_GET(mua_upscaler)) != mua::Upscaler::kOff) {
+    if (aspect != mua::AspectRatio::k16x9 || mua::ActiveUpscaler() != mua::Upscaler::kOff) {
       REXLOG_WARN("Guest back buffer is {}x{}, not the expected {}x{}; keeping it", width.s32, height.s32,
                   mua::kHdBackBufferWidth, mua::kHdBackBufferHeight);
     }

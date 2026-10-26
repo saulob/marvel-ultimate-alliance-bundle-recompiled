@@ -75,7 +75,11 @@ void ApplyPlayerNames();
 // Turns on gpu_stream_dynamic_pages for a game runtime, unless the config sets it. Call with ApplyMultisampling.
 void ApplyDynamicPageStreaming(std::optional<GameId> game);
 
-// Sets present_effect for the game's Upscaling choice. Call before the presenter is created (OnPreSetup).
+// The active game's Upscaling choice; Off for a choice that game doesn't offer, or before a game is active.
+Upscaler ActiveUpscaler();
+
+// Sets present_effect and the sharpness for the game's Upscaling choice. Call before the presenter is created
+// (OnPreSetup).
 void ApplyUpscaler(const GameSettings& settings);
 
 // Logs the internal and output render sizes of the Upscaling choice. Call after ApplyGameSettings.

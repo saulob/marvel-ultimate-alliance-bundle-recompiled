@@ -241,7 +241,33 @@ std::vector<trg::Option> RenderResolutionOptions(AspectRatio aspect) {
   return options;
 }
 
-// Each quality with the size the game draws at and the Render resolution FSR 1 brings it to.
+std::vector<trg::Option> UpscalerOptions(UpscalerMask offered) {
+  std::vector<trg::Option> options;
+  for (const UpscalerInfo& info : kUpscalers) {
+    if (offered & UpscalerBit(info.upscaler)) {
+      options.push_back({info.key, info.label});
+    }
+  }
+  return options;
+}
+
+const char* UpscalingHelp(UpscalerMask offered) {
+  if (offered == kFsr1Upscalers) {
+    return "AMD FSR 1 scales the game's picture to the window with sharper edges than plain scaling. Quality, "
+           "Balanced and Performance draw the game at a lower resolution than the Render resolution, which costs less "
+           "GPU time, and FSR 1 scales it up to the window.";
+  }
+  return "AMD FSR 1 and NVIDIA NIS scale the game's picture to the window with sharper edges than plain scaling; their "
+         "Quality, Balanced and Performance draw the game below the Render resolution, which costs less GPU time. AMD "
+         "CAS draws at the Render resolution and sharpens the picture as it scales it to the window.";
+}
+
+const char* SharpnessHelp(Upscaler upscaler) {
+  return upscaler == Upscaler::kNis ? "How much NIS sharpens. 0% only scales; NVIDIA's default is 50%."
+                                    : "How much more CAS sharpens. 0% is AMD's standard CAS.";
+}
+
+// Each quality with the size the game draws at and the Render resolution the upscaler brings it to.
 std::vector<trg::Option> UpscaleQualityOptions(AspectRatio aspect, int render_scale) {
   std::vector<trg::Option> options;
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
@@ -974,17 +1000,19 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
              "costs more GPU time. Window size is separate.",
              "resolution_scale", "1", RenderResolutionOptions(SelectedAspectRatio()));
     if (UpscalingApplies()) {
-      ui.Choice("Upscaling",
-                "AMD FSR 1 scales the game's picture to the window with sharper edges than plain scaling. Quality, "
-                "Balanced and Performance draw the game at a lower resolution than the Render resolution, which "
-                "costs less GPU time, and FSR 1 scales it up to the window.",
-                "mua_upscaler", kUpscalerOff, {{kUpscalerOff, "Off"}, {kUpscalerFsr1, "AMD FSR 1"}});
-      if (ParseUpscaler(settings_.Get("mua_upscaler", kUpscalerOff)) == Upscaler::kFsr1) {
-        ui.Combo("Upscaling quality",
-                 "How far below the Render resolution the game draws before FSR 1 scales it to the window. Lower "
-                 "is faster and softer, including the menus and HUD.",
-                 "mua_upscale_quality", "native",
+      const UpscalerMask offered = Selected().game->upscalers;
+      ui.Choice("Upscaling", UpscalingHelp(offered), "mua_upscaler", kUpscalerOff, UpscalerOptions(offered));
+      const Upscaler upscaler = ParseUpscaler(settings_.Get("mua_upscaler", kUpscalerOff), offered);
+      const UpscalerInfo& info = UpscalerInfoFor(upscaler);
+      if (info.lowers_resolution) {
+        const std::string help = std::string("How far below the Render resolution the game draws before ") + info.name +
+                                 " scales it to the window. Lower is faster and softer, including the menus and HUD.";
+        ui.Combo("Upscaling quality", help.c_str(), "mua_upscale_quality", "native",
                  UpscaleQualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
+      }
+      if (info.sharpness_key) {
+        ui.SliderInt("Sharpness", SharpnessHelp(upscaler), info.sharpness_key, info.sharpness_default, 0, 100, "%d%%",
+                     5);
       }
     }
     ui.Choice("Anti-aliasing", "Smooths jagged edges after the frame is drawn. Extreme is softer but cleaner.",

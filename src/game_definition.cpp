@@ -28,6 +28,7 @@ constexpr std::array kGames = {
         .executable = "marvel_ultimate_alliance_mua1.exe",
         .data_folder = "mua1",
         .frame_policy = kMua1FramePolicy,
+        .upscalers = kAllUpscalers,
     },
     GameDefinition{
         .id = GameId::kMua1Gold,
@@ -43,6 +44,7 @@ constexpr std::array kGames = {
         .executable = "marvel_ultimate_alliance_mua1_gold.exe",
         .data_folder = "mua1_gold",
         .frame_policy = kMua1FramePolicy,
+        .upscalers = kFsr1Upscalers,
     },
     GameDefinition{
         .id = GameId::kMua2,
@@ -58,6 +60,7 @@ constexpr std::array kGames = {
         .executable = "marvel_ultimate_alliance_mua2.exe",
         .data_folder = "mua2",
         .frame_policy = kMua2FramePolicy,
+        .upscalers = kFsr1Upscalers,
     },
 };
 

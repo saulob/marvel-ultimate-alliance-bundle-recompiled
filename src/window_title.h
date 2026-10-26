@@ -17,7 +17,7 @@ inline std::string RenderResolutionText(int resolution_scale, AspectRatio aspect
   return std::to_string(size.width) + "x" + std::to_string(size.height);
 }
 
-// With an upscaler, what the GPU draws before FSR 1 scales it to the window: "1120x480 (AMD FSR 1 Quality)".
+// With an upscaler, what the GPU draws before it scales to the window: "1120x480 (AMD FSR 1 Quality)".
 inline std::string RenderResolutionText(int resolution_scale, AspectRatio aspect, Upscaler upscaler,
                                         UpscaleQuality quality) {
   if (upscaler == Upscaler::kOff) {
