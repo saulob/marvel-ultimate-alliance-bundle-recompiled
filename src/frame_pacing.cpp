@@ -11,6 +11,7 @@
 
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/ppc.h>
 
 #include "frame_limiter.h"
 #include "frame_pacing.h"
@@ -65,6 +66,12 @@ REX_HOOK_RAW(MUA_GUEST_WORLD_UPDATE) {
     REXLOG_INFO("Game timing: frame rate={} | {}",
                 mua::FrameRateLabel(mua::ConfiguredFrameRate(), mua::RuntimeFramePolicy()), *line);
   }
+}
+
+// Codegen midasm hook (overrides.toml) in Marvel Ultimate Alliance 2's clock update, before the fsubs/fsel that floor
+// its step.
+void mua_clock_step_floor_mua2(PPCRegister& floor) {
+  floor.f64 = double(float(mua::kMua2WorldDeltaMin));
 }
 
 // The game's max_fps option follows the launcher rate; the interval is stored at options + 24. A game paced by the

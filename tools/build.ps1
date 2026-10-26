@@ -11,19 +11,20 @@
   build-patched-rexruntime.ps1 when they do not), generates the
   recompiled code of each game when its default.xex, manifest, an include or the rexglue tool changed (the build's
   codegen step decides), reconfigures CMake when the build settings or a generated\<game>\sources.cmake changed, and
-  builds the four programs.
+  builds the four programs. The configuration is Release unless -Config says otherwise; switching the configuration
+  of a build folder reconfigures it and rebuilds everything once.
 
 .EXAMPLE
-  .\tools\build.ps1              # incremental build only
+  .\tools\build.ps1              # incremental Release build only
   .\tools\build.ps1 -Run         # build, then launch the game with game\extracted
   .\tools\build.ps1 -Clean       # clean configure and build of build\ (ReXGlue's source and build tree are kept)
-  .\tools\build.ps1 -Config Release -BuildDir build-release
+  .\tools\build.ps1 -Config RelWithDebInfo   # profiling build (Tracy on demand, perf counters), in build\ as well
 #>
 param(
     [switch]$Clean,
     [switch]$Run,
     [ValidateSet('Debug', 'RelWithDebInfo', 'Release')]
-    [string]$Config = 'RelWithDebInfo',
+    [string]$Config = 'Release',
     [string]$BuildDir,  # relative to the repository root; default: build
     [int]$Jobs = 0,
     [string]$TrgLauncherDir  # a TRG Launcher checkout, used until third_party\trg-launcher is a submodule
@@ -132,6 +133,16 @@ function Test-Configured {
         })
 }
 
+# The codegen step touches a game's stamp whenever it generates that game's code.
+function Get-CodegenStampTimes {
+    $times = @{}
+    foreach ($module in $Modules) {
+        $stamp = Join-Path (Split-Path $module.Sources) 'codegen.build.stamp'
+        $times[$module.Name] = if (Test-Path $stamp) { (Get-Item $stamp).LastWriteTimeUtc } else { $null }
+    }
+    return $times
+}
+
 function Invoke-Configure {
     Write-Host 'Configuring...'
     [string[]]$trg = if ($TrgDir) { "-DMUA_TRG_LAUNCHER_DIR:PATH=$TrgDir" } else { @() }
@@ -164,11 +175,18 @@ try {
         Get-ChildItem $BuildDir -Force | Where-Object { $_.Name -ne 'user_data' } | Remove-Item -Recurse -Force
     }
 
+    $previousConfig = Get-CachedValue 'CMAKE_BUILD_TYPE'
+    if ($previousConfig -and $previousConfig -ne $Config) {
+        Write-Host "Configuration: $BuildDir was built as $previousConfig; switching it to $Config rebuilds everything once"
+    }
     if (-not (Test-Configured)) { Invoke-Configure }
 
+    $codegenBefore = Get-CodegenStampTimes
     Write-Host 'Generating recompiled code if needed...'
     & $CMake --build $BuildDir --target marvel_ultimate_alliance_mua1_gold_codegen marvel_ultimate_alliance_mua1_codegen marvel_ultimate_alliance_mua2_codegen
     if ($LASTEXITCODE) { throw "Codegen failed ($LASTEXITCODE); see generated\codegen.log or run tools\codegen.ps1" }
+    $codegenAfter = Get-CodegenStampTimes
+    $regenerated = @($Modules | ForEach-Object { $_.Name } | Where-Object { $codegenAfter[$_] -ne $codegenBefore[$_] })
     if (-not (Test-Configured)) { Invoke-Configure }
 
     Write-Host 'Building...'
@@ -185,8 +203,14 @@ foreach ($file in $Programs + @('marvel_ultimate_alliance.toml') + $RuntimeDlls)
     if (-not (Test-Path (Join-Path $BuildDir $file))) { throw "Build output is missing $(Join-Path $BuildDir $file)" }
 }
 Assert-RuntimeReady
-Write-Host "BUILD SUCCESSFUL: $Exe"
-foreach ($program in $Programs[1..($Programs.Count - 1)]) { Write-Host "                  $(Join-Path $BuildDir $program)" }
+$runtimeStamp = Read-RuntimeStamp $SdkRoot
+$runtimeOrigin = if ($Config -eq 'Debug') { 'stock ReXGlue Debug files' } else {
+    "patched, $(@($runtimeStamp.Values['patches'] -split ',').Count) patches, fingerprint $($runtimeStamp.Values['inputs_sha256'].Substring(0, 12))"
+}
+Write-Host "BUILD SUCCESSFUL: $(Get-CachedValue 'CMAKE_BUILD_TYPE') build in $BuildDir"
+foreach ($program in $Programs) { Write-Host "  $(Join-Path $BuildDir $program)" }
+Write-Host "  Recompiled code generated this build: $(if ($regenerated.Count) { $regenerated -join ', ' } else { 'none, all current' })"
+Write-Host "  Runtime next to the programs matches tools\rexglue: $((Get-RuntimeDllNames $Config) -join ', ') ($runtimeOrigin)"
 
 if (-not $Run) { return }
 

@@ -133,7 +133,7 @@ The launcher and the game it starts write to the same log for one session, and t
 The recompiled C++ is generated from your own game files, so the repository does not contain it.
 
 ```powershell
-.\tools\build.ps1          # sets up the SDK, builds the patched runtime, generates the recompiled code when needed, then builds
+.\tools\build.ps1          # sets up the SDK, builds the patched runtime, generates the recompiled code when needed, then builds Release
 .\tools\test.ps1           # headless unit tests
 .\tools\codegen.ps1        # forces a codegen run for every game, with logs in generated\codegen-<game>.log
 .\tools\package-release.ps1   # Release build and the release ZIP with its .sha256 in dist\ (publishes nothing)
