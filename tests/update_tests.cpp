@@ -522,10 +522,10 @@ void TestZipAndStaging() {
   CHECK(!IsSymlinkZipEntry(0));
 
   const std::filesystem::path dot_archive = temp.path / "dot.zip";
-  WriteFile(dot_archive, MakeZip({{"./marvel_ultimate_alliance.exe", "launcher"}}));
+  WriteFile(dot_archive, MakeZip({{"./marvel_ultimate_alliance_bundle.exe", "launcher"}}));
   const std::filesystem::path dot_staging = temp.path / "dot-staging";
   CHECK(ExtractZip(dot_archive, dot_staging, {}, error));
-  CHECK(std::filesystem::exists(dot_staging / "marvel_ultimate_alliance.exe"));
+  CHECK(std::filesystem::exists(dot_staging / "marvel_ultimate_alliance_bundle.exe"));
 
   const std::filesystem::path nested_archive = temp.path / "nested.zip";
   WriteFile(nested_archive, MakeZip({{"assets/launcher/header-art-mua1.png", "art"}, {"licenses/a/b/c.txt", "deep"}}));
@@ -606,7 +606,7 @@ void TestJobs() {
   const std::filesystem::path manifest = temp.path / "manifest.txt";
   std::filesystem::create_directories(install);
   std::filesystem::create_directories(staging);
-  WriteFile(manifest, "marvel_ultimate_alliance.exe\n");
+  WriteFile(manifest, "marvel_ultimate_alliance_bundle.exe\n");
 
   UpdateJob job;
   job.parent_pid = 1234;
@@ -643,7 +643,7 @@ void TestJobs() {
   bad_argument.restart_arguments = {"--a\n--b"};
   CHECK(!WriteUpdateJob(temp.path / "bad-job.txt", bad_argument, error));
 
-  WriteFile(staging / "marvel_ultimate_alliance.exe", "launcher");
+  WriteFile(staging / "marvel_ultimate_alliance_bundle.exe", "launcher");
   CHECK(ValidateInstallJob(job, error));
 
   UpdateJob inside = job;
@@ -657,7 +657,7 @@ void TestJobs() {
 
   UpdateJob manifest_inside = job;
   manifest_inside.manifest_file = install / "manifest.txt";
-  WriteFile(manifest_inside.manifest_file, "marvel_ultimate_alliance.exe\n");
+  WriteFile(manifest_inside.manifest_file, "marvel_ultimate_alliance_bundle.exe\n");
   CHECK(!ValidateInstallJob(manifest_inside, error));
 
   UpdateJob relative = job;
@@ -669,7 +669,7 @@ void TestJobs() {
   CHECK(!ValidateInstallJob(no_pid, error));
 
   UpdateJob outside = job;
-  outside.restart_executable = temp.path / "marvel_ultimate_alliance.exe";
+  outside.restart_executable = temp.path / "marvel_ultimate_alliance_bundle.exe";
   CHECK(!ValidateInstallJob(outside, error));
 
   UpdateJob no_manifest = job;
@@ -692,7 +692,7 @@ void TestBundleInstall() {
   CHECK(success.status == InstallStatus::kSuccess);
   CHECK(success.error.empty());
   CHECK(BundleHolds(fixture.install, "new"));
-  for (const char* program : {"marvel_ultimate_alliance.exe", "marvel_ultimate_alliance_mua1.exe",
+  for (const char* program : {"marvel_ultimate_alliance_bundle.exe", "marvel_ultimate_alliance_mua1.exe",
                               "marvel_ultimate_alliance_mua1_gold.exe", "marvel_ultimate_alliance_mua2.exe",
                               "trg-updater.exe", "rexruntime.dll", "rexgpu-xenos.dll"}) {
     CHECK(ReadFile(fixture.install / program) == std::string("new:") + program);
@@ -726,9 +726,19 @@ void TestRollbackAtEveryStep() {
       std::filesystem::rename(from, to, ec);
       return !ec;
     };
+    std::string install_log;
+    options.log = [&install_log](std::string_view text) {
+      install_log += text;
+      install_log += '\n';
+    };
     const InstallOutcome outcome = InstallFiles(fixture.job, options, false);
     CHECK(outcome.status == InstallStatus::kInstallFailedRolledBack);
     CHECK(!outcome.error.empty());
+    CHECK(install_log.find("backup complete\n") != std::string::npos);
+    CHECK(install_log.find("install failed: ") != std::string::npos);
+    CHECK(install_log.find("rollback start\n") != std::string::npos);
+    CHECK(install_log.find("rollback complete\n") != std::string::npos);
+    CHECK(install_log.find("replacement complete") == std::string::npos);
     for (const char* file : mua::kBundleFiles) {
       const std::filesystem::path path = fixture.install / std::filesystem::path(file);
       if (std::string_view(file) == "assets/launcher/header-art-mua2.png") {
@@ -758,7 +768,7 @@ void TestRollbackAtEveryStep() {
   const InstallOutcome damaged = InstallFiles(fixture.job, corrupt, false);
   CHECK(damaged.status == InstallStatus::kInstallFailedRolledBack);
   CHECK(Contains(damaged.error, "does not match"));
-  CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance.exe");
+  CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance_bundle.exe");
   CHECK(ReadFile(fixture.install / "marvel_ultimate_alliance_mua2.exe") ==
         "old:marvel_ultimate_alliance_mua2.exe");
   CHECK(UserAndGameFilesIntact(fixture.install));
@@ -774,7 +784,7 @@ void TestRollbackAtEveryStep() {
     return InstallFiles(job, {}, true);
   }();
   CHECK(restart_failed.status == InstallStatus::kRestartFailedRolledBack);
-  CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance.exe");
+  CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance_bundle.exe");
   CHECK(ReadFile(fixture.install / "marvel_ultimate_alliance_mua1.exe") == "old:marvel_ultimate_alliance_mua1.exe");
   CHECK(UserAndGameFilesIntact(fixture.install));
 }
@@ -801,13 +811,13 @@ void TestManifestRules() {
     WriteFile(fixture.manifest, ManifestText({mua::kBundleLauncher, entry}));
     CHECK(InstallFiles(fixture.job, {}, false).status == InstallStatus::kInvalidJob);
     CHECK(UserAndGameFilesIntact(fixture.install));
-    CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance.exe");
+    CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance_bundle.exe");
   }
 
   fixture.Stage("new");
   WriteFile(fixture.manifest, ManifestText({mua::kBundleLauncher, "not-staged.dll"}));
   CHECK(InstallFiles(fixture.job, {}, false).status == InstallStatus::kInvalidJob);
-  CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance.exe");
+  CHECK(ReadFile(fixture.install / mua::kBundleLauncher) == "old:marvel_ultimate_alliance_bundle.exe");
 
   fixture.Stage("new");
   WriteFile(fixture.manifest, "");
@@ -824,7 +834,7 @@ void TestBundleDefinitions() {
   std::printf("bundle definitions\n");
   CHECK(std::string_view(mua::kUpdateReleasesUrl) ==
         "https://api.github.com/repos/saulob/marvel-ultimate-alliance-recompiled/releases/latest");
-  CHECK(std::string_view(mua::kBundleLauncher) == "marvel_ultimate_alliance.exe");
+  CHECK(std::string_view(mua::kBundleLauncher) == "marvel_ultimate_alliance_bundle.exe");
   CHECK(std::string_view(mua::kUpdateHelper) == "trg-updater.exe");
   const auto version = ParseVersion("1.2.3-rc1");
   CHECK(version && mua::UpdateAssetName(*version) == "MarvelUltimateAlliance-v1.2.3-windows-x64.zip");
@@ -832,7 +842,7 @@ void TestBundleDefinitions() {
 
   const std::vector<std::string> bundle = BundleFileList();
   for (const char* required :
-       {"marvel_ultimate_alliance.exe", "marvel_ultimate_alliance_mua1.exe", "marvel_ultimate_alliance_mua1_gold.exe",
+       {"marvel_ultimate_alliance_bundle.exe", "marvel_ultimate_alliance_mua1.exe", "marvel_ultimate_alliance_mua1_gold.exe",
         "marvel_ultimate_alliance_mua2.exe", "trg-updater.exe", "rexruntime.dll", "rexgpu-xenos.dll",
         "marvel_ultimate_alliance.toml", "assets/launcher/header-art-mua1.png",
         "assets/launcher/header-art-mua1-gold.png", "assets/launcher/header-art-mua2.png",
@@ -854,12 +864,12 @@ void TestBundleDefinitions() {
 
 void TestPaths() {
   std::printf("path safety\n");
-  CHECK(IsSafeRelativePath("marvel_ultimate_alliance.exe"));
+  CHECK(IsSafeRelativePath("marvel_ultimate_alliance_bundle.exe"));
   CHECK(IsSafeRelativePath("assets/launcher/header-art-mua1-gold.png"));
-  CHECK(IsSafeRelativePath("./marvel_ultimate_alliance.exe"));
-  CHECK(!IsSafeRelativePath("../marvel_ultimate_alliance.exe"));
+  CHECK(IsSafeRelativePath("./marvel_ultimate_alliance_bundle.exe"));
+  CHECK(!IsSafeRelativePath("../marvel_ultimate_alliance_bundle.exe"));
   CHECK(!IsSafeRelativePath("/absolute"));
-  CHECK(!IsSafeRelativePath("C:/marvel_ultimate_alliance.exe"));
+  CHECK(!IsSafeRelativePath("C:/marvel_ultimate_alliance_bundle.exe"));
   CHECK(!IsSafeRelativePath("\\\\server\\share"));
   CHECK(!IsSafeRelativePath("a//b"));
   CHECK(!IsSafeRelativePath("a/./../b"));
@@ -877,7 +887,7 @@ void TestPaths() {
   CHECK(IsProtectedRelativePath("4156082F/profile/User/a"));
   CHECK(IsProtectedRelativePath("415607DA/profile/User/a"));
   CHECK(IsProtectedRelativePath("default.xex"));
-  CHECK(!IsProtectedRelativePath("marvel_ultimate_alliance.exe"));
+  CHECK(!IsProtectedRelativePath("marvel_ultimate_alliance_bundle.exe"));
   CHECK(!IsProtectedRelativePath("marvel_ultimate_alliance.toml"));
   CHECK(!IsProtectedRelativePath("trg-updater.exe"));
   CHECK(!IsProtectedRelativePath("rexruntime.dll"));
@@ -923,8 +933,38 @@ void TestSourceWiring() {
   CHECK(Contains(cmake, "src/update_config.cpp"));
   CHECK(Contains(cmake, "src/updater/update_controller.cpp"));
   CHECK(Contains(cmake, "src/updater/third_party/miniz/miniz.c"));
-  CHECK(Contains(cmake, "MUA_PORT_VERSION=\"${PROJECT_VERSION}${MUA_VERSION_SUFFIX}\""));
+  CHECK(Contains(cmake, "MUA_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}"));
+  CHECK(Contains(cmake, "MUA_VERSION_SUFFIX=\"${MUA_VERSION_SUFFIX}\""));
+  CHECK(Contains(cmake, "src/port_version.cpp"));
+  CHECK(!Contains(cmake, "MUA_PORT_VERSION"));
   CHECK(Contains(cmake, "OUTPUT_NAME \"trg-updater\""));
+  CHECK(Contains(cmake, "target_compile_definitions(trg-updater PRIVATE MUA_UPDATER_HELPER_BUILD=1)"));
+  CHECK(Contains(cmake, "target_link_options(trg-updater PRIVATE -static)"));
+  CHECK(Contains(cmake, "mua_add_game_executable(marvel_ultimate_alliance_bundle \"\" launcher)"));
+
+  // The package ships the MSYS2 CLANG64 helper from build-updater.ps1, with its symbols outside the ZIP.
+  const std::string helper_build = ReadFile(src + "/../tools/build-updater.ps1");
+  CHECK(Contains(helper_build, "'-DMUA_UPDATER_HELPER_BUILD=1'"));
+  CHECK(Contains(helper_build, "'-static'"));
+  CHECK(Contains(helper_build, "--strip-debug --add-gnu-debuglink=trg-updater.debug"));
+  CHECK(Contains(helper_build, "imports non-system DLLs"));
+  CHECK(Contains(package, "build-updater.ps1"));
+  CHECK(Contains(package, "trg-updater-clang64"));
+  CHECK(Contains(package, "\"$Name-symbols\""));
+  CHECK(Contains(package, "Copy-Item -LiteralPath $Updater $Stage"));
+  CHECK(Contains(package, "trg-updater.exe is not self-contained"));
+  CHECK(Contains(package, "Expand-ReleaseZip $Zip"));
+  for (const char* forbidden : {"'*.debug'", "'*.pdb'", "'VkLayer_*'", "'renderdoc*'", "'vulkan-1.dll'",
+                                "'marvel_ultimate_alliance.exe'"}) {
+    CHECK(Contains(package, forbidden));
+  }
+  const std::string old_launcher = std::string("marvel_ultimate_alliance") + ".exe";
+  for (const char* file : {"/update_bundle.h", "/update_config.cpp", "/platform.cpp", "/../tools/build.ps1",
+                           "/../tools/update-test.ps1", "/../tools/package-linux.sh", "/../packaging/README.txt",
+                           "/../packaging/linux/AppRun"}) {
+    const std::string text = ReadFile(src + file);
+    CHECK(!text.empty() && !Contains(text, old_launcher));
+  }
 
   const std::string create = "std::make_unique<trg::update::UpdateController>";
   CHECK(launcher.find(create) != std::string::npos);
@@ -949,7 +989,7 @@ void TestSourceWiring() {
   CHECK(Contains(config, "MUA_UPDATE_TEST_CURRENT_VERSION"));
   CHECK(Contains(config, "MUA_UPDATE_TEST_RELEASE_JSON"));
   CHECK(Contains(config, "MUA_UPDATE_TEST_ASSET_SHA256"));
-  CHECK(Contains(config, "MUA_PORT_VERSION"));
+  CHECK(Contains(config, "PortVersion()"));
   CHECK(Contains(config, "kBundleLauncher"));
 
   CHECK(Contains(readme, "@VERSION@"));
@@ -966,6 +1006,7 @@ void TestNoStaleNames() {
     }
   }
   for (const char* extra : {"/update_config.cpp", "/update_config.h", "/update_bundle.h", "/../tools/package-release.ps1",
+                            "/../tools/build-updater.ps1",
                             "/../packaging/README.txt", "/../tools/package-linux.sh", "/../tools/build.sh",
                             "/../tools/test.sh", "/../tools/build-patched-rexruntime.sh", "/../tools/check-guest-code.sh",
                             "/../packaging/linux/AppRun",
@@ -1025,7 +1066,11 @@ void TestLinuxPackaging() {
   CHECK(Contains(platform, "constexpr char kApplicationId[] = \"io.github.saulob.marvel-ultimate-alliance\";"));
   const std::string desktop = ReadFile(src + "/../packaging/linux/io.github.saulob.marvel-ultimate-alliance.desktop");
   CHECK(Contains(desktop, "StartupWMClass=io.github.saulob.marvel-ultimate-alliance"));
-  CHECK(Contains(desktop, "Exec=marvel_ultimate_alliance"));
+  CHECK(Contains(desktop, "Exec=marvel_ultimate_alliance_bundle\n"));
+  CHECK(Contains(desktop, "Icon=marvel_ultimate_alliance\n"));
+  CHECK(Contains(package, "BIN_NAME=marvel_ultimate_alliance_bundle"));
+  const std::string apprun = ReadFile(src + "/../packaging/linux/AppRun");
+  CHECK(Contains(apprun, "*) PROGRAM=marvel_ultimate_alliance_bundle ;;"));
 }
 
 void TestAppImageTarget() {
@@ -1035,18 +1080,18 @@ void TestAppImageTarget() {
   const std::filesystem::path appimage = root / "MarvelUltimateAlliance-v0.1.0-x86_64.AppImage";
   WriteFile(appimage, "appimage");
   const std::filesystem::path mount = root / "mount";
-  const std::filesystem::path program = mount / "usr" / "bin" / "marvel_ultimate_alliance";
+  const std::filesystem::path program = mount / "usr" / "bin" / "marvel_ultimate_alliance_bundle";
   WriteFile(program, "program");
   CHECK(IsRunningAppImage(appimage, mount, program));
   // The game programs run from the same AppImage.
   CHECK(IsRunningAppImage(appimage, mount, mount / "usr" / "bin" / "marvel_ultimate_alliance_mua2"));
 
   const std::filesystem::path extracted = root / ".extract" / "squashfs-root";
-  const std::filesystem::path extracted_program = extracted / "usr" / "bin" / "marvel_ultimate_alliance";
+  const std::filesystem::path extracted_program = extracted / "usr" / "bin" / "marvel_ultimate_alliance_bundle";
   WriteFile(extracted_program, "program");
   CHECK(IsRunningAppImage(appimage, extracted, extracted_program));
 
-  const std::filesystem::path build = root / "build" / "marvel_ultimate_alliance";
+  const std::filesystem::path build = root / "build" / "marvel_ultimate_alliance_bundle";
   WriteFile(build, "program");
   CHECK(!IsRunningAppImage(appimage, mount, build));
 

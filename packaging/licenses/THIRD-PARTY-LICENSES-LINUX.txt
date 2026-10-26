@@ -15,8 +15,8 @@ project builds it from AppImage/type2-runtime (tag 20251108, commit dd6cebe) wit
 repository (patches/appimage-runtime), using tools/build-appimage-runtime.sh, which records the exact component versions
 of each build. The runtime is statically linked and contains the components listed under "AppImage runtime" below.
 
-The AppImage also carries the application icons of the launcher and the three game programs as SVG and PNG
-files, renderings of packaging/icons/app-icon.svg in the source repository.
+The AppImage also carries the application icon, Game Console Ecommerce (CC0), as SVG and PNG files; the PNG files
+are recolored for the launcher and the three game programs. Its source is listed in THIRD-PARTY-LICENSES.txt.
 
 ========================================================================
 glslang (in librexgpu-xenos.so)

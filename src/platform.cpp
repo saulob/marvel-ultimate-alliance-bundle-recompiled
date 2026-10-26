@@ -32,6 +32,7 @@
 #include "dpi.h"
 #include "game_handoff.h"
 #include "path_utf8.h"
+#include "port_version.h"
 #include "session_log.h"
 
 #if defined(_WIN32)
@@ -207,6 +208,7 @@ void InstallCrashReports() {
   }
   std::error_code ec;
   const std::filesystem::path absolute = std::filesystem::absolute(file, ec);
+  SetCrashGameVersion(PortVersion().c_str());
   InstallCrashReporting(Utf8(ec ? file : absolute).c_str());
   REXLOG_INFO("Windows crash reporting enabled for current log.");
 #endif

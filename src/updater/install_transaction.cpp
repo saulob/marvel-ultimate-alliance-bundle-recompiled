@@ -47,7 +47,14 @@ std::string RelativePath(const std::filesystem::path& path, const std::filesyste
   return Utf8Path(path.lexically_relative(root));
 }
 
-bool ReadManifest(const UpdateJob& job, std::vector<ManifestEntry>& entries, std::string& error) {
+void Log(const InstallOptions& options, std::string_view text) {
+  if (options.log) {
+    options.log(text);
+  }
+}
+
+bool ReadManifest(const UpdateJob& job, const InstallOptions& options, std::vector<ManifestEntry>& entries,
+                  std::string& error) {
   std::ifstream in(job.manifest_file, std::ios::binary);
   if (!in) {
     error = "Cannot read the update manifest.";
@@ -102,6 +109,7 @@ bool ReadManifest(const UpdateJob& job, std::vector<ManifestEntry>& entries, std
     error = "The update manifest is empty.";
     return false;
   }
+  Log(options, "manifest entries: " + std::to_string(entries.size()));
   return true;
 }
 
@@ -118,7 +126,8 @@ bool ReplaceFileOr(const std::filesystem::path& from, const std::filesystem::pat
   return options.replace ? options.replace(from, to) : ReplaceFile(from, to);
 }
 
-bool MakeBackup(const std::vector<ManifestEntry>& entries, std::string& error) {
+bool MakeBackup(const std::vector<ManifestEntry>& entries, const InstallOptions& options, std::string& error) {
+  Log(options, "backup start");
   std::error_code ec;
   for (const ManifestEntry& entry : entries) {
     const std::filesystem::file_status status = std::filesystem::symlink_status(entry.target, ec);
@@ -147,6 +156,7 @@ bool MakeBackup(const std::vector<ManifestEntry>& entries, std::string& error) {
       return false;
     }
   }
+  Log(options, "backup complete");
   return true;
 }
 
@@ -165,7 +175,8 @@ bool VerifyCopy(const ManifestEntry& entry, std::string& error) {
   return true;
 }
 
-bool Rollback(std::vector<ManifestEntry>& installed, std::string& error) {
+bool Rollback(std::vector<ManifestEntry>& installed, const InstallOptions& options, std::string& error) {
+  Log(options, "rollback start");
   bool ok = true;
   for (auto it = installed.rbegin(); it != installed.rend(); ++it) {
     ManifestEntry& entry = *it;
@@ -200,6 +211,9 @@ bool Rollback(std::vector<ManifestEntry>& installed, std::string& error) {
   }
   if (!ok) {
     error = "The previous files could not be restored.";
+    Log(options, "rollback failed");
+  } else {
+    Log(options, "rollback complete");
   }
   return ok;
 }
@@ -253,7 +267,7 @@ InstallOutcome InstallFiles(const UpdateJob& job, const InstallOptions& options,
   }
 
   std::vector<ManifestEntry> entries;
-  if (!ReadManifest(job, entries, outcome.error)) {
+  if (!ReadManifest(job, options, entries, outcome.error)) {
     outcome.status = InstallStatus::kInvalidJob;
     return outcome;
   }
@@ -286,7 +300,8 @@ InstallOutcome InstallFiles(const UpdateJob& job, const InstallOptions& options,
     entry.existed = std::filesystem::exists(status);
   }
 
-  if (!MakeBackup(entries, outcome.error)) {
+  if (!MakeBackup(entries, options, outcome.error)) {
+    Log(options, "backup failed: " + outcome.error);
     std::error_code ec;
     std::filesystem::remove_all(job.backup_dir, ec);
     std::filesystem::remove_all(job.staging_dir, ec);
@@ -294,6 +309,7 @@ InstallOutcome InstallFiles(const UpdateJob& job, const InstallOptions& options,
     return outcome;
   }
 
+  Log(options, "replacing " + std::to_string(entries.size()) + " files");
   std::vector<ManifestEntry> installed;
   std::string failure;
   for (size_t index = 0; index < entries.size(); ++index) {
@@ -337,8 +353,9 @@ InstallOutcome InstallFiles(const UpdateJob& job, const InstallOptions& options,
   }
 
   if (!failure.empty()) {
+    Log(options, "install failed: " + failure);
     outcome.error = failure;
-    const bool restored = Rollback(installed, outcome.error);
+    const bool restored = Rollback(installed, options, outcome.error);
     if (restored) {
       std::error_code ec;
       std::filesystem::remove_all(job.backup_dir, ec);
@@ -348,12 +365,16 @@ InstallOutcome InstallFiles(const UpdateJob& job, const InstallOptions& options,
                               : InstallStatus::kInstallFailedRollbackFailed;
     return outcome;
   }
+  Log(options, "replacement complete");
+  Log(options, "verification complete");
 
   if (restart) {
+    Log(options, "restart start");
     std::string restart_error;
-    if (!LaunchApplication(job.restart_executable, job.restart_arguments, job.install_dir, restart_error)) {
+    if (!LaunchApplication(job.restart_executable, job.restart_arguments, job.install_dir, restart_error, true)) {
+      Log(options, "restart failed: " + restart_error);
       outcome.error = restart_error;
-      const bool restored = Rollback(installed, outcome.error);
+      const bool restored = Rollback(installed, options, outcome.error);
       if (restored) {
         std::error_code ec;
         std::filesystem::remove_all(job.backup_dir, ec);
@@ -363,6 +384,7 @@ InstallOutcome InstallFiles(const UpdateJob& job, const InstallOptions& options,
                                 : InstallStatus::kRestartFailedRollbackFailed;
       return outcome;
     }
+    Log(options, "restart complete");
   }
 
   std::error_code ec;

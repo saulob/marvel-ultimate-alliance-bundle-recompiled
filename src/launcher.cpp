@@ -52,6 +52,7 @@
 #include "log_filter.h"
 #include "platform.h"
 #include "player_names.h"
+#include "port_version.h"
 #include "render_scale.h"
 #include "settings.h"
 #include "update_config.h"
@@ -665,7 +666,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     c.branding.title = "MARVEL ULTIMATE ALLIANCE";
     c.branding.subtitle_segments = {
         {"PC PORT   \xC2\xB7   ", ""},
-        {"v" MUA_PORT_VERSION "   \xC2\xB7   ", ""},
+        {"v" + PortVersion() + "   \xC2\xB7   ", ""},
         {"BY SAULOB", kAuthorUrl},
     };
     c.branding.background = MakeHeaderPainter(selected_);
@@ -1143,7 +1144,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     if (ui.ButtonRow("Logs folder", "Open the folder containing session and crash logs", "Open logs folder")) {
       OpenLogsFolder();
     }
-    ui.Info("Port version", MUA_PORT_VERSION);
+    ui.Info("Port version", PortVersion().c_str());
     ui.Info("Libraries", "ReXGlue SDK " REXGLUE_VERSION_STRING "   \xC2\xB7   TRG Launcher " MUA_TRG_VERSION);
     const std::string game =
         std::format("Xbox 360 disc, title {}, {}", HexId(ProfileOf(*state.game).title_id), state.game->display_name);

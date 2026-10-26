@@ -51,7 +51,7 @@ $ReleaseJson = Join-Path $Site 'release.json'
 $PackageName = "MarvelUltimateAlliance-v$Version-windows-x64.zip"
 $Marker = [Text.Encoding]::ASCII.GetBytes("`n# old-install-marker`n")
 
-$Programs = @('marvel_ultimate_alliance.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
+$Programs = @('marvel_ultimate_alliance_bundle.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
     'marvel_ultimate_alliance_mua2.exe', 'trg-updater.exe')
 $HeldFile = 'marvel_ultimate_alliance_mua2.exe'
 
@@ -189,7 +189,7 @@ function Invoke-Serve {
 
 function Invoke-LaunchProgram([string]$Folder) {
     if (-not (Test-Path -LiteralPath $ReleaseJson)) { throw 'Run -Prepare first' }
-    $exe = Join-Path $Folder 'marvel_ultimate_alliance.exe'
+    $exe = Join-Path $Folder 'marvel_ultimate_alliance_bundle.exe'
     if (-not (Test-Path -LiteralPath $exe)) { throw "Missing $exe" }
     Set-TestEnvironment
     Write-Host "Starting $exe with MUA_UPDATE_TEST=1 and the fake release (the Serve terminal must be running)"
@@ -253,8 +253,8 @@ function Invoke-Verify {
         if (-not (Test-Path -LiteralPath (Join-Path $Install $program))) { $problems.Add("program missing: $program") }
     }
 
-    $exe = Join-Path $Install 'marvel_ultimate_alliance.exe'
-    $running = @(Get-Process -Name 'marvel_ultimate_alliance' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
+    $exe = Join-Path $Install 'marvel_ultimate_alliance_bundle.exe'
+    $running = @(Get-Process -Name 'marvel_ultimate_alliance_bundle' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
     Write-Host ''
     Write-Host "Bundle launcher from the install folder running: $(if ($running.Count) { 'yes' } else { 'no' })"
     if ($problems.Count) {

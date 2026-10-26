@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 
 #include "updater/update_job.h"
 
@@ -24,6 +25,7 @@ struct InstallOutcome {
 
 struct InstallOptions {
   std::function<bool(const std::filesystem::path& from, const std::filesystem::path& to)> replace;
+  std::function<void(std::string_view)> log;
 };
 
 bool ValidateInstallJob(const UpdateJob& job, std::string& error);

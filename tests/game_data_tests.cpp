@@ -183,7 +183,7 @@ void TestDispatch() {
   CHECK(Mua2().executable != Mua1().executable && Mua2().executable != Gold().executable);
   CHECK(mua::FindGame("mua2") == &Mua2() && Mua2().data_folder == "mua2");
   for (const mua::GameDefinition& game : mua::AllGames()) {
-    CHECK(game.executable != "marvel_ultimate_alliance.exe" && !game.executable.empty() && game.runtime_supported);
+    CHECK(game.executable != "marvel_ultimate_alliance_bundle.exe" && !game.executable.empty() && game.runtime_supported);
   }
 
   CHECK(mua::LauncherWanted(false, false, false, false));
@@ -197,7 +197,7 @@ void TestDispatch() {
 void TestWiring() {
   std::printf("the launcher program carries no game, and the programs are wired that way\n");
   const std::string cmake = ReadSource("../CMakeLists.txt");
-  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance \"\" launcher)"));
+  CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_bundle \"\" launcher)"));
   CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)"));
   CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold mua1-gold)"));
   CHECK(Has(cmake, "mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2 mua2)"));

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(marvel_ultimate_alliance VERSION 0.1.0 LANGUAGES C CXX)
-set(MUA_VERSION_SUFFIX "-dev")
+set(MUA_VERSION_SUFFIX "")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -173,6 +173,12 @@ set_target_properties(trg_launcher PROPERTIES CXX_STANDARD 17)
 target_compile_definitions(trg_launcher PRIVATE _CRT_SECURE_NO_WARNINGS)
 get_directory_property(MUA_TRG_VERSION DIRECTORY "${_trg_patched_dir}" DEFINITION PROJECT_VERSION)
 
+set(MUA_VERSION_DEFINITIONS
+    MUA_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    MUA_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    MUA_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    MUA_VERSION_SUFFIX="${MUA_VERSION_SUFFIX}")
+
 set(MUA_HOST_SOURCES
     src/main.cpp
     src/achievements_overlay.cpp
@@ -202,6 +208,7 @@ set(MUA_HOST_SOURCES
     src/log_path.cpp
     src/modal_dialog.cpp
     src/platform.cpp
+    src/port_version.cpp
     src/recomp_image.cpp
     src/session_log.cpp
     src/settings.cpp
@@ -346,7 +353,7 @@ function(mua_add_game_executable target module_key icon_key)
     add_dependencies(${target} mua_rexglue_check)
 
     target_compile_definitions(${target} PRIVATE
-        MUA_PORT_VERSION="${PROJECT_VERSION}${MUA_VERSION_SUFFIX}"
+        ${MUA_VERSION_DEFINITIONS}
         MUA_TRG_VERSION="${MUA_TRG_VERSION}"
         MUA_BUILD_CONFIG="$<CONFIG>"
         MUA_INPUT_ACTIVITY_CALLBACK=$<NOT:$<CONFIG:Debug>>)
@@ -368,6 +375,7 @@ endfunction()
 
 # The helper the launcher copies out of the installation and starts: it must run while the installed files are replaced.
 # The AppImage replaces itself instead (src/updater/update_platform.cpp).
+# Release packages ship the MSYS2 CLANG64 build of these sources (tools/build-updater.ps1).
 if(WIN32)
     add_executable(trg-updater WIN32
         src/updater/helper_main.cpp
@@ -378,23 +386,25 @@ if(WIN32)
         src/updater/update_platform.cpp
     )
     target_include_directories(trg-updater PRIVATE src)
+    target_compile_definitions(trg-updater PRIVATE MUA_UPDATER_HELPER_BUILD=1)
     target_link_libraries(trg-updater PRIVATE shell32)
+    target_link_options(trg-updater PRIVATE -static)
+    set_property(TARGET trg-updater PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     set_target_properties(trg-updater PROPERTIES OUTPUT_NAME "trg-updater")
-    mua_enable_thinlto(trg-updater)
 endif()
 
-mua_add_game_executable(marvel_ultimate_alliance "" launcher)
+mua_add_game_executable(marvel_ultimate_alliance_bundle "" launcher)
 mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)
 mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold mua1-gold)
 mua_add_game_executable(marvel_ultimate_alliance_mua2 mua2 mua2)
 
 add_custom_target(mua_rexglue_staging ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE:rex::gpu-xenos>"
-        "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
-    COMMAND ${MUA_REXGLUE_CHECK} ${MUA_REXGLUE_STAGED} "$<TARGET_FILE_DIR:marvel_ultimate_alliance>"
+        "$<TARGET_FILE_DIR:marvel_ultimate_alliance_bundle>"
+    COMMAND ${MUA_REXGLUE_CHECK} ${MUA_REXGLUE_STAGED} "$<TARGET_FILE_DIR:marvel_ultimate_alliance_bundle>"
     VERBATIM
 )
-add_dependencies(mua_rexglue_staging marvel_ultimate_alliance marvel_ultimate_alliance_mua1
+add_dependencies(mua_rexglue_staging marvel_ultimate_alliance_bundle marvel_ultimate_alliance_mua1
                  marvel_ultimate_alliance_mua1_gold marvel_ultimate_alliance_mua2)
 
 # Extracts an Xbox 360 disc image: tools/extract-disc.ps1, a Windows development step.

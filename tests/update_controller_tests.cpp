@@ -520,7 +520,7 @@ void TestDownloadVerifiedAndStaged() {
     CHECK(controller.snapshot().retry_available);
     CHECK(ReadFile(workspace / "trg-updater.exe") == std::string(kOldBundle) + ":trg-updater.exe");
     const std::string job = ReadFile(workspace / "job.txt");
-    CHECK(Contains(job, "\nrestart=" + Utf8Path(s.install / "marvel_ultimate_alliance.exe") + "\n"));
+    CHECK(Contains(job, "\nrestart=" + Utf8Path(s.install / "marvel_ultimate_alliance_bundle.exe") + "\n"));
     CHECK(!Contains(job, "restart=" + Utf8Path(s.install / "marvel_ultimate_alliance_mua")));
     CHECK(Contains(job, "install_dir=" + Utf8Path(s.install)));
     CHECK(Contains(job, "staging_dir=" + Utf8Path(workspace / "staging")));
@@ -653,7 +653,7 @@ void TestBadPackages() {
     entries.erase(entries.begin());
     s.zip = MakeZip(entries);
     CHECK(run(s) == UpdateState::kFailed);
-    CHECK(Contains(error, "marvel_ultimate_alliance.exe"));
+    CHECK(Contains(error, "marvel_ultimate_alliance_bundle.exe"));
     CHECK(untouched);
   }
   {

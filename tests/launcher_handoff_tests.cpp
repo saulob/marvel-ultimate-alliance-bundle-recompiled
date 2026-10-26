@@ -163,7 +163,7 @@ void TestGamePrograms() {
   std::set<std::string_view> programs;
   for (const GameDefinition& game : AllGames()) {
     CHECK(!game.executable.empty());
-    CHECK(game.executable != "marvel_ultimate_alliance.exe");
+    CHECK(game.executable != "marvel_ultimate_alliance_bundle.exe");
     programs.insert(game.executable);
   }
   CHECK(programs.size() == AllGames().size());

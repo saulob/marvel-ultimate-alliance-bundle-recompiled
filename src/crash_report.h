@@ -82,6 +82,8 @@ struct CrashReport {
   char runtime_renderer[160] = {};
 };
 
+void SetCrashGameVersion(const char* version);
+
 // Last runtime state shown in the crash report. Written once the startup diagnostics are logged.
 void SetCrashRuntimeState(const char* gpu, const char* display, const char* timing, const char* renderer);
 

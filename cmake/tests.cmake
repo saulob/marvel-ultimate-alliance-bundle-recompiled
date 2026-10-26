@@ -38,7 +38,7 @@ function(mua_add_test name group)
     add_dependencies(mua_${group}_tests ${_target})
 endfunction()
 
-set(MUA_TEST_BUILD_DEFINES MUA_PORT_VERSION="${PROJECT_VERSION}${MUA_VERSION_SUFFIX}" MUA_BUILD_CONFIG="$<CONFIG>")
+set(MUA_TEST_BUILD_DEFINES ${MUA_VERSION_DEFINITIONS} MUA_BUILD_CONFIG="$<CONFIG>")
 
 mua_add_test(aspect_ratio_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
@@ -82,6 +82,8 @@ mua_add_test(diagnostics_tests headless SOURCES src/diagnostics.cpp)
 mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12)
 mua_add_test(crash_report_tests headless SOURCES src/crash_report.cpp LIBS shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(user_data_tests headless SOURCES src/user_data.cpp)
+mua_add_test(port_version_tests headless SOURCES src/port_version.cpp
+    DEFINES ${MUA_VERSION_DEFINITIONS} MUA_EXPECTED_PORT_VERSION="${PROJECT_VERSION}${MUA_VERSION_SUFFIX}")
 
 set(MUA_UPDATER_TEST_SOURCES
     src/updater/github_release.cpp
@@ -95,7 +97,7 @@ set(MUA_UPDATER_TEST_SOURCES
     src/updater/version.cpp
     src/updater/third_party/miniz/miniz.c
 )
-mua_add_test(update_tests headless SOURCES ${MUA_UPDATER_TEST_SOURCES} LIBS shell32)
+mua_add_test(update_tests headless SOURCES ${MUA_UPDATER_TEST_SOURCES} LIBS shell32 DEFINES MUA_UPDATER_HELPER_BUILD=1)
 # TRG's platform and download sources without its ImGui dependency; C++17 like the launcher library.
 add_library(mua_trg_net_support STATIC EXCLUDE_FROM_ALL
     "${_trg_patched_dir}/src/platform.cpp" "${_trg_patched_dir}/src/download.cpp")
@@ -108,7 +110,14 @@ endif()
 # Serves its test releases from a Winsock loopback server.
 if(WIN32)
     mua_add_test(update_controller_tests headless
-        SOURCES ${MUA_UPDATER_TEST_SOURCES} src/updater/update_controller.cpp LIBS mua_trg_net_support ws2_32)
+        SOURCES ${MUA_UPDATER_TEST_SOURCES} src/updater/update_controller.cpp LIBS mua_trg_net_support ws2_32
+        DEFINES MUA_UPDATER_HELPER_BUILD=1)
+    # The real trg-updater.exe run from a temporary folder; it takes the path of another trg-updater.exe to test instead.
+    mua_add_test(update_helper_tests headless LIBS shell32 DEFINES MUA_UPDATER_EXE="$<TARGET_FILE:trg-updater>")
+    # The test is also the program the helper restarts, which the helper starts without a console.
+    set_target_properties(mua_update_helper_tests PROPERTIES WIN32_EXECUTABLE ON)
+    target_link_options(mua_update_helper_tests PRIVATE "-Wl,/entry:mainCRTStartup")
+    add_dependencies(mua_update_helper_tests trg-updater)
 endif()
 mua_add_test(game_library_tests headless
     SOURCES src/game_definition.cpp src/game_files.cpp src/game_library.cpp src/game_profile.cpp src/xex_identity.cpp)
@@ -138,7 +147,7 @@ mua_add_test(xma_packet_continuity_tests headless
 # The staged SDK source, not the installed headers, so the test checks the patched helpers before a runtime build.
 target_include_directories(mua_xma_packet_continuity_tests BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src/include")
 mua_add_test(runtime_config_tests headless
-    DEFINES MUA_STAGED_CONFIG="$<TARGET_FILE_DIR:marvel_ultimate_alliance>/marvel_ultimate_alliance.toml"
+    DEFINES MUA_STAGED_CONFIG="$<TARGET_FILE_DIR:marvel_ultimate_alliance_bundle>/marvel_ultimate_alliance.toml"
             MUA_GPU_PLUGIN_NAME="$<TARGET_FILE_NAME:rex::gpu-xenos>"
             MUA_RUNTIME_NAME="$<TARGET_FILE_NAME:rex::runtime>")
 
@@ -157,7 +166,7 @@ mua_add_test(filesystem_mapping_tests runtime LIBS rex::runtime)
 mua_add_test(settings_tests runtime
     SOURCES src/settings.cpp src/crash_report.cpp src/diagnostics.cpp src/game_definition.cpp src/game_files.cpp
             src/game_profile.cpp src/graphics_adapters.cpp src/input_summary.cpp src/log_filter.cpp
-            src/active_log.cpp src/log_path.cpp src/platform.cpp src/session_log.cpp src/system_info.cpp
+            src/active_log.cpp src/log_path.cpp src/platform.cpp src/port_version.cpp src/session_log.cpp src/system_info.cpp
             src/xex_identity.cpp
     LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization
     DEFINES ${MUA_TEST_BUILD_DEFINES})

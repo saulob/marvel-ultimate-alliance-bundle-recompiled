@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -54,6 +55,17 @@ ExitCode CodeFor(trg::update::InstallStatus status) {
   return kInvalidJob;
 }
 
+std::string ArgumentsText(const std::vector<std::string>& arguments) {
+  std::string text;
+  for (const std::string& argument : arguments) {
+    if (!text.empty()) {
+      text += ' ';
+    }
+    text += argument;
+  }
+  return text;
+}
+
 }  // namespace
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
@@ -80,37 +92,52 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     log.flush();
   };
 
+  write("trg-updater starting");
+  write("job: " + trg::update::Utf8Path(job_path));
+
   std::string error;
   const std::optional<trg::update::UpdateJob> job = trg::update::ReadUpdateJob(job_path, error);
   if (!job) {
-    write(error);
+    write("job read failed: " + error);
+    write("exit code: " + std::to_string(kBadJob));
     return kBadJob;
   }
   if (!job->log_file.empty()) {
     log.close();
     log.open(job->log_file, std::ios::binary | std::ios::app);
   }
-  write("update started");
+  write("install root: " + trg::update::Utf8Path(job->install_dir));
+  write("staging root: " + trg::update::Utf8Path(job->staging_dir));
+  write("manifest: " + trg::update::Utf8Path(job->manifest_file));
+  write("restart executable: " + trg::update::Utf8Path(job->restart_executable));
+  write("restart arguments: " + ArgumentsText(job->restart_arguments));
+  write("waiting for parent pid " + std::to_string(job->parent_pid));
   if (!trg::update::WaitForProcess(job->parent_pid, 120000, error)) {
-    write(error);
+    write("parent wait failed: " + error);
+    write("exit code: " + std::to_string(kParentWaitFailed));
     return kParentWaitFailed;
   }
-  write("launcher exited");
+  write("parent exited");
 
-  const trg::update::InstallOutcome outcome = trg::update::InstallFiles(*job, {}, true);
+  trg::update::InstallOptions options;
+  options.log = write;
+  const trg::update::InstallOutcome outcome = trg::update::InstallFiles(*job, options, true);
+  const ExitCode code = CodeFor(outcome.status);
   if (outcome.status == trg::update::InstallStatus::kSuccess) {
+    write("install result: success");
     write("update installed and restarted");
     std::error_code ec;
     std::filesystem::remove(job_path, ec);
   } else {
-    write(outcome.error);
+    write("install result: " + outcome.error);
     std::string recovery;
     if (trg::update::LaunchApplication(job->restart_executable, job->restart_arguments, job->install_dir,
-                                       recovery)) {
+                                       recovery, true)) {
       write("previous launcher restarted");
     } else {
       write("could not restart the previous launcher: " + recovery);
     }
   }
-  return CodeFor(outcome.status);
+  write("exit code: " + std::to_string(code));
+  return code;
 }

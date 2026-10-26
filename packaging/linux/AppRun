@@ -18,7 +18,7 @@ fi
 case "${MUA_APPIMAGE_PROGRAM:-}" in
   marvel_ultimate_alliance_mua1 | marvel_ultimate_alliance_mua1_gold | marvel_ultimate_alliance_mua2)
     PROGRAM="$MUA_APPIMAGE_PROGRAM" ;;
-  *) PROGRAM=marvel_ultimate_alliance ;;
+  *) PROGRAM=marvel_ultimate_alliance_bundle ;;
 esac
 unset MUA_APPIMAGE_PROGRAM
 

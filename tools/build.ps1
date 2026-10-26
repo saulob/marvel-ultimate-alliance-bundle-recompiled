@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds build\marvel_ultimate_alliance.exe (the launcher), build\marvel_ultimate_alliance_mua1.exe (Marvel Ultimate
+  Builds build\marvel_ultimate_alliance_bundle.exe (the launcher), build\marvel_ultimate_alliance_mua1.exe (Marvel Ultimate
   Alliance), build\marvel_ultimate_alliance_mua1_gold.exe (Gold Edition) and build\marvel_ultimate_alliance_mua2.exe
   (Marvel Ultimate Alliance 2) with Visual Studio's clang++, lld-link, CMake and Ninja. Only -Run launches the
   launcher.
@@ -36,8 +36,8 @@ $BuildDir = if (-not $BuildDir) { Join-Path $Root 'build' } elseif ([IO.Path]::I
 $SdkRoot = Join-Path $Root 'tools\rexglue\win-amd64'
 $GameData = Join-Path $Root 'game\extracted'
 $UserData = Join-Path $BuildDir 'user_data'
-$Exe = Join-Path $BuildDir 'marvel_ultimate_alliance.exe'
-$Programs = @('marvel_ultimate_alliance.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
+$Exe = Join-Path $BuildDir 'marvel_ultimate_alliance_bundle.exe'
+$Programs = @('marvel_ultimate_alliance_bundle.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
     'marvel_ultimate_alliance_mua2.exe')
 # One recompiled module per game: the XEX it is generated from, that XEX's SHA-256 and the cache entry CMake records.
 $Modules = @(
@@ -74,7 +74,7 @@ function Assert-RuntimeReady {
     Write-Host ''
     Write-Host 'RUNTIME CHECK FAILED' -ForegroundColor Red
     foreach ($problem in $problems) { Write-Host "  $problem" -ForegroundColor Red }
-    throw 'The files next to marvel_ultimate_alliance.exe are not the current ReXGlue runtime and GPU plugin from tools\rexglue'
+    throw 'The files next to marvel_ultimate_alliance_bundle.exe are not the current ReXGlue runtime and GPU plugin from tools\rexglue'
 }
 
 function Assert-GameDataComplete {
@@ -190,9 +190,9 @@ foreach ($program in $Programs[1..($Programs.Count - 1)]) { Write-Host "        
 
 if (-not $Run) { return }
 
-$running = Get-Process -Name 'marvel_ultimate_alliance' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe }
+$running = Get-Process -Name 'marvel_ultimate_alliance_bundle' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe }
 if ($running) {
-    Write-Warning "marvel_ultimate_alliance.exe is already running (PID $($running.Id -join ', ')); not launching another copy."
+    Write-Warning "marvel_ultimate_alliance_bundle.exe is already running (PID $($running.Id -join ', ')); not launching another copy."
     return
 }
 

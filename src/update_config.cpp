@@ -7,6 +7,7 @@
 
 #include <rex/logging.h>
 
+#include "port_version.h"
 #include "update_bundle.h"
 #include "updater/update_paths.h"
 #include "updater/update_platform.h"
@@ -52,9 +53,9 @@ std::optional<std::string> TestVariable(const char* name) {
 
 trg::update::UpdateConfig MakeUpdateConfig(const std::filesystem::path& install_dir) {
   trg::update::UpdateConfig config;
-  config.current_version = MUA_PORT_VERSION;
+  config.current_version = PortVersion();
   config.releases_url = kUpdateReleasesUrl;
-  config.user_agent = std::string("MarvelUltimateAlliance-Updater/") + MUA_PORT_VERSION;
+  config.user_agent = "MarvelUltimateAlliance-Updater/" + PortVersion();
   config.install_dir = install_dir;
   config.restart_arguments = UpdateRestartArguments(trg::update::CurrentProcessArguments());
 

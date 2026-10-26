@@ -29,7 +29,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${MUA_WORK:-$HOME/mua-linux-build}"
 PRESET=linux-amd64-release
 MAX_GLIBC=2.31
-BIN_NAME=marvel_ultimate_alliance
+APP_NAME=marvel_ultimate_alliance
+BIN_NAME=marvel_ultimate_alliance_bundle
 GAME_PROGRAMS=(marvel_ultimate_alliance_mua1 marvel_ultimate_alliance_mua1_gold marvel_ultimate_alliance_mua2)
 GAME_ICONS=(mua1 mua1-gold mua2)
 PROGRAMS=("$BIN_NAME" "${GAME_PROGRAMS[@]}")
@@ -77,23 +78,23 @@ NAME="MarvelUltimateAlliance-v$VERSION-x86_64"
 
 EXPECTED=".DirIcon
 AppRun
-$BIN_NAME.png
+$APP_NAME.png
 $APP_ID.desktop"
 for program in "${PROGRAMS[@]}"; do EXPECTED+=$'\n'"usr/bin/$program"; done
 for art in "${HEADER_ART[@]}"; do EXPECTED+=$'\n'"usr/bin/assets/launcher/$art"; done
 EXPECTED+="
-usr/bin/$BIN_NAME.toml
+usr/bin/$APP_NAME.toml
 usr/bin/librexgpu-xenos.so
 usr/bin/librexruntime.so
 usr/lib/libgcc_s.so.1
 usr/lib/libstdc++.so.6
-usr/share/doc/$BIN_NAME/ReXGlue-LICENSE.txt
-usr/share/doc/$BIN_NAME/THIRD-PARTY-LICENSES-LINUX.txt
-usr/share/doc/$BIN_NAME/THIRD-PARTY-LICENSES.txt
-usr/share/doc/$BIN_NAME/libstdc++-copyright.txt
-usr/share/icons/hicolor/scalable/apps/$BIN_NAME.svg"
-for size in 16 24 32 48 64 128 256 512; do EXPECTED+=$'\n'"usr/share/icons/hicolor/${size}x$size/apps/$BIN_NAME.png"; done
-for program in "${GAME_PROGRAMS[@]}"; do EXPECTED+=$'\n'"usr/share/icons/hicolor/256x256/apps/$program.png"; done
+usr/share/doc/$APP_NAME/ReXGlue-LICENSE.txt
+usr/share/doc/$APP_NAME/THIRD-PARTY-LICENSES-LINUX.txt
+usr/share/doc/$APP_NAME/THIRD-PARTY-LICENSES.txt
+usr/share/doc/$APP_NAME/libstdc++-copyright.txt
+usr/share/icons/hicolor/scalable/apps/$APP_NAME.svg"
+for size in 16 24 32 48 64 128 256 512; do EXPECTED+=$'\n'"usr/share/icons/hicolor/${size}x$size/apps/$APP_NAME.png"; done
+for program in "${PROGRAMS[@]}"; do EXPECTED+=$'\n'"usr/share/icons/hicolor/256x256/apps/$program.png"; done
 
 EXPECTED="$(printf '%s\n' "$EXPECTED" | LC_ALL=C sort)"
 
@@ -257,18 +258,18 @@ echo "== Build ($PRESET)"
 BIN="$WORK/out/build/$PRESET"
 [ "$CLEAN" = 1 ] && rm -rf "$BIN"
 (cd "$WORK" && cmake --preset "$PRESET" >/dev/null && cmake --build --preset "$PRESET")
-for f in "${PROGRAMS[@]}" librexruntime.so librexgpu-xenos.so $BIN_NAME.toml "${HEADER_ART[@]/#/assets/launcher/}"; do
+for f in "${PROGRAMS[@]}" librexruntime.so librexgpu-xenos.so $APP_NAME.toml "${HEADER_ART[@]/#/assets/launcher/}"; do
   [ -f "$BIN/$f" ] || fail "build output is missing $f"
 done
 bash "$PATCHED" --check "$SDK" --staged "$BIN" || fail "the build folder does not hold the patched ReXGlue libraries"
 
 echo "== AppDir"
 APPDIR="$WORK/AppDir"
-DOC="$APPDIR/usr/share/doc/$BIN_NAME"
+DOC="$APPDIR/usr/share/doc/$APP_NAME"
 SYMBOLS="$OUT_DIR/$NAME-symbols"
 rm -rf "$APPDIR" "$SYMBOLS"
 mkdir -p "$APPDIR/usr/bin/assets/launcher" "$APPDIR/usr/lib" "$DOC" "$SYMBOLS"
-cp "$BIN/librexruntime.so" "$BIN/librexgpu-xenos.so" "$BIN/$BIN_NAME.toml" "$APPDIR/usr/bin/"
+cp "$BIN/librexruntime.so" "$BIN/librexgpu-xenos.so" "$BIN/$APP_NAME.toml" "$APPDIR/usr/bin/"
 for art in "${HEADER_ART[@]}"; do cp "$BIN/assets/launcher/$art" "$APPDIR/usr/bin/assets/launcher/"; done
 # The debug sections carry the build machine's folders, so they stay in $SYMBOLS.
 for program in "${PROGRAMS[@]}"; do
@@ -293,23 +294,24 @@ CXX_COPYRIGHT=/usr/share/doc/libstdc++6/copyright
 cp "$CXX_COPYRIGHT" "$DOC/libstdc++-copyright.txt"
 cp "$WORK/packaging/linux/AppRun" "$WORK/packaging/linux/$APP_ID.desktop" "$APPDIR/"
 # The icon is the root file the .desktop names, the .DirIcon file managers show, and the theme the desktop integrates.
-# Each game program loads its own 256 px icon as its window icon.
+# Each program loads its own 256 px icon as its window icon.
 ICONS="$WORK/packaging/icons"
 THEME="$APPDIR/usr/share/icons/hicolor"
 for size in 16 24 32 48 64 128 256 512; do
   mkdir -p "$THEME/${size}x${size}/apps"
-  cp "$ICONS/launcher/app-icon-$size.png" "$THEME/${size}x${size}/apps/$BIN_NAME.png"
+  cp "$ICONS/launcher/app-icon-$size.png" "$THEME/${size}x${size}/apps/$APP_NAME.png"
 done
+cp "$ICONS/launcher/app-icon-256.png" "$THEME/256x256/apps/$BIN_NAME.png"
 for i in "${!GAME_PROGRAMS[@]}"; do
   cp "$ICONS/${GAME_ICONS[$i]}/app-icon-256.png" "$THEME/256x256/apps/${GAME_PROGRAMS[$i]}.png"
 done
 mkdir -p "$THEME/scalable/apps"
-cp "$ICONS/app-icon.svg" "$THEME/scalable/apps/$BIN_NAME.svg"
-cp "$ICONS/launcher/app-icon-256.png" "$APPDIR/$BIN_NAME.png"
+cp "$ICONS/app-icon.svg" "$THEME/scalable/apps/$APP_NAME.svg"
+cp "$ICONS/launcher/app-icon-256.png" "$APPDIR/$APP_NAME.png"
 cp "$ICONS/launcher/app-icon-256.png" "$APPDIR/.DirIcon"
 chmod 755 "$APPDIR/AppRun" "${PROGRAMS[@]/#/$APPDIR/usr/bin/}"
 chmod 644 "$APPDIR/"*.desktop "$APPDIR/"*.png "$APPDIR/.DirIcon" "$APPDIR/usr/bin/"*.so \
-  "$APPDIR/usr/bin/$BIN_NAME.toml" "$APPDIR/usr/bin/assets/launcher/"*.png "$APPDIR/usr/lib/"* "$DOC/"*
+  "$APPDIR/usr/bin/$APP_NAME.toml" "$APPDIR/usr/bin/assets/launcher/"*.png "$APPDIR/usr/lib/"* "$DOC/"*
 find "$THEME" -type f -exec chmod 644 {} +
 bash "$PATCHED" --check "$SDK" --staged "$APPDIR/usr/bin" || fail "the AppDir does not hold the patched ReXGlue libraries"
 

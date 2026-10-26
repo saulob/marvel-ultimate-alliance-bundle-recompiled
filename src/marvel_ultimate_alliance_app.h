@@ -46,6 +46,7 @@
 #include "log_path.h"
 #include "modal_dialog.h"
 #include "platform.h"
+#include "port_version.h"
 #include "recomp_image.h"
 #include "session_log.h"
 #include "settings.h"
@@ -116,7 +117,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     mua::RemoveOldSessionLogs();
     const mua::ApplicationIdentity identity{
         .product = "Marvel Ultimate Alliance",
-        .version = MUA_PORT_VERSION,
+        .version = mua::PortVersion(),
         .build_config = mua::BuildConfigurationName(),
         .architecture = mua::ArchitectureName(),
         .sdk = REXGLUE_VERSION_STRING,

@@ -55,7 +55,7 @@ void TestWiring() {
 
 using Args = std::vector<std::string>;
 
-constexpr const char* kMountedLauncher = "/tmp/.mount_MarvelAbCdEf/usr/bin/marvel_ultimate_alliance";
+constexpr const char* kMountedLauncher = "/tmp/.mount_MarvelAbCdEf/usr/bin/marvel_ultimate_alliance_bundle";
 constexpr const char* kMountedGame = "/tmp/.mount_MarvelAbCdEf/usr/bin/marvel_ultimate_alliance_mua2";
 constexpr const char* kAppImage = "/home/deck/Games/Marvel Ultimate Alliance/MarvelUltimateAlliance-v0.1.0-x86_64.AppImage";
 const Args kExtra = {"--mua_skip_launcher=true", "--mua_launcher_handoff=true"};
@@ -75,7 +75,7 @@ void TestAppImageUnset() {
   std::printf("outside an AppImage the game's program starts directly\n");
   const std::string game = "/home/user/my games/mua/marvel_ultimate_alliance_mua1";
   for (const char* appimage : {static_cast<const char*>(nullptr), ""}) {
-    const auto command = mua::MakeRelaunchCommand({"./marvel_ultimate_alliance"}, appimage, game, kExtra);
+    const auto command = mua::MakeRelaunchCommand({"./marvel_ultimate_alliance_bundle"}, appimage, game, kExtra);
     CHECK(command.has_value());
     CHECK(command->executable == game);
     CHECK((command->argv == Args{game, kExtra[0], kExtra[1]}));
@@ -97,7 +97,7 @@ void TestAppRunSelectsOnlyBundlePrograms() {
                               "marvel_ultimate_alliance_mua2"}) {
     CHECK(Has(apprun, program));
   }
-  CHECK(Has(apprun, "*) PROGRAM=marvel_ultimate_alliance ;;"));
+  CHECK(Has(apprun, "*) PROGRAM=marvel_ultimate_alliance_bundle ;;"));
   CHECK(Has(apprun, "unset MUA_APPIMAGE_PROGRAM"));
   CHECK(Has(apprun, "exec \"$HERE/usr/bin/$PROGRAM\" \"$@\""));
   const std::string platform = ReadFile(std::string(MUA_SRC_DIR) + "/platform.cpp");

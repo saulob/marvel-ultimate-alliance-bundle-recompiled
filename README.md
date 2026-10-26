@@ -1,133 +1,152 @@
-# Marvel Ultimate Alliance Recompiled
+<div align="center">
 
-Native PC recompilation of Marvel Ultimate Alliance for Xbox 360 with [ReXGlue](https://github.com/rexglue/rexglue-sdk).
-Targets: Marvel Ultimate Alliance Gold Edition (title ID `415607DA`, media ID `5A20A6D4`), Marvel Ultimate Alliance
-(title ID `415607DA`, media ID `26848425`) and Marvel Ultimate Alliance 2 (title ID `4156082F`, media ID `39B3E2C9`).
+# Marvel Ultimate Alliance - PC Port
 
-Each game is recompiled from its own `default.xex` into its own module (`generated\mua1`, `generated\mua1-gold`,
-`generated\mua2`) and each module is its own program: `marvel_ultimate_alliance_mua1.exe`,
-`marvel_ultimate_alliance_mua1_gold.exe` and `marvel_ultimate_alliance_mua2.exe`.
-`marvel_ultimate_alliance.exe` is the launcher: it holds no game module, and PLAY starts the selected game's program.
-Each game keeps its saves, profiles, achievement progress and own settings in its folder under `user_data`: `mua1`,
-`mua1_gold` and `mua2`. Earlier layouts (`user_data\games`, and Gold Edition's title folder directly
-in `user_data`) are moved there at the next start unless the new folder already exists.
+### Marvel Ultimate Alliance, its Gold Edition and Marvel Ultimate Alliance 2 for Xbox 360, running natively on Windows, and experimentally on Linux, through static recompilation, with the TRG launcher and modern PC options
 
-Status: the three games run on Windows 10 and 11 (x64, Direct3D 12). A native Linux x86_64 build (Vulkan) ships as one
-AppImage with the launcher and the three games; it is experimental, see [docs/linux.md](docs/linux.md).
+[![Latest release](https://img.shields.io/github/v/release/saulob/marvel-ultimate-alliance-recompiled?style=for-the-badge&label=release&color=D4A42C&labelColor=07101f&include_prereleases&cacheSeconds=300)](https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/saulob/marvel-ultimate-alliance-recompiled/total?style=for-the-badge&color=D4A42C&labelColor=07101f&cacheSeconds=300)](https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20experimental-00acc1?style=for-the-badge&labelColor=07101f)
 
-## Game files
+<sub>The original Xbox 360 game code, statically recompiled to native PC code with the <a href="https://github.com/rexglue/rexglue-sdk">ReXGlue SDK</a>. <b>No game files included</b>: bring your own Xbox 360 disc images.</sub>
 
-The games are not included. Each game has its own folder under `game`: `mua1`, `mua1-gold` and `mua2`. The Play page's
-"Install from package..." (or "Reinstall from package...") takes your own Xbox 360 disc image, checks its title ID and
-media ID against the selected game, extracts it next to the folder (`<game>.staging`), verifies it and only then swaps it
-in, keeping the previous install until the new one is in place. Gold Edition is also accepted in `game/extracted`, which
-`.\tools\extract-disc.ps1` fills; `game/mua1-gold` is preferred when both are valid. `--mua_games_root` names the folder
-holding the game folders (default: `game` next to the program; `build.ps1 -Run` passes the repository's `game`), and
-`--game_data_root` names one game's folder, which the game its files identify uses before the other folders.
+</div>
 
-The program mounts that folder as the console's `game:` and `D:` volume. Marvel Ultimate Alliance and Gold Edition open
-their own `.zip` archives from it (`z\assetsfb.zip`, `muadlc_content.zip`, `muadlc_titleupdate.zip`), so nothing is
-unpacked; Marvel Ultimate Alliance 2 reads its `packages\generated\*.pak` files in place.
+## Features
 
-## Launcher
+- **Three games in one bundle**: Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2, each recompiled from its own game code into its own program, chosen from one launcher.
+- **Native static recompilation**: the games' own code, not an emulator. Windows (Direct3D 12), plus an experimental Linux AppImage (Vulkan).
+- **TRG launcher** with a game selector, a disc image installer per game, and Display, Graphics, Gameplay, Achievements, Controls and About pages for the selected game.
+- **Launcher updates**: the launcher checks GitHub releases once per start and installs a newer release only when you choose UPDATE NOW. Game files, saves, settings and logs are kept.
+- **Display**: Windowed or Borderless Fullscreen (**F11**), window size, monitor and VSync.
+- **Native aspect ratios**: 16:9, 16:10, 21:9 and 32:9 ultrawide, 4:3 and 5:4. The games render at the chosen shape instead of stretching a 16:9 picture.
+- **Render resolution** from the original 720p picture up to 4x, independent of the window size.
+- **Upscaling (Windows)**: AMD FSR 1, with Native, Quality, Balanced and Performance modes that draw the game below the Render resolution and scale it up.
+- **HD Text (Marvel Ultimate Alliance and Gold Edition)**: the games' text and controller icons rebuilt at higher resolution to match the Render resolution.
+- **Frame rate**: 30 (the games' original rate), 60 (default), 90, 120, 144, 165, 240 or Unlimited, chosen per game.
+- **Graphics card selection (Windows), anti-aliasing and texture filtering** choices.
+- **Local saves and profiles** for each game, and **player names** for up to four local players.
+- **Offline achievements**: each game's achievements are kept on this PC, listed with **F7** and in the launcher. There is no Xbox Live connection.
+- **Xbox controller support** with no setup, and remappable keyboard play.
+- **Skip intro**: start directly at the title screen.
+- **In-game frame counter** (**F2**) and optional frame rate or render resolution in the window title.
+- **Diagnostics**: one log per session with the system, settings and frame timing, and a `CRASH REPORT` section after a crash on Windows.
+- **Portable user data**: saves, settings and achievements are in a `user_data` folder beside the program.
 
-The launcher is the TekRant Gaming launcher shared with the other ports. The selector under the header chooses the game;
-the pages beside it (Play, Display, Graphics, Gameplay, Achievements, Controls and About) belong to the selected game, and
-PLAY starts only a game that is installed and supported. The player's choices are written to `user_data\settings.toml`,
-loaded after the shipped `marvel_ultimate_alliance.toml`; settings that belong to one game, such as the frame rate, go to
-`user_data\<game>\game_settings.toml` and fall back to `settings.toml`. F11 switches between windowed and borderless fullscreen in
-the launcher and in the game. Hold Shift while starting to open the launcher when it is turned off.
+Online play and Xbox Live are not supported.
 
-The Gameplay page's Player names (`mua_player_1_name` .. `mua_player_4_name` in `settings.toml`) are shared by the three
-games: player N is local user N - 1, the controller in port N. They only change the names the games show; the profile,
-XUID, saves and achievements stay where they are.
+## What you need
 
-The Graphics page also has Upscaling: AMD FSR 1 scales the game's picture to the window, and its Quality, Balanced and
-Performance choices make the game draw a smaller back buffer, 1.5, 1.7 and 2 times smaller along each axis than the
-Render resolution, which costs less GPU time. Off, the default, keeps the plain scaling. Upscaling is Windows only.
+- **Windows:** Windows 10 or 11, 64-bit, and a DirectX 12 graphics card, with the latest Microsoft Visual C++ 2015-2022 Redistributable (x64). Most PCs have it.
+- **Linux (experimental):** 64-bit x86 Linux with glibc 2.31 or newer (Ubuntu 20.04 or later), a Vulkan driver and an X11 or Wayland desktop. See [docs/linux.md](docs/linux.md).
+- **Your own Xbox 360 disc image** (`.iso`) of each game you want to play, these exact versions:
 
-The Graphics page's HD Text (Marvel Ultimate Alliance and Gold Edition, On by default) rebuilds the game's text and
-controller icons at higher resolution: the games draw them from font atlases sized for 720p. At Render resolution 2x the
-atlases are rebuilt twice as large, at 3x and 4x four times as large, when the game starts; the font tables, layout,
-colours and animation stay the game's. They are served through an in-memory overlay of the game's asset archive
-(`z\assetsfb.wad`, Gold Edition `z\assetsfb.zip`); the game files are not changed and nothing taken from the game ships
-with the port. They take about 6 MB of memory at 2x and 24 MB at 3x and 4x. At 1x, or with HD Text Off
-(`mua_hd_text`), the game reads its own atlases. `hd_text_preview <game folder> <output folder> [render scale]
-[mua1|mua1-gold]` (CMake target `hd_text_preview`) writes the original and rebuilt atlases as PNG files without starting
-the game.
+| | Marvel Ultimate Alliance | Gold Edition | Marvel Ultimate Alliance 2 |
+| --- | --- | --- | --- |
+| Title ID | `415607DA` | `415607DA` | `4156082F` |
+| Media ID | `26848425` | `5A20A6D4` | `39B3E2C9` |
+| `default.xex` size | 3,850,240 bytes | 3,981,312 bytes | 12,664,832 bytes |
+| Game files | about 5.9 GB | about 5.9 GB | about 7.1 GB |
 
-While playing, F2 shows or hides the frame counter, F7 opens the achievements, and the window title shows the frame rate
-(Gameplay page). F9 writes the last seconds of audio activity to the log; the key still reaches the game. F10 and F12 are
-reserved and do nothing yet.
+`default.xex` SHA-256:
 
-## Reporting a problem
+- Marvel Ultimate Alliance: `44E5EEC135073224F2ABE09DEAEF765A6D130C81AA575D5C376338F470BEF92A`
+- Gold Edition: `06D1D7811E1668A5C16AFEF5102CA59B00684DC1EA6184849418F59F022B86B7`
+- Marvel Ultimate Alliance 2: `2613DC17AF39CEFACB7226855F62281D83B6E991C9D467D9E8EBB0A681AB0440`
 
-If a game does not start, crashes, runs slowly, or has a graphics, audio, save, controller or launcher problem, please
-open an [issue](https://github.com/saulob/marvel-ultimate-alliance-recompiled/issues). Attach the newest
-`marvel_ultimate_alliance_*.log` from the `logs` folder next to the program (the launcher's About page opens it), and say
-which game you played and what you were doing. The log already records the port version and build, the program and game,
-the game files' fingerprint, Windows version, CPU, graphics card, display, the Display and Graphics settings, the frame
-rate and where each frame's time goes every 10 seconds, shader compilation stalls, the audio device and the save calls,
-so there is no need to list them. For an audio glitch, press F9 right after it and then attach the log.
+The launcher checks the Title ID and Media ID when you pick the disc image and checks `default.xex` after extracting it. Any other version is refused, because each program is built for that exact game code.
 
-On Linux the log also records the distribution, kernel, glibc, Vulkan device and driver and the SDL video driver; please
-say whether you start the AppImage from Steam.
+## Installing
 
-**Detailed logging** (About page) is on by default; turned off, a normal session still writes a shorter log but discards
-it on exit, while a crash keeps it. After a crash the same log ends with a `CRASH REPORT` section; no separate crash file
-or minidump is written. The launcher and the game it starts share one log, and the newest 30 sessions are kept.
+1. Download **MarvelUltimateAlliance-v0.1.0-windows-x64.zip** from the [latest release](https://github.com/saulob/marvel-ultimate-alliance-recompiled/releases/latest) and extract it anywhere you can write to (not "Program Files"). Keep its files together: the launcher starts the game programs beside it.
+2. Run **marvel_ultimate_alliance_bundle.exe**. The launcher opens.
+3. Choose the game in the strip under the header: **MARVEL ULTIMATE ALLIANCE**, **GOLD EDITION** or **MARVEL ULTIMATE ALLIANCE 2**.
+4. On the **Play** page click **Install from package...** and pick that game's disc image.
+5. Wait until **Ready to play** appears. The game files are copied into the game's folder under `game` next to the program (`mua1`, `mua1-gold` or `mua2`).
+6. Press **PLAY**.
+
+**No game files are included** in the release. Each game is installed on its own; **Reinstall from package...** repairs a game's files and keeps your settings and saves. A new install is extracted and verified next to the old one, which is kept until the new one is in place.
+
+### Linux AppImage (experimental)
+
+Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage**, make it executable (`chmod +x`) and run it from a folder you can write to. It is a native Linux build that uses Vulkan, with the launcher and the three games in one x86_64 AppImage. The launcher works as on Windows; `game`, `logs` and `user_data` are created next to the AppImage file, outside the read-only AppImage. Where FUSE is not available, the AppImage unpacks itself to a temporary folder and runs from there. Upscaling and the Graphics card selector are Windows only in this release. It has been built and checked by script but not yet validated on a wide range of Linux PCs, and Steam Deck is not a tested target. Details, requirements and known limits are in [docs/linux.md](docs/linux.md).
+
+### Windows SmartScreen
+
+Windows may warn the first time you run the program, because the release is not digitally signed. Choose **More info**, then **Run anyway**.
+
+## The launcher
+
+The selector under the header chooses the game, and the pages beside it belong to that game. Your choices are saved to `settings.toml` in the `user_data` folder next to the program; the settings that belong to one game, such as the frame rate, are saved in that game's folder under `user_data`. To turn the launcher off, set **Show this launcher** to **Off** on the Play page. Hold **Shift** while starting to bring it back.
+
+- **Play**: disc image install and reinstall, status
+- **Display**: Display mode, Window size, Monitor, Aspect Ratio and VSync
+- **Graphics**: Graphics card (Windows), Render resolution, Upscaling (Windows), Anti-aliasing, Multisampling where it applies, Texture filtering, and HD Text (Marvel Ultimate Alliance and Gold Edition)
+- **Gameplay**: Skip intro, Frame rate, frame rate and render resolution in the title, frame counter, and Player names
+- **Achievements**: the selected game's unlocked achievements and gamerscore
+- **Controls**: keyboard on or off, every key remappable, and **Keyboard defaults** to restore the standard layout
+- **About**: versions, folders (game files, saves and settings, logs), the settings file, **Detailed logging** and **Open logs folder**
+
+**Render resolution** draws the game at a multiple of its own picture (Original, 2x, 3x or 4x, sized for the chosen aspect ratio) and then scales it to the window. **Upscaling** (Windows) uses AMD FSR 1 to scale the picture to the window; Quality, Balanced and Performance draw the game 1.5, 1.7 and 2 times smaller along each axis than the Render resolution, which costs less GPU time. On Linux the game always draws at the Render resolution.
+
+**HD Text** (Marvel Ultimate Alliance and Gold Edition, On by default) rebuilds the games' font atlases at 2x the size at Render resolution 2x, and at 4x the size at 3x and 4x, when the game starts. The layout, colours and animation stay the game's, the game files are not changed, and nothing taken from the game ships with the port. It uses about 6 MB of memory at 2x and 24 MB at 3x and 4x. HD Text is not available for Marvel Ultimate Alliance 2.
+
+**Frame rate** 30 is the games' original rate; 60 is the default, and the higher rates and Unlimited are for high refresh rate displays. The setting is kept per game.
+
+**Player names** are shared by the three games: player N is the controller in port N. They only change the names the games show; profiles, saves and achievements stay where they are.
+
+## Hotkeys
+
+| Key | While playing |
+| --- | --- |
+| **F11** | Windowed or Borderless Fullscreen (in the launcher too) |
+| **F2** | Show or hide the frame counter |
+| **F7** | Achievements |
+| **F9** | Write the last seconds of audio activity to the log, for an audio problem report |
+
+During gameplay the mouse cursor follows the last input device: mouse activity shows it, keyboard or controller activity hides it, and overlays show it.
+
+## Saves, achievements and settings
+
+Each game keeps its saves, profile, achievements and own settings in its folder under `user_data`: `mua1`, `mua1_gold` and `mua2`. Copy the whole program folder to another PC to take them with you. To update by hand, extract the new version over the old folder, or move `user_data` (and `game`) into the new one: deleting the old folder deletes `user_data` with it.
+
+Achievements are unlocked offline and kept on this PC: 46 in Marvel Ultimate Alliance, 58 in Gold Edition and 50 in Marvel Ultimate Alliance 2.
 
 ## Updates
 
-The launcher checks the latest GitHub release of `saulob/marvel-ultimate-alliance-recompiled` once per start. A newer
-release shows a banner in the header; nothing is installed until UPDATE NOW has downloaded and verified the package and
-RESTART TO UPDATE is pressed. The package is `MarvelUltimateAlliance-v<version>-windows-x64.zip`; its SHA-256 comes from
-the release asset's digest or the matching `.sha256` asset and must match before anything is unpacked. The update
-replaces the whole bundle together (the launcher, the three game programs, `trg-updater.exe`, the runtime and GPU plugin,
-the shipped config, the launcher assets and the licenses) through `trg-updater.exe`, which waits for the launcher to exit,
-backs up what it replaces, rolls back on any failure and restarts `marvel_ultimate_alliance.exe`. `game`, `user_data`,
-`logs`, `cache` and `settings.toml` are never part of a package and are refused if one carries them. The Linux
-AppImage looks for `MarvelUltimateAlliance-v<version>-x86_64.AppImage` and its `.sha256` instead, replaces itself after
-the same check and starts the new AppImage; the folders next to it are not touched.
+The launcher checks the latest GitHub release once per start. A newer release shows a banner in the header; nothing is installed until **UPDATE NOW** has downloaded and verified the package and **RESTART TO UPDATE** is pressed. On Windows the update is `MarvelUltimateAlliance-v<version>-windows-x64.zip`: its SHA-256 must match the release's checksum before anything is unpacked, and `trg-updater.exe` replaces the launcher, the three game programs, the runtime and the other bundle files together, backs up what it replaces, rolls back on any failure and restarts the launcher. On Linux the AppImage downloads `MarvelUltimateAlliance-v<version>-x86_64.AppImage`, checks it the same way, replaces itself and starts the new AppImage. `game`, `user_data`, saves, settings and logs are never replaced.
 
-`.\tools\package-release.ps1` builds the Release configuration into `build-release` and writes the package and its
-`.sha256` into `dist`; the updater only finds a package named for a plain version, so a release sets `MUA_VERSION_SUFFIX`
-to an empty string. `.\tools\package-release.ps1 -VerifyOnly <folder>` checks a staged folder.
+## Reporting problems
 
-`.\tools\update-test.ps1` tests an update without publishing anything: it prepares a fake release v9.9.9 and a disposable
-copy of the build under `%TEMP%\mua-update-test`, serves the release on 127.0.0.1 and starts the launcher with
-`MUA_UPDATE_TEST=1` and `MUA_UPDATE_TEST_RELEASE_JSON`. In that mode only, the package may come from `http://127.0.0.1`;
-the SHA-256 check is the normal one. `MUA_UPDATE_TEST_CURRENT_VERSION` and `MUA_UPDATE_TEST_ASSET_SHA256` override the
-installed version and the expected digest. See the script's help for the steps, including a forced rollback.
+If a game does not start, crashes, runs slowly, or has a graphics, audio, save, controller or launcher problem, please open an [issue](https://github.com/saulob/marvel-ultimate-alliance-recompiled/issues). Attach the newest `marvel_ultimate_alliance_*.log` file from the `logs` folder next to the program (the launcher's About page opens the folder), and say which game you played and what you were doing. The log already records the port version, the game and its files' fingerprint, the system, graphics card and driver, display, the launcher settings and the frame timing, so there is no need to list them. For an audio glitch, press **F9** right after it and then attach the log.
 
-## Linux
+The launcher and the game it starts write to the same log for one session, and the newest 30 sessions are kept. **Detailed logging** (About page) is on by default; turned off, a normal session's log is discarded on exit, while a crash keeps it. After a crash on Windows the log ends with a `CRASH REPORT` section; no separate crash file or minidump is written. On Linux the log also records the distribution, kernel, glibc, Vulkan device and driver; please say whether you start the AppImage from Steam.
 
-The Linux AppImage, `MarvelUltimateAlliance-v<version>-x86_64.AppImage`, needs x86_64 Linux with glibc 2.31 or newer
-(Ubuntu 20.04 or later) and a Vulkan driver. Make it executable and run it; `game`, `logs` and `user_data` stay next to
-it. Where FUSE is unavailable it unpacks itself and runs. [docs/linux.md](docs/linux.md) has the details, the known
-limits and how releases are built (`tools/package-linux.sh` on Ubuntu 20.04, `tools/build.sh` and `tools/test.sh` for
-plain builds). The Linux build compiles the code `tools/codegen.ps1` generated on Windows.
+## Building it yourself
 
-## Build (Windows)
+The recompiled C++ is generated from your own game files, so the repository does not contain it.
 
 ```powershell
-.\tools\build.ps1        # sets up the SDK, builds the patched runtime, generates the recompiled code and configures CMake when needed, then builds
-.\tools\build.ps1 -Run   # the same, then starts the game with game\extracted
-.\tools\test.ps1         # headless unit tests
-.\tools\test.ps1 -GameDir game\extracted   # also checks that folder against the supported profile and the D: mapping
-.\tools\codegen.ps1      # forces a codegen run for every game, with logs in generated\codegen-<game>.log
-python tools\find-missing-functions.py --game mua1 --apply-high   # indirect-only functions -> config\mua1\discovered-functions.toml (also mua1-gold, mua2)
+.\tools\build.ps1          # sets up the SDK, builds the patched runtime, generates the recompiled code when needed, then builds
+.\tools\test.ps1           # headless unit tests
+.\tools\codegen.ps1        # forces a codegen run for every game, with logs in generated\codegen-<game>.log
+.\tools\package-release.ps1   # Release build and the release ZIP with its .sha256 in dist\ (publishes nothing)
 ```
 
-Needs Visual Studio with the C++ Clang tools and the TRG Launcher: add the `third_party/trg-launcher` submodule or
-pass `-TrgLauncherDir`.
+- Needs Visual Studio with the C++ Clang tools and the TRG launcher: add `third_party\trg-launcher` or pass `-TrgLauncherDir`.
+- Each game's `default.xex` goes in its folder under `game` (`game\mua1`, `game\extracted` for Gold Edition, `game\mua2`); `.\tools\extract-disc.ps1` fills `game\extracted`.
+- The ReXGlue runtime and Xenos GPU plugin in `tools\rexglue` are built from the pinned ReXGlue SDK v0.10.0 source with the patches in `patches\rexglue-sdk`. `tools\build.ps1` rebuilds them whenever the patches or the compiler change and refuses to start with other copies next to the executable.
+- The Linux AppImage is built on Ubuntu 20.04 with `tools/package-linux.sh`, from the code `tools/codegen.ps1` generated on Windows. See [docs/linux.md](docs/linux.md).
 
-The runtime and Xenos GPU plugin in `tools\rexglue` are built from the pinned ReXGlue v0.10.0 source with the patches in
-`patches\rexglue-sdk` (the first build fetches the source and takes a while). `tools\build.ps1` rebuilds them whenever
-the patches or the compiler change and refuses to start with other copies next to the executable. The Debug runtime
-stays the stock one.
+## Credits
 
-A build with the same patches does not touch ReXGlue. After a patch change it keeps the source and CMake/Ninja tree in
-`out\rexglue-sdk-src`, restores the time of patched files whose content did not change and rebuilds only the rest.
-`.\tools\build.ps1 -Clean` cleans `build\` only (keeping `build\user_data`); `.\tools\build-patched-rexruntime.ps1
--FreshBuildTree` is the separate full reset of the ReXGlue build.
+- Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2 are games by their original rights holders. This is an unofficial fan-made PC port. It is not affiliated with or endorsed by them, and it contains none of their files.
+- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) for the recompiler and runtime (BSD 3-Clause)
+- [TRG Launcher](https://github.com/TekRantGaming/trg-launcher), the launcher interface, pinned at v1.1.0 (revision b384a28), licensed under the MIT License
+- The licenses of the libraries the release includes are in the `licenses` folder of the ZIP, and in `usr/share/doc/marvel_ultimate_alliance` inside the AppImage
+
+## Licenses
+
+Third-party components retain their respective licenses and notices. See [licenses/ReXGlue-LICENSE.txt](packaging/licenses/ReXGlue-LICENSE.txt), [licenses/THIRD-PARTY-LICENSES.txt](packaging/licenses/THIRD-PARTY-LICENSES.txt) and, for the Linux AppImage, [licenses/THIRD-PARTY-LICENSES-LINUX.txt](packaging/licenses/THIRD-PARTY-LICENSES-LINUX.txt).
+
+No game files are included. Marvel Ultimate Alliance, Marvel Ultimate Alliance 2 and their assets are not covered by this project.

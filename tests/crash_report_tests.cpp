@@ -141,12 +141,12 @@ void TestUnknownModuleFallback() {
 void TestStackFrames() {
   std::printf("native frames with module-relative offsets\n");
   mua::CrashReport report = BaseReport();
-  report.frames[0] = {0x00007FF6A1B01234ull, {"marvel_ultimate_alliance.exe", 0x00007FF6A1B00000ull, true}};
+  report.frames[0] = {0x00007FF6A1B01234ull, {"marvel_ultimate_alliance_bundle.exe", 0x00007FF6A1B00000ull, true}};
   report.frames[1] = {0x00007FFB12345678ull, {"ntdll.dll", 0x00007FFB12340000ull, true}};
   report.frame_count = 2;
   const std::string text = Format(report);
   CHECK(Has(text, "Stack trace: 2 frames"));
-  CHECK(Has(text, "#00 0x00007FF6A1B01234 marvel_ultimate_alliance.exe + 0x0000000000001234"));
+  CHECK(Has(text, "#00 0x00007FF6A1B01234 marvel_ultimate_alliance_bundle.exe + 0x0000000000001234"));
   CHECK(Has(text, "#01 0x00007FFB12345678 ntdll.dll + 0x0000000000005678"));
 }
 

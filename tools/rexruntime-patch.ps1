@@ -260,7 +260,7 @@ function Get-RuntimeDllNames([string]$Config) {
 # Returns the problems found; an empty list means $BuildDir holds the executable and exactly the SDK's DLLs.
 function Test-StagedRuntime([string]$SdkDir, [string]$BuildDir, [string]$Config) {
     $problems = New-Object System.Collections.Generic.List[string]
-    $exe = Join-Path $BuildDir 'marvel_ultimate_alliance.exe'
+    $exe = Join-Path $BuildDir 'marvel_ultimate_alliance_bundle.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $problems.Add("missing executable: $exe") }
     foreach ($name in Get-RuntimeDllNames $Config) {
         $expected = Join-Path $SdkDir "bin\$name"

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -85,8 +86,53 @@ bool HasOriginalAppImage(std::filesystem::path&) {
   return false;
 }
 
+#if defined(MUA_UPDATER_HELPER_BUILD)
+namespace {
+
+bool IsUpdateTestVariable(const wchar_t* entry) {
+  const wchar_t* equals = std::wcschr(entry, L'=');
+  if (!equals) {
+    return false;
+  }
+  const int length = static_cast<int>(equals - entry);
+  static constexpr const wchar_t* kNames[] = {
+      L"MUA_UPDATE_TEST", L"MUA_UPDATE_TEST_CURRENT_VERSION", L"MUA_UPDATE_TEST_RELEASE_JSON",
+      L"MUA_UPDATE_TEST_ASSET_SHA256"};
+  for (const wchar_t* name : kNames) {
+    if (CompareStringOrdinal(entry, length, name, static_cast<int>(std::wcslen(name)), TRUE) == CSTR_EQUAL) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<wchar_t> FilteredEnvironment() {
+  std::vector<wchar_t> result;
+  LPWCH block = GetEnvironmentStringsW();
+  if (!block) {
+    return result;
+  }
+  for (const wchar_t* entry = block; *entry; entry += std::wcslen(entry) + 1) {
+    if (IsUpdateTestVariable(entry)) {
+      continue;
+    }
+    result.insert(result.end(), entry, entry + std::wcslen(entry) + 1);
+  }
+  FreeEnvironmentStringsW(block);
+  result.push_back(L'\0');
+  return result;
+}
+
+}  // namespace
+#endif
+
 bool LaunchApplication(const std::filesystem::path& executable, const std::vector<std::string>& arguments,
+#if defined(MUA_UPDATER_HELPER_BUILD)
+                       const std::filesystem::path& working_directory, std::string& error,
+                       bool clear_update_test_environment) {
+#else
                        const std::filesystem::path& working_directory, std::string& error) {
+#endif
   auto quote = [](const std::wstring& argument) {
     if (argument.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
       return argument;
@@ -125,8 +171,25 @@ bool LaunchApplication(const std::filesystem::path& executable, const std::vecto
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
+#if defined(MUA_UPDATER_HELPER_BUILD)
+  std::vector<wchar_t> environment;
+  DWORD creation_flags = 0;
+  LPVOID environment_block = nullptr;
+  if (clear_update_test_environment) {
+    environment = FilteredEnvironment();
+    if (environment.empty()) {
+      error = "Could not prepare the program environment.";
+      return false;
+    }
+    environment_block = environment.data();
+    creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+  }
+  if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, FALSE, creation_flags,
+                      environment_block, working_directory.c_str(), &startup, &process)) {
+#else
   if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, FALSE, 0, nullptr,
                       working_directory.c_str(), &startup, &process)) {
+#endif
     error = "Could not start the program (" + std::to_string(GetLastError()) + ").";
     return false;
   }
@@ -226,7 +289,7 @@ bool HasOriginalAppImage(std::filesystem::path& path) {
 }
 
 bool LaunchApplication(const std::filesystem::path& executable, const std::vector<std::string>& arguments,
-                       const std::filesystem::path&, std::string& error) {
+                       const std::filesystem::path&, std::string& error, bool) {
   std::vector<std::string> storage;
   storage.reserve(arguments.size() + 1);
   storage.push_back(Utf8Path(executable));

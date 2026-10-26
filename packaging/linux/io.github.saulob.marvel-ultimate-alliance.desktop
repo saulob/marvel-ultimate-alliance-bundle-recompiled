@@ -2,7 +2,7 @@
 Type=Application
 Name=Marvel Ultimate Alliance Recompiled
 Comment=Marvel Ultimate Alliance, Gold Edition and Marvel Ultimate Alliance 2 for Xbox 360, native PC port
-Exec=marvel_ultimate_alliance
+Exec=marvel_ultimate_alliance_bundle
 Icon=marvel_ultimate_alliance
 Categories=Game;
 Terminal=false
