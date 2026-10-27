@@ -11,8 +11,9 @@
 # Player data created when the program runs from a source folder
 user_data/
 
-# Downloaded ReXGlue SDK
+# Downloaded ReXGlue SDK and NVIDIA DLSS SDK files
 /tools/rexglue/
+/tools/nvidia-dlss/
 
 # Logs, dumps, binaries, console images and game executables
 *.log

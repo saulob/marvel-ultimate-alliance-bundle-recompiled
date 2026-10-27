@@ -120,7 +120,7 @@ try {
                   'save_diagnostics', 'sdk_fix', 'shader_storage_repair', 'skip_intro', 'skip_intro_notice', 'sound_stream_ring', 'update', 'update_controller', 'user_data', 'window_host',
                   'window_placement', 'xaudio_barrier', 'xma_packet_continuity', 'd3d12_async_submission', 'd3d12_sampler_memo',
                   'd3d12_copy_validation', 'achievement_metadata', 'hd_text', 'main_menu', 'main_menu_mua2', 'title_shutdown',
-                  'upscaling', 'world_update_profile') | ForEach-Object { "mua_$($_)_tests" }
+                  'upscaling') | ForEach-Object { "mua_$($_)_tests" }
     $runtime = @('active_log_tests', 'filesystem_mapping_tests', 'frame_stats_tests', 'guest_interrupt_lock_tests',
                  'log_filter_tests', 'physical_heap_stress', 'settings_tests', 'shutdown_order_tests',
                  'title_thread_shutdown_tests', 'vmsum_tests') | ForEach-Object { "mua_$_" }

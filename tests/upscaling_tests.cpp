@@ -1,5 +1,6 @@
 // The Upscaling choice: the back buffer the game draws into for each quality, the internal and native render sizes
-// at each Render resolution and aspect ratio, the parsing of the saved values and the presenter effect.
+// at each Render resolution and aspect ratio, the parsing of the saved values (NIS and CAS from earlier versions mean
+// Off) and the presenter effect.
 // Run: mua_upscaling_tests
 
 #include <cmath>
@@ -158,8 +159,6 @@ void TestText() {
                     100) == 170);
   CHECK(UpscalingText(Upscaler::kOff, UpscaleQuality::kQuality) == "Off");
   CHECK(UpscalingText(Upscaler::kFsr1, UpscaleQuality::kBalanced) == "AMD FSR 1 Balanced");
-  CHECK(UpscalingText(Upscaler::kNis, UpscaleQuality::kPerformance) == "NVIDIA NIS Performance");
-  CHECK(UpscalingText(Upscaler::kCas, UpscaleQuality::kQuality) == "AMD CAS");
 }
 
 void TestParsing() {
@@ -167,13 +166,11 @@ void TestParsing() {
   const auto available = [](Upscaler upscaler) { return kUpscalerAvailable ? upscaler : Upscaler::kOff; };
   CHECK(ParseUpscaler("fsr", kFsr1Upscalers) == available(Upscaler::kFsr1));
   CHECK(ParseUpscaler("fsr", kAllUpscalers) == available(Upscaler::kFsr1));
-  CHECK(ParseUpscaler("nis", kAllUpscalers) == available(Upscaler::kNis));
-  CHECK(ParseUpscaler("cas", kAllUpscalers) == available(Upscaler::kCas));
-  CHECK(ParseUpscaler("nis", kFsr1Upscalers) == Upscaler::kOff);
-  CHECK(ParseUpscaler("cas", kFsr1Upscalers) == Upscaler::kOff);
   CHECK(ParseUpscaler("off", kAllUpscalers) == Upscaler::kOff);
   CHECK(ParseUpscaler("", kAllUpscalers) == Upscaler::kOff);
-  CHECK(ParseUpscaler("dlss", kAllUpscalers) == Upscaler::kOff);
+  CHECK(ParseUpscaler("dlss", kAllUpscalers) == available(Upscaler::kDlss));
+  CHECK(ParseUpscaler("dlss", kFsr1Upscalers) == Upscaler::kOff);
+  CHECK(ParseUpscaler("dlss_quality", kAllUpscalers) == Upscaler::kOff);
   CHECK(ParseUpscaleQuality("") == UpscaleQuality::kNative);
   CHECK(ParseUpscaleQuality("ultra_performance") == UpscaleQuality::kNative);
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
@@ -184,48 +181,62 @@ void TestParsing() {
     CHECK(&UpscalerInfoFor(info.upscaler) == &info);
   }
   CHECK(PresentEffectFor(Upscaler::kFsr1) == std::optional<std::string_view>("fsr"));
-  CHECK(PresentEffectFor(Upscaler::kNis) == std::optional<std::string_view>("nis"));
-  CHECK(PresentEffectFor(Upscaler::kCas) == std::optional<std::string_view>("cas"));
   CHECK(!PresentEffectFor(Upscaler::kOff));
 }
 
-void TestNisAndCas() {
-  std::printf("NIS draws below the Render resolution like FSR 1; CAS only sharpens\n");
+void TestDeprecatedUpscalers() {
+  std::printf("NVIDIA NIS and AMD CAS from earlier versions are Off, and no longer offered\n");
+  for (const char* value : {"nis", "cas"}) {
+    CHECK(ParseUpscaler(value, kAllUpscalers) == Upscaler::kOff);
+    CHECK(ParseUpscaler(value, kFsr1Upscalers) == Upscaler::kOff);
+    CHECK(FindDeprecatedUpscaler(value) != nullptr);
+  }
+  CHECK(std::string_view(FindDeprecatedUpscaler("nis")->label) == "NVIDIA NIS");
+  CHECK(std::string_view(FindDeprecatedUpscaler("cas")->label) == "AMD CAS");
+  for (const char* value : {"off", "fsr", "dlss", "", "NIS"}) {
+    CHECK(FindDeprecatedUpscaler(value) == nullptr);
+  }
+  for (const UpscalerInfo& info : kUpscalers) {
+    CHECK(!FindDeprecatedUpscaler(info.key));
+    CHECK(!info.present_effect || std::string_view(info.present_effect) == "fsr");
+  }
+}
+
+void TestDlss() {
+  std::printf("DLSS keeps the back buffer and sizes only the 3D scene by its mode\n");
   for (const AspectRatioInfo& aspect : kAspectRatios) {
     const WindowSize canvas = VideoModeSize(aspect.aspect);
     for (int scale = 1; scale <= 4; ++scale) {
       for (const UpscaleQualityInfo& info : kUpscaleQualities) {
-        const RenderSizes fsr = RenderSizesFor(aspect.aspect, scale, Upscaler::kFsr1, info.quality);
-        const RenderSizes nis = RenderSizesFor(aspect.aspect, scale, Upscaler::kNis, info.quality);
-        CHECK(Equal(nis.guest, fsr.guest) && Equal(nis.internal, fsr.internal) && Equal(nis.native, fsr.native));
-        const RenderSizes cas = RenderSizesFor(aspect.aspect, scale, Upscaler::kCas, info.quality);
-        CHECK(Equal(cas.internal, RenderSize(aspect.aspect, scale)) && Equal(cas.internal, cas.native));
-        CHECK(Equal(UpscaledBackBuffer(canvas, Upscaler::kCas, info.quality), canvas));
+        const RenderSizes dlss = RenderSizesFor(aspect.aspect, scale, Upscaler::kDlss, info.quality);
+        CHECK(Equal(dlss.internal, RenderSize(aspect.aspect, scale)) && Equal(dlss.internal, dlss.native));
+        CHECK(Equal(UpscaledBackBuffer(canvas, Upscaler::kDlss, info.quality), canvas));
+        CHECK(EffectiveQuality(Upscaler::kDlss, info.quality) == info.quality);
       }
     }
   }
-  CHECK(EffectiveQuality(Upscaler::kNis, UpscaleQuality::kBalanced) == UpscaleQuality::kBalanced);
-  CHECK(EffectiveQuality(Upscaler::kCas, UpscaleQuality::kPerformance) == UpscaleQuality::kNative);
-}
-
-void TestSharpness() {
-  std::printf("NIS and CAS sharpness settings and their presenter values\n");
-  const UpscalerInfo& nis = UpscalerInfoFor(Upscaler::kNis);
-  const UpscalerInfo& cas = UpscalerInfoFor(Upscaler::kCas);
-  CHECK(std::string_view(nis.sharpness_key) == "mua_nis_sharpness" &&
-        std::string_view(nis.sharpness_cvar) == "present_nis_sharpness" && nis.sharpness_default == 50);
-  CHECK(std::string_view(cas.sharpness_key) == "mua_cas_sharpness" &&
-        std::string_view(cas.sharpness_cvar) == "present_cas_additional_sharpness" && cas.sharpness_default == 0);
-  CHECK(!UpscalerInfoFor(Upscaler::kOff).sharpness_key && !UpscalerInfoFor(Upscaler::kFsr1).sharpness_key);
-  CHECK(ParseSharpness("75", 50) == 75);
-  CHECK(ParseSharpness("", 50) == 50);
-  CHECK(ParseSharpness("abc", 0) == 0);
-  CHECK(ParseSharpness("150", 50) == 100);
-  CHECK(ParseSharpness("-5", 50) == 0);
-  CHECK(ParseSharpness("0.5", 50) == 50);
-  CHECK(PresenterSharpness(50) == "0.500000");
-  CHECK(PresenterSharpness(0) == "0.000000");
-  CHECK(PresenterSharpness(100) == "1.000000");
+  CHECK(std::string_view(DlssModeFor(UpscaleQuality::kNative)) == "dlaa");
+  CHECK(std::string_view(DlssModeFor(UpscaleQuality::kQuality)) == "quality");
+  CHECK(std::string_view(DlssModeFor(UpscaleQuality::kBalanced)) == "balanced");
+  CHECK(std::string_view(DlssModeFor(UpscaleQuality::kPerformance)) == "performance");
+  CHECK(UpscalingText(Upscaler::kDlss, UpscaleQuality::kNative) == "NVIDIA DLSS DLAA");
+  CHECK(UpscalingText(Upscaler::kDlss, UpscaleQuality::kBalanced) == "NVIDIA DLSS Balanced");
+  CHECK(std::string_view(QualityLabel(Upscaler::kFsr1, UpscaleQuality::kNative)) == "Native");
+  CHECK(std::string_view(QualityLabel(Upscaler::kDlss, UpscaleQuality::kPerformance)) == "Performance");
+  CHECK(!PresentEffectFor(Upscaler::kDlss));
+  const UpscalerInfo& dlss = UpscalerInfoFor(Upscaler::kDlss);
+  CHECK(dlss.scene_only && !dlss.lowers_resolution);
+  CHECK(std::string_view(dlss.key) == "dlss" && std::string_view(dlss.label) == "NVIDIA DLSS");
+  for (const UpscalerInfo& info : kUpscalers) {
+    CHECK(info.scene_only == (info.upscaler == Upscaler::kDlss));
+  }
+  // The launcher's order: Off, AMD FSR 1, NVIDIA DLSS, which Marvel Ultimate Alliance offers all of; Gold Edition and
+  // MUA 2 offer Off and FSR 1.
+  CHECK(std::size(kUpscalers) == 3);
+  CHECK(kUpscalers[0].upscaler == Upscaler::kOff && kUpscalers[1].upscaler == Upscaler::kFsr1 &&
+        kUpscalers[2].upscaler == Upscaler::kDlss);
+  CHECK(kAllUpscalers == (UpscalerBit(Upscaler::kOff) | UpscalerBit(Upscaler::kFsr1) | UpscalerBit(Upscaler::kDlss)));
+  CHECK(kFsr1Upscalers == (UpscalerBit(Upscaler::kOff) | UpscalerBit(Upscaler::kFsr1)));
 }
 
 }  // namespace
@@ -239,8 +250,8 @@ int main() {
   TestPixelSavings();
   TestText();
   TestParsing();
-  TestNisAndCas();
-  TestSharpness();
+  TestDeprecatedUpscalers();
+  TestDlss();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

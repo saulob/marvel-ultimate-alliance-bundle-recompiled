@@ -126,6 +126,27 @@ GraphicsAdapterDetails EffectiveGraphicsAdapter(int configured_index) {
   return details;
 }
 
+bool WithEffectiveGraphicsAdapter(int configured_index,
+                                  const std::function<void(IDXGIAdapter1*, const GraphicsAdapterDetails&)>& use) {
+  bool found = false;
+  const HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  const auto create_device =
+      d3d12 ? reinterpret_cast<CreateDeviceFunction>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+  if (create_device && SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+    GraphicsAdapterDetails details;
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    found = FindAdapter(configured_index, create_device, factory.Get(), details, adapter);
+    if (found) {
+      use(adapter.Get(), details);
+    }
+  }
+  if (d3d12) {
+    FreeLibrary(d3d12);
+  }
+  return found;
+}
+
 bool RasterizerOrderedViewsSupported(int configured_index) {
   bool supported = false;
   const HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -161,6 +182,10 @@ std::vector<GraphicsAdapter> ListGraphicsAdapters() {
 
 GraphicsAdapterDetails EffectiveGraphicsAdapter(int) {
   return {};
+}
+
+bool WithEffectiveGraphicsAdapter(int, const std::function<void(IDXGIAdapter1*, const GraphicsAdapterDetails&)>&) {
+  return false;
 }
 
 bool RasterizerOrderedViewsSupported(int) {

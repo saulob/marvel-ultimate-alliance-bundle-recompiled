@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 #include "aspect_ratio.h"
 
@@ -10,6 +11,19 @@ namespace mua {
 // The launcher's Render resolution choices: 1x to 4x of the guest's canvas.
 inline constexpr int kMinRenderScale = 1;
 inline constexpr int kMaxRenderScale = 4;
+
+// A Render resolution choice as the launcher shows it, such as "2x - 2560×1440 (1440p)".
+inline std::string RenderResolutionLabel(AspectRatio aspect, int scale) {
+  const WindowSize size = RenderSize(aspect, scale);
+  std::string name = std::to_string(size.height) + "p";
+  if (aspect == AspectRatio::k16x9 && size.height == 2160) {
+    name = "4K";
+  } else if (aspect == AspectRatio::k16x9 && size.height == 2880) {
+    name = "5K";
+  }
+  return std::to_string(scale) + "x - " + std::to_string(size.width) + "\xC3\x97" + std::to_string(size.height) +
+         " (" + name + ")";
+}
 
 // Limits of Direct3D 12 and of the runtime's resolution-scaled resources that the scale is multiplied into.
 inline constexpr uint32_t kMaxHostTextureDimension = 16384;

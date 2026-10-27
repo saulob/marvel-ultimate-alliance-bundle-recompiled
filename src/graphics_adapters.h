@@ -2,11 +2,14 @@
 
 #include <charconv>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+struct IDXGIAdapter1;
 
 namespace mua {
 
@@ -30,6 +33,10 @@ struct GraphicsAdapterDetails {
 // Windows: the adapter ReXGlue's d3d12_adapter selection will use for `configured_index` (-1 automatic, -2 WARP).
 // Mirrors the runtime's enumeration, so the effective GPU is the one actually picked.
 GraphicsAdapterDetails EffectiveGraphicsAdapter(int configured_index);
+
+// Windows: calls `use` with that adapter and returns true; false when there is none, and elsewhere.
+bool WithEffectiveGraphicsAdapter(int configured_index,
+                                  const std::function<void(IDXGIAdapter1*, const GraphicsAdapterDetails&)>& use);
 
 // Windows: whether the adapter ReXGlue selects for `configured_index` (-1 automatic, -2 WARP) supports rasterizer-ordered
 // views, which the EDRAM in pixel shaders path (render_target_path_d3d12 = "rov") needs. False elsewhere.

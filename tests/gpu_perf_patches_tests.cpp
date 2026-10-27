@@ -605,13 +605,21 @@ void TestDrawFastPathPatches() {
   CHECK(streamed_requests == 2);
   CHECK(CountStreamedRequests(command_processor) == 1);
   CHECK(Has(command_processor, "RequestRange(vfetch_constant.address << 2, vfetch_request_size, true)"));
-  // IssueDraw is the only index buffer setter, and BeginSubmission forgets the view.
+  // IssueDraw is the only index buffer setter, and BeginSubmission forgets the view, itself or through
+  // InvalidateCommandListState (0161 shares that reset with DLSS's command list calls).
   CHECK(Count(command_processor, "D3DIASetIndexBuffer(") == 1);
   CHECK(Count(ReadFile(sdk + "d3d12/render_target_cache.cpp"), "IASetIndexBuffer") == 0);
   const size_t begin = command_processor.find("bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {");
-  const size_t reset = command_processor.find("current_index_buffer_view_ = {};", begin);
-  CHECK(begin != std::string::npos && reset != std::string::npos &&
-        reset < command_processor.find("bool D3D12CommandProcessor::EndSubmission(", begin));
+  const size_t end = command_processor.find("bool D3D12CommandProcessor::EndSubmission(", begin);
+  size_t reset = command_processor.find("current_index_buffer_view_ = {};", begin);
+  if (reset > end) {
+    const size_t invalidate = command_processor.find("void D3D12CommandProcessor::InvalidateCommandListState() {");
+    const size_t invalidate_end = command_processor.find("\n}\n", invalidate);
+    const bool forgets = invalidate != std::string::npos &&
+                         command_processor.find("current_index_buffer_view_ = {};", invalidate) < invalidate_end;
+    reset = forgets ? command_processor.find("InvalidateCommandListState();", begin) : std::string::npos;
+  }
+  CHECK(begin != std::string::npos && reset != std::string::npos && reset < end);
 }
 
 // The write fault order of patches/rexglue-sdk/0141-mmio-write-fault-callback-first.patch: callback, then host page
@@ -699,29 +707,27 @@ void TestPipelineStoragePendingFlush() {
   }
 }
 
-// 0159: NVIDIA Image Scaling beside 0127's FSR 1 and CAS, with its NVIDIA files under src/, which the runtime build
-// cleans before patching again.
-void TestNvidiaImageScaling() {
-  std::printf("NVIDIA Image Scaling presenter patch\n");
-  const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
-  const std::string nis = ReadFile(dir + "0159-presenter-nvidia-image-scaling.windows.patch");
-  CHECK(Has(nis, "+    .allowed({\"bilinear\", \"cas\", \"fsr\", \"nis\"})"));
-  CHECK(Has(nis, "+REXCVAR_DEFINE_DOUBLE(present_nis_sharpness,"));
-  CHECK(Has(nis, "+    static constexpr float kNisSharpnessDefault = 0.5f;"));
-  CHECK(Has(nis, "+      flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kNisScale;"));
-  CHECK(Has(nis, "+      flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kNisSharpen;"));
-  CHECK(Has(nis, "+      guest_output_paint_config.SetEffect(GuestOutputPaintConfig::Effect::kFsr);"));
-  CHECK(Has(nis, "present_effect nis uses fsr instead"));
-  CHECK(Has(nis, "+          kViewIndexGuestOutputIntermediate0Srv + kMaxGuestOutputPaintEffects - 1,"));
-  CHECK(Has(nis, "+        NVH4 v = NVH4(coef_scaler[phase][vIdx]);"));
-  CHECK(Has(nis, "+        v = NVH4(coef_usm[phase][vIdx]);"));
-  CHECK(Has(nis, "+const BYTE guest_output_nis_scale_cs[] = {"));
-  CHECK(Has(nis, "+const BYTE guest_output_nis_sharpen_cs[] = {"));
-  CHECK(Has(nis, "+++ b/src/ui/shaders/nis/LICENSE.txt"));
-  CHECK(Has(nis, "+// Copyright(c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved."));
-  CHECK(!Has(nis, "+++ b/thirdparty/"));
-  CHECK(!Has(nis, "\n+      kRTVCount") && !Has(nis, "\n-      kRTVCount"));
-  CHECK(Has(nis, "+    .allowed({\"bilinear\", \"cas\", \"fsr\", \"fsr2\", \"fsr3\", \"nis\"})"));
+// NVIDIA Image Scaling (0159) is gone: no patch adds it to the presenter, and no license ships for it. FSR 1 and its
+// RCAS pass stay in 0127.
+void TestNoNvidiaImageScaling() {
+  std::printf("no NVIDIA Image Scaling in the presenter patches\n");
+  const std::filesystem::path dir = std::filesystem::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk";
+  int patches = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    if (entry.path().extension() != ".patch") {
+      continue;
+    }
+    ++patches;
+    const std::string text = ReadFile(entry.path().string());
+    CHECK(entry.path().filename().string().rfind("0159-", 0) != 0);
+    CHECK(!Has(text, "src/ui/shaders/nis/") && !Has(text, "present_nis_sharpness") && !Has(text, "\"nis\""));
+  }
+  CHECK(patches > 100);
+  const std::string fsr = ReadFile((dir / "0127-presenter-spatial-upscalers.windows.patch").string());
+  CHECK(Has(fsr, "+    .allowed({\"bilinear\", \"cas\", \"fsr\"})"));
+  const std::string licenses =
+      ReadFile(std::string(MUA_SRC_DIR) + "/../packaging/licenses/THIRD-PARTY-LICENSES.txt");
+  CHECK(!licenses.empty() && !Has(licenses, "NVIDIA Image Scaling"));
 }
 
 }  // namespace
@@ -741,7 +747,7 @@ int main() {
   TestDrawFastPathPatches();
   TestWriteFaultCallbackFirst();
   TestPipelineStoragePendingFlush();
-  TestNvidiaImageScaling();
+  TestNoNvidiaImageScaling();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

@@ -241,26 +241,10 @@ void TestUpscaling() {
   CHECK(Has(text, "Runtime renderer: guest=752x424 | internal=1504x848 | fsr input=1504x848 | "
                   "render resolution=2560x1440 | presenter=fsr | upscaling=AMD FSR 1 Balanced | "));
 
-  diagnostics.graphics.upscaler_input = "nis";
-  diagnostics.graphics.present_effect = "nis";
-  diagnostics.graphics.upscaling = "NVIDIA NIS Balanced";
-  text = Join(mua::FormatStartupDiagnostics(diagnostics));
-  CHECK(Has(text, "internal=1504x848 | nis input=1504x848 | render resolution=2560x1440 | presenter=nis | "
-                  "upscaling=NVIDIA NIS Balanced | "));
-
   diagnostics.graphics.guest_width = 1280;
   diagnostics.graphics.guest_height = 720;
   diagnostics.graphics.internal_width = 2560;
   diagnostics.graphics.internal_height = 1440;
-  diagnostics.graphics.upscaler_input = "cas";
-  diagnostics.graphics.upscaler_input_width = 2560;
-  diagnostics.graphics.upscaler_input_height = 1440;
-  diagnostics.graphics.present_effect = "cas";
-  diagnostics.graphics.upscaling = "AMD CAS";
-  text = Join(mua::FormatStartupDiagnostics(diagnostics));
-  CHECK(Has(text, "guest=1280x720 | internal=2560x1440 | cas input=2560x1440 | render resolution=2560x1440 | "
-                  "presenter=cas | upscaling=AMD CAS | "));
-
   diagnostics.graphics.upscaler_input.clear();
   diagnostics.graphics.upscaler_input_width = 0;
   diagnostics.graphics.upscaler_input_height = 0;

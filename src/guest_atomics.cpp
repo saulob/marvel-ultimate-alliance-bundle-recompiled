@@ -5,14 +5,9 @@
 
 #if defined(MUA_RUNTIME_MUA2)
 
-#include <chrono>
-
 #include <rex/cvar.h>
-#include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/thread/mutex.h>
-
-#include "window_host.h"
 
 REXCVAR_DEFINE_BOOL(mua_lockfree_job_atomics, true, "Marvel Ultimate Alliance",
                     "Run the job system's atomic sections without the recompiler's global interrupt lock")
@@ -25,41 +20,8 @@ uint8_t* GuestBase() {
   return base;
 }
 
-// DEBUG_SAULO: hook calls per frame, each a lock section the guest no longer takes, logged every 10 s.
-void CountLockFreeSection() {
-  constexpr uint32_t kBatch = 256;
-  thread_local uint32_t pending = 0;
-  if (++pending < kBatch) {
-    return;
-  }
-  pending = 0;
-  static std::atomic<uint64_t> calls{0};
-  static std::atomic<int64_t> next_report_ns{0};
-  static std::atomic<uint64_t> calls_at_report{0};
-  static std::atomic<uint64_t> frames_at_report{0};
-  const uint64_t total = calls.fetch_add(kBatch, std::memory_order_relaxed) + kBatch;
-  const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now().time_since_epoch())
-                          .count();
-  int64_t due = next_report_ns.load(std::memory_order_relaxed);
-  if (now < due || !next_report_ns.compare_exchange_strong(due, now + 10'000'000'000, std::memory_order_relaxed)) {
-    return;
-  }
-  const uint64_t frames = GetGuestFrameStats().frame_count;
-  const uint64_t previous_calls = calls_at_report.exchange(total, std::memory_order_relaxed);
-  const uint64_t previous_frames = frames_at_report.exchange(frames, std::memory_order_relaxed);
-  if (due != 0 && frames > previous_frames) {
-    REXLOG_INFO("DEBUG_SAULO MUA2 lock-free job atomics per frame: {:.1f} hook calls (lock sections avoided)",
-                double(total - previous_calls) / double(frames - previous_frames));
-  }
-}
-
 bool LockFree() {
-  if (!REXCVAR_GET(mua_lockfree_job_atomics)) {
-    return false;
-  }
-  CountLockFreeSection();  // DEBUG_SAULO
-  return true;
+  return REXCVAR_GET(mua_lockfree_job_atomics);
 }
 
 }  // namespace

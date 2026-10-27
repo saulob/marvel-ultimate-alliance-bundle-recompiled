@@ -78,12 +78,16 @@ void ApplyDynamicPageStreaming(std::optional<GameId> game);
 // The active game's Upscaling choice; Off for a choice that game doesn't offer, or before a game is active.
 Upscaler ActiveUpscaler();
 
-// Sets present_effect and the sharpness for the game's Upscaling choice. Call before the presenter is created
+// Sets present_effect for the game's Upscaling choice. Call before the presenter is created
 // (OnPreSetup).
 void ApplyUpscaler(const GameSettings& settings);
 
 // Logs the internal and output render sizes of the Upscaling choice. Call after ApplyGameSettings.
 void LogUpscaling();
+
+// Sets the Direct3D 12 runtime's DLSS mode from the Upscaling choice, with the DLSS bridge beside the program; NGX keeps
+// its files in the game's cache folder. Call after ApplyGameSettings and before the GPU starts.
+void ApplyDlss(const std::filesystem::path& cache_root);
 
 // Keeps the guest video mode off the window size, which ReXGlue otherwise reports. Call once the window exists and
 // before the guest starts.

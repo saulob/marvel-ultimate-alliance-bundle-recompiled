@@ -103,7 +103,7 @@ const std::set<std::string> kOptionalHooks = {
     "MUA_GUEST_ASSIGN_STRING", "MUA_GUEST_RELEASE_RESOURCE", "MUA_GUEST_APPEND_REF", "MUA_GUEST_FREE_STRING",
     "MUA_GUEST_STRING_PREPARE", "MUA_GUEST_STRING_INTERN", "MUA_GUEST_DESTROY_RESOURCE", "MUA_GUEST_RESIZE_ARRAY",
     "MUA_GUEST_ADD_REF_IF_ANY", "MUA_GUEST_SWAP_REF", "MUA_GUEST_HANDLE_MANAGER", "MUA_GUEST_RELEASE_HANDLE",
-    "MUA_GUEST_SEMAPHORE_WAIT", "MUA_GUEST_SEMAPHORE_SIGNAL"};
+    "MUA_GUEST_SEMAPHORE_WAIT"};
 const std::set<std::string> kOptionalConstants = {
     "kIndirectTailTable",         "kInputUserSlotOffset",     "kMainMenuExitCommand",
     "kMainMenuVtable",            "kMainMenuLiveNameEntry",   "kEmptyString",
@@ -111,8 +111,8 @@ const std::set<std::string> kOptionalConstants = {
     "kAssignStringFreeSite",      "kReleaseResourceParentSite", "kReleaseResourceDestroySite",
     "kAppendRefResizeSite",       "kImageSize",               "kCodeBase",
     "kCodeSize",                  "kObjectHandleFlag",        "kObjectHandleManager",
-    "kReleaseHandleManagerSite",  "kReleaseHandleSite",       "kSemaphoreMaxCountOffset",
-    "kSemaphoreCountOffset",      "kAlchemySuccess",          "kAlchemyFailure"};
+    "kReleaseHandleManagerSite",  "kReleaseHandleSite",       "kSemaphoreCountOffset",
+    "kAlchemySuccess",            "kAlchemyFailure"};
 
 // sub_8248A0A0 holds the swap for another vblank while the interval in the high half of its argument has not passed
 // since the last flip, or while the scanline has passed the threshold in the low half.

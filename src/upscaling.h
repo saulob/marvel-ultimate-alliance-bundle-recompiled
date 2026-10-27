@@ -1,19 +1,16 @@
 #pragma once
 
-#include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <system_error>
 
 #include "aspect_ratio.h"
 
 namespace mua {
 
-enum class Upscaler { kOff, kFsr1, kNis, kCas };
+enum class Upscaler { kOff, kFsr1, kDlss };
 
 using UpscalerMask = uint32_t;
 
@@ -22,13 +19,11 @@ constexpr UpscalerMask UpscalerBit(Upscaler upscaler) {
 }
 
 inline constexpr UpscalerMask kFsr1Upscalers = UpscalerBit(Upscaler::kOff) | UpscalerBit(Upscaler::kFsr1);
-inline constexpr UpscalerMask kAllUpscalers =
-    kFsr1Upscalers | UpscalerBit(Upscaler::kNis) | UpscalerBit(Upscaler::kCas);
+inline constexpr UpscalerMask kAllUpscalers = kFsr1Upscalers | UpscalerBit(Upscaler::kDlss);
 
 inline constexpr char kUpscalerOff[] = "off";
 inline constexpr char kUpscalerFsr1[] = "fsr";
-inline constexpr char kUpscalerNis[] = "nis";
-inline constexpr char kUpscalerCas[] = "cas";
+inline constexpr char kUpscalerDlss[] = "dlss";
 
 struct UpscalerInfo {
   Upscaler upscaler;
@@ -36,20 +31,35 @@ struct UpscalerInfo {
   const char* label;
   const char* name;            // in sentences: "FSR 1"
   const char* present_effect;  // null leaves the player's own present_effect alone
-  bool lowers_resolution;      // the Upscaling quality applies
-  const char* sharpness_key;   // the game's sharpness in percent, or null
-  const char* sharpness_cvar;  // the presenter's, from 0 to 1
-  int sharpness_default;
+  bool lowers_resolution;      // the Upscaling quality shrinks the game's back buffer
+  bool scene_only;             // the Upscaling quality sizes only the 3D scene, which the GPU plugin upscales
 };
 
-// NIS starts at NVIDIA's default sharpness; CAS at the presenter's, AMD's plain CAS.
 inline constexpr UpscalerInfo kUpscalers[] = {
-    {Upscaler::kOff, kUpscalerOff, "Off", "", nullptr, false, nullptr, nullptr, 0},
-    {Upscaler::kFsr1, kUpscalerFsr1, "AMD FSR 1", "FSR 1", "fsr", true, nullptr, nullptr, 0},
-    {Upscaler::kNis, kUpscalerNis, "NVIDIA NIS", "NIS", "nis", true, "mua_nis_sharpness", "present_nis_sharpness", 50},
-    {Upscaler::kCas, kUpscalerCas, "AMD CAS", "CAS", "cas", false, "mua_cas_sharpness",
-     "present_cas_additional_sharpness", 0},
+    {Upscaler::kOff, kUpscalerOff, "Off", "", nullptr, false, false},
+    {Upscaler::kFsr1, kUpscalerFsr1, "AMD FSR 1", "FSR 1", "fsr", true, false},
+    {Upscaler::kDlss, kUpscalerDlss, "NVIDIA DLSS", "DLSS", nullptr, false, true},
 };
+
+// mua_upscaler values earlier versions offered; they mean Off now.
+struct DeprecatedUpscaler {
+  const char* key;
+  const char* label;
+};
+
+inline constexpr DeprecatedUpscaler kDeprecatedUpscalers[] = {
+    {"nis", "NVIDIA NIS"},
+    {"cas", "AMD CAS"},
+};
+
+inline const DeprecatedUpscaler* FindDeprecatedUpscaler(std::string_view value) {
+  for (const DeprecatedUpscaler& deprecated : kDeprecatedUpscalers) {
+    if (value == deprecated.key) {
+      return &deprecated;
+    }
+  }
+  return nullptr;
+}
 
 enum class UpscaleQuality { kNative, kQuality, kBalanced, kPerformance };
 
@@ -57,7 +67,7 @@ struct UpscaleQualityInfo {
   UpscaleQuality quality;
   const char* key;
   const char* label;
-  // AMD's FSR 1 modes, used for NIS too: output size over render size along each axis.
+  // AMD's FSR 1 modes: output size over render size along each axis.
   double ratio;
 };
 
@@ -73,7 +83,8 @@ inline constexpr UpscaleQualityInfo kUpscaleQualities[] = {
 inline constexpr int kBackBufferWidthAlignment = 16;
 inline constexpr int kBackBufferHeightAlignment = 8;
 
-// FSR 1, CAS (SDK patch 0127) and NIS (0159) run in the Direct3D 12 presenter; the Vulkan presenter only has bilinear.
+// FSR 1 (SDK patch 0127) runs in the Direct3D 12 presenter and DLSS (0161) in its command processor; the Vulkan
+// presenter only has bilinear.
 #ifdef _WIN32
 inline constexpr bool kUpscalerAvailable = true;
 #else
@@ -89,7 +100,7 @@ inline const UpscalerInfo& UpscalerInfoFor(Upscaler upscaler) {
   return kUpscalers[0];
 }
 
-// An upscaler the game doesn't offer is Off.
+// An upscaler the game doesn't offer, or one this version no longer has, is Off.
 inline Upscaler ParseUpscaler(std::string_view value, UpscalerMask offered) {
   for (const UpscalerInfo& info : kUpscalers) {
     if (value == info.key) {
@@ -97,17 +108,6 @@ inline Upscaler ParseUpscaler(std::string_view value, UpscalerMask offered) {
     }
   }
   return Upscaler::kOff;
-}
-
-inline int ParseSharpness(std::string_view value, int fallback) {
-  int percent = 0;
-  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), percent);
-  return error == std::errc() && end == value.data() + value.size() ? std::clamp(percent, 0, 100) : fallback;
-}
-
-// The presenter cvar's value for a sharpness in percent.
-inline std::string PresenterSharpness(int percent) {
-  return std::to_string(std::clamp(percent, 0, 100) / 100.0);
 }
 
 inline const UpscaleQualityInfo& QualityInfoFor(UpscaleQuality quality) {
@@ -128,9 +128,29 @@ inline UpscaleQuality ParseUpscaleQuality(std::string_view value) {
   return UpscaleQuality::kNative;
 }
 
-// Off and CAS, which only sharpens, draw natively at every quality.
+// Off draws natively at every quality.
 inline UpscaleQuality EffectiveQuality(Upscaler upscaler, UpscaleQuality quality) {
-  return UpscalerInfoFor(upscaler).lowers_resolution ? quality : UpscaleQuality::kNative;
+  const UpscalerInfo& info = UpscalerInfoFor(upscaler);
+  return info.lowers_resolution || info.scene_only ? quality : UpscaleQuality::kNative;
+}
+
+// DLSS at Native is DLAA.
+inline const char* QualityLabel(Upscaler upscaler, UpscaleQuality quality) {
+  return upscaler == Upscaler::kDlss && quality == UpscaleQuality::kNative ? "DLAA" : QualityInfoFor(quality).label;
+}
+
+// The GPU plugin's d3d12_dlss_mode for a quality.
+inline const char* DlssModeFor(UpscaleQuality quality) {
+  switch (quality) {
+    case UpscaleQuality::kQuality:
+      return "quality";
+    case UpscaleQuality::kBalanced:
+      return "balanced";
+    case UpscaleQuality::kPerformance:
+      return "performance";
+    default:
+      return "dlaa";
+  }
 }
 
 // The present_effect the upscaler needs; none leaves the player's own value alone.
@@ -149,7 +169,7 @@ inline int AlignedDivide(int size, double ratio, int alignment) {
 // The back buffer the game draws into for a canvas: smaller by the quality's ratio, so the GPU draws fewer pixels and
 // the upscaler brings the picture back to the output size.
 inline WindowSize UpscaledBackBuffer(WindowSize canvas, Upscaler upscaler, UpscaleQuality quality) {
-  const double ratio = QualityInfoFor(EffectiveQuality(upscaler, quality)).ratio;
+  const double ratio = UpscalerInfoFor(upscaler).lowers_resolution ? QualityInfoFor(quality).ratio : 1.0;
   if (ratio == 1.0) {
     return canvas;
   }
@@ -183,10 +203,10 @@ inline std::string SizeText(WindowSize size) {
 
 inline std::string UpscalingText(Upscaler upscaler, UpscaleQuality quality) {
   const UpscalerInfo& info = UpscalerInfoFor(upscaler);
-  if (!info.lowers_resolution) {
+  if (!info.lowers_resolution && !info.scene_only) {
     return info.label;
   }
-  return std::string(info.label) + " " + QualityInfoFor(quality).label;
+  return std::string(info.label) + " " + QualityLabel(upscaler, quality);
 }
 
 }  // namespace mua

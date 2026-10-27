@@ -1,6 +1,6 @@
 // The spin before the blocking wait of Marvel Ultimate Alliance 2's Alchemy semaphore (src/guest_semaphore.h): the
-// paths a wait takes, the adaptive spin policy, the duration histogram, the waits against a semaphore model kept like
-// the guest keeps it (kernel count plus its own count) under real threads, and the hooked guest code.
+// paths a wait takes, the adaptive spin policy, the waits against a semaphore model kept like the guest keeps it
+// (kernel count plus its own count) under real threads, and the hooked guest code.
 // Run: mua_guest_semaphore_tests
 
 #include <algorithm>
@@ -133,42 +133,6 @@ void TestSpinScores() {
     scores.Record(kSignal, WaitPath::kSpinTaken);
   }
   CHECK(scores.Score(kSignal) == SpinScores::kMin + 6 * SpinScores::kTaken && scores.ShouldSpin(kSignal));
-}
-
-void TestHistogram() {
-  std::printf("the duration histogram keeps quarter-octave percentiles\n");
-  for (uint64_t ns : {0ull, 1ull, 2ull, 3ull, 4ull, 5ull, 7ull, 1000ull, 1023ull, 1024ull, 999999ull, 1ull << 40}) {
-    const size_t bucket = DurationHistogram::Bucket(ns);
-    CHECK(bucket < DurationHistogram::kBuckets);
-    CHECK(ns <= DurationHistogram::UpperBound(bucket) || bucket == DurationHistogram::kBuckets - 1);
-    if (bucket > 0 && ns > 3) {
-      CHECK(ns > DurationHistogram::UpperBound(bucket - 1));
-    }
-  }
-  for (size_t i = 1; i < DurationHistogram::kBuckets; ++i) {
-    CHECK(DurationHistogram::UpperBound(i) >= DurationHistogram::UpperBound(i - 1));
-  }
-  DurationHistogram histogram;
-  CHECK(histogram.Percentile(0.5) == 0);
-  for (int i = 0; i < 89; ++i) {
-    histogram.Add(1000);
-  }
-  for (int i = 0; i < 10; ++i) {
-    histogram.Add(100000);
-  }
-  histogram.Add(5000000);
-  CHECK(histogram.count() == 100);
-  const uint64_t p50 = histogram.Percentile(0.5);
-  const uint64_t p90 = histogram.Percentile(0.9);
-  const uint64_t p99 = histogram.Percentile(0.99);
-  CHECK(p50 >= 1000 && p50 < 1250);
-  CHECK(p90 >= 100000 && p90 < 125000);
-  CHECK(p99 >= 100000 && p99 < 125000);
-  CHECK(histogram.Percentile(1.0) >= 5000000 && histogram.Percentile(1.0) < 6250000);
-  DurationHistogram other;
-  other.Add(1000);
-  histogram.Merge(other);
-  CHECK(histogram.count() == 101);
 }
 
 // The guest semaphore as the game keeps it: a kernel count, and its own count that is lowered after a taken wait and
@@ -344,7 +308,7 @@ bool InOrder(const std::vector<std::string>& instructions, const std::vector<std
 }
 
 void TestGeneratedCode() {
-  std::printf("the hooked guest functions are the semaphore wait and release\n");
+  std::printf("the hooked semaphore wait and the release it pairs with\n");
   const auto wait = Instructions(GeneratedFunction("sub_822E7400"));
   CHECK(wait.size() == 37);
   // Failure result first, timeout INFINITE when r5's low byte is set and 0 otherwise, then the kernel wait; once it
@@ -389,7 +353,6 @@ void TestWiring() {
   std::ostringstream map;
   map << map_in.rdbuf();
   CHECK(map.str().find("#define MUA_GUEST_SEMAPHORE_WAIT sub_822E7400") != std::string::npos);
-  CHECK(map.str().find("#define MUA_GUEST_SEMAPHORE_SIGNAL sub_822E7358") != std::string::npos);
   for (const char* other : {"guest_map_mua1.h", "guest_map_mua1_gold.h"}) {
     std::ifstream other_in(src / other, std::ios::binary);
     std::ostringstream other_map;
@@ -403,7 +366,6 @@ void TestWiring() {
 int main() {
   TestPaths();
   TestSpinScores();
-  TestHistogram();
   TestSemaphoreSemantics();
   TestMutualExclusion();
 #ifdef MUA_GENERATED_ROOT

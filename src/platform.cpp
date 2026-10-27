@@ -214,6 +214,13 @@ void InstallCrashReports() {
 #endif
 }
 
+void HardExitProcess() {
+#if defined(_WIN32)
+  TerminateProcess(GetCurrentProcess(), 0);
+#endif
+  std::_Exit(0);
+}
+
 UiFontFiles FindUiFonts() {
 #if defined(_WIN32)
   wchar_t windows[MAX_PATH];

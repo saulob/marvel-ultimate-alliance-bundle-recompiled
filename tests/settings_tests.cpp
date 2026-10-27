@@ -486,64 +486,52 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   fs::remove(scratch.player);
 }
 
-void TestNisAndCasOnlyInMua1(const Scratch& scratch) {
-  std::printf("NIS and CAS and their sharpness reach the presenter for MUA 1 only\n");
+void TestDeprecatedUpscalersAreOff(const Scratch& scratch) {
+  std::printf("NVIDIA NIS and AMD CAS saved by earlier versions are Off and saved as off\n");
   const fs::path root = scratch.player.parent_path();
   const std::string effect = rex::cvar::GetFlagByName("present_effect");
-  const std::string nis_sharpness = rex::cvar::GetFlagByName("present_nis_sharpness");
-  const std::string cas_sharpness = rex::cvar::GetFlagByName("present_cas_additional_sharpness");
-  const auto presenter_value = [](const char* name) { return std::stod(rex::cvar::GetFlagByName(name)); };
+  CHECK(!rex::cvar::GetFlagInfo("mua_nis_sharpness") && !rex::cvar::GetFlagInfo("mua_cas_sharpness"));
+  // MUA 1's own file from a version with NIS, and CAS in the shared file, as earlier versions wrote them.
+  fs::create_directories(root / "mua1");
+  std::ofstream(root / "mua1" / "game_settings.toml") << "mua_upscaler = \"nis\"\nmua_nis_sharpness = 75\n"
+                                                         "mua_upscale_quality = \"balanced\"\n";
+  std::ofstream(scratch.player) << "mua_upscaler = \"cas\"\nmua_cas_sharpness = 40\n";
+  // What loading that file sets; earlier tests here already set the cvar, which a config file doesn't override.
+  rex::cvar::SetFlagByName("mua_upscaler", "cas");
   rex::cvar::SetFlagByName("mua_game", "mua1");
   mua::GameSettings settings;
   settings.Capture(scratch.player, scratch.shipped);
-  CHECK(settings.Get("mua_nis_sharpness") == "50");
-  CHECK(settings.Get("mua_cas_sharpness") == "0");
-  settings.Set("mua_upscaler", "nis");
-  settings.Set("mua_nis_sharpness", "75");
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "balanced");
+  for (const mua::GameId other : {mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
+    settings.SelectGame(other);
+    CHECK(settings.Get("mua_upscaler") == "off");
+  }
+  settings.SelectGame(mua::GameId::kMua1);
+  mua::ApplyUpscaler(settings);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == effect);
+  settings.ApplyGameSettings();
+  CHECK(mua::ActiveUpscaler() == mua::Upscaler::kOff);
   CHECK(settings.Save());
   const toml::table mua1 = toml::parse_file((root / "mua1" / "game_settings.toml").string());
-  CHECK(mua1["mua_upscaler"].value<std::string>() == "nis");
-  CHECK(mua1["mua_nis_sharpness"].value<int64_t>() == 75);
-  CHECK(!fs::exists(root / "mua1_gold" / "game_settings.toml"));
-  CHECK(!fs::exists(root / "mua2" / "game_settings.toml"));
-  CHECK(!fs::exists(scratch.player) || !toml::parse_file(scratch.player.string()).contains("mua_upscaler"));
-
-  // Values the other games don't offer, as if written by hand, leave the presenter alone.
-  mua::GameSettings edited;
-  edited.Capture(scratch.player, scratch.shipped);
-  for (const mua::GameId other : {mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
-    edited.SelectGame(other);
-    CHECK(edited.Get("mua_upscaler") == "off");
-    CHECK(edited.Get("mua_nis_sharpness") == "50");
-    for (const char* value : {"nis", "cas"}) {
-      edited.Set("mua_upscaler", value);
-      mua::ApplyUpscaler(edited);
-      CHECK(rex::cvar::GetFlagByName("present_effect") == effect);
-      CHECK(rex::cvar::GetFlagByName("present_nis_sharpness") == nis_sharpness);
-      CHECK(rex::cvar::GetFlagByName("present_cas_additional_sharpness") == cas_sharpness);
-    }
-  }
+  CHECK(mua1["mua_upscaler"].value<std::string>() == "off");
+  CHECK(mua1["mua_upscale_quality"].value<std::string>() == "balanced");
+  CHECK(toml::parse_file(scratch.player.string())["mua_upscaler"].value<std::string>() == "off");
 
   mua::GameSettings reopened;
   reopened.Capture(scratch.player, scratch.shipped);
   reopened.SelectGame(mua::GameId::kMua1);
-  CHECK(reopened.Get("mua_nis_sharpness") == "75");
-  mua::ApplyUpscaler(reopened);
-  if (mua::kUpscalerAvailable) {
-    CHECK(rex::cvar::GetFlagByName("present_effect") == "nis");
-    CHECK(std::fabs(presenter_value("present_nis_sharpness") - 0.75) < 1e-6);
-  }
-  reopened.Set("mua_upscaler", "cas");
-  reopened.Set("mua_cas_sharpness", "40");
-  mua::ApplyUpscaler(reopened);
-  if (mua::kUpscalerAvailable) {
-    CHECK(rex::cvar::GetFlagByName("present_effect") == "cas");
-    CHECK(std::fabs(presenter_value("present_cas_additional_sharpness") - 0.4) < 1e-6);
+  CHECK(reopened.Get("mua_upscaler") == "off");
+  // The launcher shows Off, FSR 1 and DLSS only.
+  for (const char* value : {"nis", "cas"}) {
+    reopened.Set("mua_upscaler", value);
+    mua::ApplyUpscaler(reopened);
+    CHECK(rex::cvar::GetFlagByName("present_effect") == effect);
   }
 
   rex::cvar::SetFlagByName("present_effect", effect);
-  rex::cvar::SetFlagByName("present_nis_sharpness", nis_sharpness);
-  rex::cvar::SetFlagByName("present_cas_additional_sharpness", cas_sharpness);
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
   rex::cvar::SetFlagByName("mua_game", "mua1-gold");
   fs::remove_all(root / "mua1");
   fs::remove(scratch.player);
@@ -698,7 +686,7 @@ int main() {
   TestAspectRatioPerGame(scratch);
   TestAspectRatioVideoMode();
   TestUpscalingPerGame(scratch);
-  TestNisAndCasOnlyInMua1(scratch);
+  TestDeprecatedUpscalersAreOff(scratch);
   TestPlayerNamesAreShared(scratch);
   TestHdTextIsShared(scratch);
   std::printf("%d checks, %d failures\n", g_checks, g_failures);

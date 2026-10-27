@@ -94,6 +94,8 @@ foreach ($module in $Modules) {
 if ($Run) { Assert-GameDataComplete }
 
 & (Join-Path $PSScriptRoot 'setup-sdk.ps1')
+# Optional: without the NVIDIA DLSS SDK the programs build and run without mua_dlss_bridge.dll.
+$DlssReady = (& (Join-Path $PSScriptRoot 'setup-dlss-sdk.ps1')) -eq $true
 if ($Config -eq 'Debug') {
     Write-Host 'ReXGlue patches: not applied to the Debug runtime (stock rexruntimed.dll and rexgpu-xenosd.dll)'
 } else {
@@ -128,6 +130,7 @@ function Test-Configured {
         (Get-CachedValue 'CMAKE_BUILD_TYPE') -eq $Config -and
         (Get-CachedValue 'CMAKE_CXX_COMPILER') -eq ($ClangXX -replace '\\', '/') -and
         (-not $TrgDir -or (Get-CachedValue 'MUA_TRG_LAUNCHER_DIR') -eq ($TrgDir -replace '\\', '/')) -and
+        (Get-CachedValue 'MUA_DLSS_BRIDGE') -eq $(if ($DlssReady) { 'ON' } else { 'OFF' }) -and
         -not ($Modules | Where-Object {
             (Get-CachedValue $_.Cache) -ne $(if (Test-Path $_.Sources) { (Get-FileHash $_.Sources).Hash.ToLower() } else { 'none' })
         })
@@ -199,7 +202,8 @@ try {
     foreach ($name in $SavedEnv.Keys) { Set-Item "Env:$name" $SavedEnv[$name] }
 }
 
-foreach ($file in $Programs + @('marvel_ultimate_alliance.toml') + $RuntimeDlls) {
+$DlssFiles = if ($DlssReady) { @('mua_dlss_bridge.dll', 'nvngx_dlss.dll') } else { @() }
+foreach ($file in $Programs + @('marvel_ultimate_alliance.toml') + $RuntimeDlls + $DlssFiles) {
     if (-not (Test-Path (Join-Path $BuildDir $file))) { throw "Build output is missing $(Join-Path $BuildDir $file)" }
 }
 Assert-RuntimeReady
@@ -211,6 +215,7 @@ Write-Host "BUILD SUCCESSFUL: $(Get-CachedValue 'CMAKE_BUILD_TYPE') build in $Bu
 foreach ($program in $Programs) { Write-Host "  $(Join-Path $BuildDir $program)" }
 Write-Host "  Recompiled code generated this build: $(if ($regenerated.Count) { $regenerated -join ', ' } else { 'none, all current' })"
 Write-Host "  Runtime next to the programs matches tools\rexglue: $((Get-RuntimeDllNames $Config) -join ', ') ($runtimeOrigin)"
+Write-Host "  NVIDIA DLSS: $(if ($DlssReady) { 'mua_dlss_bridge.dll and nvngx_dlss.dll staged for MUA1''s Upscaling choice' } else { 'not built (NVIDIA DLSS SDK unavailable)' })"
 
 if (-not $Run) { return }
 

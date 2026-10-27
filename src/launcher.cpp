@@ -36,6 +36,7 @@
 #include "frame_limiter.h"
 #include "game_definition.h"
 #include "disc_identity.h"
+#include "dlss_support.h"
 #include "game_files.h"
 #include "game_install.h"
 #include "game_library.h"
@@ -230,13 +231,7 @@ std::string Size(int width, int height) {
 std::vector<trg::Option> RenderResolutionOptions(AspectRatio aspect) {
   std::vector<trg::Option> options;
   for (int scale = kMinRenderScale; scale <= kMaxRenderScale; ++scale) {
-    const WindowSize size = RenderSize(aspect, scale);
-    std::string label = scale == 1 ? "Original" : std::to_string(scale) + "x";
-    label += " \xE2\x80\x94 " + std::to_string(size.width) + "x" + std::to_string(size.height);
-    if (scale == 2 && aspect == AspectRatio::k16x9) {
-      label += " \xE2\x80\x94 Recommended for 1440p";
-    }
-    options.push_back({std::to_string(scale), label});
+    options.push_back({std::to_string(scale), RenderResolutionLabel(aspect, scale)});
   }
   return options;
 }
@@ -257,14 +252,10 @@ const char* UpscalingHelp(UpscalerMask offered) {
            "Balanced and Performance draw the game at a lower resolution than the Render resolution, which costs less "
            "GPU time, and FSR 1 scales it up to the window.";
   }
-  return "AMD FSR 1 and NVIDIA NIS scale the game's picture to the window with sharper edges than plain scaling; their "
-         "Quality, Balanced and Performance draw the game below the Render resolution, which costs less GPU time. AMD "
-         "CAS draws at the Render resolution and sharpens the picture as it scales it to the window.";
-}
-
-const char* SharpnessHelp(Upscaler upscaler) {
-  return upscaler == Upscaler::kNis ? "How much NIS sharpens. 0% only scales; NVIDIA's default is 50%."
-                                    : "How much more CAS sharpens. 0% is AMD's standard CAS.";
+  return "AMD FSR 1 scales the game's picture to the window with sharper edges than plain scaling; its Quality, "
+         "Balanced and Performance draw the game below the Render resolution, which costs less GPU time. NVIDIA DLSS "
+         "(GeForce RTX) draws only the 3D scene smaller and rebuilds it at the Render resolution from several frames, "
+         "so the HUD and menus stay sharp.";
 }
 
 // Each quality with the size the game draws at and the Render resolution the upscaler brings it to.
@@ -276,6 +267,18 @@ std::vector<trg::Option> UpscaleQualityOptions(AspectRatio aspect, int render_sc
     if (info.quality != UpscaleQuality::kNative) {
       label += " (game " + SizeText(sizes.guest) + ")";
     }
+    options.push_back({info.key, label});
+  }
+  return options;
+}
+
+// NVIDIA's runtime picks the exact scene size of each mode.
+std::vector<trg::Option> DlssQualityOptions(AspectRatio aspect, int render_scale) {
+  std::vector<trg::Option> options;
+  for (const UpscaleQualityInfo& info : kUpscaleQualities) {
+    const RenderSizes sizes = RenderSizesFor(aspect, render_scale, Upscaler::kFsr1, info.quality);
+    std::string label = std::string(QualityLabel(Upscaler::kDlss, info.quality)) + " \xE2\x80\x94 3D scene ";
+    label += info.quality == UpscaleQuality::kNative ? SizeText(sizes.native) : "about " + SizeText(sizes.internal);
     options.push_back({info.key, label});
   }
   return options;
@@ -1000,19 +1003,34 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
              "costs more GPU time. Window size is separate.",
              "resolution_scale", "1", RenderResolutionOptions(SelectedAspectRatio()));
     if (UpscalingApplies()) {
-      const UpscalerMask offered = Selected().game->upscalers;
-      ui.Choice("Upscaling", UpscalingHelp(offered), "mua_upscaler", kUpscalerOff, UpscalerOptions(offered));
+      UpscalerMask offered = Selected().game->upscalers;
+      std::string dlss_unavailable;
+      if ((offered & UpscalerBit(Upscaler::kDlss)) && !Dlss().available) {
+        offered &= ~UpscalerBit(Upscaler::kDlss);
+        dlss_unavailable = "Unavailable: " + Dlss().reason + ".";
+        if (settings_.Get("mua_upscaler") == kUpscalerDlss) {
+          settings_.Set("mua_upscaler", kUpscalerOff);
+        }
+      }
+      ui.Choice("Upscaling", UpscalingHelp(Selected().game->upscalers), "mua_upscaler", kUpscalerOff,
+                UpscalerOptions(offered));
+      if (!dlss_unavailable.empty()) {
+        ui.Info("NVIDIA DLSS", dlss_unavailable.c_str());
+      }
       const Upscaler upscaler = ParseUpscaler(settings_.Get("mua_upscaler", kUpscalerOff), offered);
       const UpscalerInfo& info = UpscalerInfoFor(upscaler);
-      if (info.lowers_resolution) {
+      if (info.scene_only) {
+        ui.Combo("Upscaling quality",
+                 "How far below the Render resolution NVIDIA DLSS draws the 3D scene before rebuilding it at the Render "
+                 "resolution. DLAA keeps the full size and uses DLSS only to smooth edges. The HUD and menus always "
+                 "draw at the Render resolution.",
+                 "mua_upscale_quality", "native",
+                 DlssQualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
+      } else if (info.lowers_resolution) {
         const std::string help = std::string("How far below the Render resolution the game draws before ") + info.name +
                                  " scales it to the window. Lower is faster and softer, including the menus and HUD.";
         ui.Combo("Upscaling quality", help.c_str(), "mua_upscale_quality", "native",
                  UpscaleQualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
-      }
-      if (info.sharpness_key) {
-        ui.SliderInt("Sharpness", SharpnessHelp(upscaler), info.sharpness_key, info.sharpness_default, 0, 100, "%d%%",
-                     5);
       }
     }
     ui.Choice("Anti-aliasing", "Smooths jagged edges after the frame is drawn. Extreme is softer but cleaner.",
@@ -1040,6 +1058,23 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   }
 
   bool UpscalingApplies() const { return kUpscalerAvailable && Selected().game != nullptr; }
+
+  // NVIDIA's check runs once per graphics card choice, and only for a game that offers DLSS.
+  const DlssSupport& Dlss() {
+    const std::string adapter = settings_.Get("mua_graphics_adapter");
+    if (!dlss_support_ || adapter != dlss_adapter_) {
+      dlss_adapter_ = adapter;
+      dlss_support_ = CheckDlssSupport(ResolveGraphicsAdapter(adapter, graphics_adapters_).value_or(-1),
+                                       GameCacheRoot(*Selected().game, paths_.user_dir / "cache") / "ngx");
+      if (dlss_support_->available && MultisamplingApplies()) {
+        *dlss_support_ = {false, "it needs the rasterizer-ordered views render path, which this graphics card doesn't "
+                                 "run"};
+      }
+      REXLOG_INFO("Launcher: NVIDIA DLSS {}",
+                  dlss_support_->available ? std::string("available") : "unavailable: " + dlss_support_->reason);
+    }
+    return *dlss_support_;
+  }
 
   bool HdTextApplies() const { return Selected().game && hd_text::AssetsFor(Selected().game->id); }
 
@@ -1202,6 +1237,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   std::vector<MonitorInfo> monitors_;
   std::vector<GraphicsAdapter> graphics_adapters_;
   std::string host_render_targets_adapter_;
+  std::string dlss_adapter_;
+  std::optional<DlssSupport> dlss_support_;
   bool host_render_targets_checked_ = false;
   bool host_render_targets_ = true;
   struct HeaderArt {

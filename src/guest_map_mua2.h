@@ -55,7 +55,6 @@
 #define MUA_GUEST_MENU_SIGNIN sub_828FCA38
 #define MUA_GUEST_PLAYER_NUMBER_NAME sub_8260BA78
 #define MUA_GUEST_SEMAPHORE_WAIT sub_822E7400
-#define MUA_GUEST_SEMAPHORE_SIGNAL sub_822E7358
 
 namespace mua::guest {
 
@@ -74,7 +73,6 @@ inline constexpr uint32_t kObjectHandleManager = 0x8336CBF4;
 inline constexpr uint32_t kReleaseHandleManagerSite = 0x8228F6CC;
 inline constexpr uint32_t kReleaseHandleSite = 0x8228F6DC;
 // Alchemy semaphore (vtable 0x82156000): +16 maximum count, +20 kernel handle, +24 the count it keeps beside it.
-inline constexpr uint32_t kSemaphoreMaxCountOffset = 16;
 inline constexpr uint32_t kSemaphoreCountOffset = 24;
 inline constexpr uint32_t kAlchemySuccess = 0x83361BF0;
 inline constexpr uint32_t kAlchemyFailure = 0x82B6A3E4;

@@ -50,7 +50,6 @@ mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
 mua_add_test(guest_atomics_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
-mua_add_test(world_update_profile_tests headless SOURCES src/world_update_profile.cpp)
 mua_add_test(guest_semaphore_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(guest_map_tests headless
@@ -71,8 +70,21 @@ mua_add_test(d3d12_async_submission_tests headless)
 mua_add_test(d3d12_sampler_memo_tests headless)
 mua_add_test(render_scale_tests headless)
 mua_add_test(upscaling_tests headless)
+if(TARGET mua_dlss_bridge)
+    mua_add_test(dlss_bridge_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp
+        DEFINES MUA_DLSS_BRIDGE_DLL="$<TARGET_FILE:mua_dlss_bridge>")
+    add_dependencies(mua_dlss_bridge_tests mua_dlss_bridge)
+else()
+    mua_add_test(dlss_bridge_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
+endif()
 if(WIN32)
     mua_add_test(d3d12_copy_validation_tests headless LIBS d3d12 dxgi)
+    # The staged SDK source: scene_layout.h (patches/rexglue-sdk/0161 to 0163) before a runtime build installs it,
+    # and the renderer's own depth conversion.
+    mua_add_test(scene_upscaler_math_tests headless
+        SOURCES out/rexglue-sdk-src/src/graphics/xenos.cpp out/rexglue-sdk-src/src/core/math_msvc.cpp)
+    target_include_directories(mua_scene_upscaler_math_tests BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src/include")
 endif()
 mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")

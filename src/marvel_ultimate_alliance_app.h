@@ -202,6 +202,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       mua::PinGuestVideoMode();
       mua::ApplyAspectRatio();
       const rex::PathConfig routed = RoutedPaths(defaults, selected);
+      mua::ApplyDlss(routed.cache_root);
       for (const mua::ShaderStorageRepair& repair : mua::RepairShaderStorage(routed.cache_root)) {
         REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);
       }
@@ -315,7 +316,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     REXLOG_INFO("Window closing, hard-exiting process.");
     mua::DiscardSessionLogBeforeHardExit();
     rex::FlushLogging();
-    std::_Exit(0);
+    mua::HardExitProcess();
   }
 
   // F7 toggles the project's own overlay; ReXApp's stock one is never created.

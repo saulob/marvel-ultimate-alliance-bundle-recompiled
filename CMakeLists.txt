@@ -186,6 +186,7 @@ set(MUA_HOST_SOURCES
     src/crash_report.cpp
     src/diagnostics.cpp
     src/disc_identity.cpp
+    src/dlss_support.cpp
     src/game_definition.cpp
     src/game_files.cpp
     src/game_install.cpp
@@ -257,8 +258,6 @@ set(MUA_RUNTIME_SOURCES
     src/skip_intro.cpp
     src/sound_stream_ring.cpp
     src/swap_hooks.cpp
-    src/world_update_profile.cpp
-    src/world_update_profiler.cpp
     src/xaudio_worker_barrier.cpp
 )
 
@@ -395,6 +394,29 @@ if(WIN32)
     target_link_options(trg-updater PRIVATE -static)
     set_property(TARGET trg-updater PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     set_target_properties(trg-updater PROPERTIES OUTPUT_NAME "trg-updater")
+endif()
+
+# NVIDIA DLSS Super Resolution (Windows): mua_dlss_bridge.dll is the only code built against NVIDIA's DLSS SDK, which
+# tools/setup-dlss-sdk.ps1 downloads. The GPU plugin (patches/rexglue-sdk/0160, 0161) and the launcher's support check
+# load it from beside the program, and everything runs without it.
+set(MUA_DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/nvidia-dlss/310.9.16")
+if(WIN32 AND EXISTS "${MUA_DLSS_SDK_DIR}/include/nvsdk_ngx_helpers.h"
+        AND EXISTS "${MUA_DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
+    set(MUA_DLSS_BRIDGE ON CACHE INTERNAL "Whether mua_dlss_bridge.dll is built")
+    add_library(mua_dlss_bridge SHARED src/dlss_bridge/dlss_bridge.cpp)
+    target_include_directories(mua_dlss_bridge PRIVATE "${MUA_DLSS_SDK_DIR}/include")
+    target_compile_definitions(mua_dlss_bridge PRIVATE MUA_DLSS_ENGINE_VERSION="${PROJECT_VERSION}")
+    # NVIDIA's nvsdk_ngx_s libraries are built for the static CRT, which also keeps the bridge free of runtime DLLs.
+    set_property(TARGET mua_dlss_bridge PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(mua_dlss_bridge PRIVATE
+        "${MUA_DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s$<$<CONFIG:Debug>:_dbg>.lib" version advapi32 user32)
+    add_custom_command(TARGET mua_dlss_bridge POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MUA_DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll"
+            "$<TARGET_FILE_DIR:mua_dlss_bridge>"
+        VERBATIM
+    )
+else()
+    set(MUA_DLSS_BRIDGE OFF CACHE INTERNAL "Whether mua_dlss_bridge.dll is built")
 endif()
 
 mua_add_game_executable(marvel_ultimate_alliance_bundle "" launcher)

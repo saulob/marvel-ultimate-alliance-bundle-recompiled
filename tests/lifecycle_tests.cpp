@@ -59,11 +59,17 @@ void TestHostWindowCloseHardExits() {
   CHECK(Has(app, "void OnClosing(rex::ui::UIEvent&) override"));
   const std::string body = FunctionBody(app, "void OnClosing(");
   CHECK(Has(body, "rex::FlushLogging();"));
-  CHECK(Has(body, "std::_Exit(0);"));
+  CHECK(Has(body, "mua::HardExitProcess();"));
   CHECK(!Has(body, "TerminateTitle"));
   CHECK(!Has(body, "StopTitleThreads"));
   CHECK(!Has(body, "Shutdown("));
   CHECK(!Has(body, "DetachWindowHost"));
+  // Windows skips ExitProcess and its DLL detach code; elsewhere std::_Exit.
+  const std::string platform = ReadSource("platform.cpp");
+  const std::string exit = Between(platform, "void HardExitProcess() {", "\n}");
+  const size_t terminate = exit.find("TerminateProcess(GetCurrentProcess(), 0);");
+  const size_t fallback = exit.find("std::_Exit(0);");
+  CHECK(terminate != std::string::npos && fallback != std::string::npos && terminate < fallback);
 }
 
 void TestNormalExitKeepsTeardown() {
@@ -115,9 +121,9 @@ void TestSessionLogFinalizationWiring() {
   CHECK(Has(closing, "mua::DiscardSessionLogBeforeHardExit();"));
   CHECK(!Has(closing, "FinalizeSessionLog"));
   CHECK(Has(closing, "rex::FlushLogging();"));
-  CHECK(Has(closing, "std::_Exit(0);"));
+  CHECK(Has(closing, "mua::HardExitProcess();"));
   const size_t finalize = closing.find("mua::DiscardSessionLogBeforeHardExit();");
-  const size_t hard_exit = closing.find("std::_Exit(0);");
+  const size_t hard_exit = closing.find("mua::HardExitProcess();");
   CHECK(finalize != std::string::npos && hard_exit != std::string::npos && finalize < hard_exit);
   CHECK(!Has(Between(app, "void OnShutdown() override", "void OnClosing("), "mua::FinalizeSessionLog();"));
 
@@ -169,7 +175,7 @@ void TestIntentionalExitsWriteNoCrashBlock() {
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
   const std::string closing = FunctionBody(app, "void OnClosing(");
   CHECK(Has(closing, "rex::FlushLogging();"));
-  CHECK(Has(closing, "std::_Exit(0);"));
+  CHECK(Has(closing, "mua::HardExitProcess();"));
   CHECK(!Has(closing, "CrashReport"));
   const std::string shutdown = FunctionBody(app, "void OnShutdown(");
   CHECK(!Has(shutdown, "CrashReport"));
