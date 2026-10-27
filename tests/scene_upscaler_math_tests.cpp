@@ -4,19 +4,25 @@
 // it, D24S8 and D24FS8 depth decoding, camera reprojection giving motion only when the camera moves, and the targets
 // drawn before the scene: their whole scale, which surfaces qualify, and their resolves stretched back to full size;
 // and the DLSS depth (0163): the ROV's D24S8 and D24FS8 read back with the renderer's own conversion, which resolve it
-// is taken from, and its composition from both tiles at the scene's scale.
+// is taken from, and its composition from both tiles at the scene's scale. AMD FSR 3.1 (0165): AMD's render sizes,
+// jitter phases and offsets, the camera planes recovered from the game's matrices and read back through FSR's own depth
+// conversion, and the motion vectors reprojected the way FSR's shaders do.
 // Run: mua_scene_upscaler_math_tests
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <rex/graphics/d3d12/scene_layout.h>
 #include <rex/graphics/xenos.h>
+
+#include "upscaling.h"
 
 namespace {
 
@@ -849,6 +855,257 @@ void TestNativePreSceneTargets() {
   }
 }
 
+// AMD's halton() of ffx_fsr3upscaler.cpp (FidelityFX SDK 1.1.4), which ffxFsr3UpscalerGetJitterOffset uses.
+float AmdHalton(int32_t index, int32_t base) {
+  float f = 1.0f, result = 0.0f;
+  for (int32_t current = index; current > 0;) {
+    f /= float(base);
+    result = result + f * float(current % base);
+    current = int32_t(std::floor(float(current) / float(base)));
+  }
+  return result;
+}
+
+// FSR 3.1's view depth from a depth buffer value (setupDeviceDepthToViewSpaceDepthParams and GetViewSpaceDepth of
+// FidelityFX SDK 1.1.4), for a context without DEPTH_INFINITE.
+float AmdViewDepth(float device_depth, float camera_near, float camera_far, bool inverted) {
+  float min_plane = std::min(camera_near, camera_far);
+  float max_plane = std::max(camera_near, camera_far);
+  if (inverted) {
+    std::swap(min_plane, max_plane);
+  }
+  const float q = max_plane / (min_plane - max_plane);
+  const float factor0 = -1.0f * q;
+  const float factor1 = q * min_plane;
+  return factor1 / (device_depth - factor0);
+}
+
+// A projection whose depth buffer value is alpha + beta / view depth, after a viewport z scale and offset of 1 and 0.
+scene::Matrix DepthProjection(double alpha, double beta, double fov_y, double aspect) {
+  const double f = 1.0 / std::tan(fov_y / 2.0);
+  return {f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, alpha, beta, 0, 0, 1, 0};
+}
+
+void TestFsr3RenderSizes() {
+  std::printf("FSR 3.1's scene sizes: AMD's ratios, snapped like DLSS's, the same as the launcher shows\n");
+  CHECK(scene::kFsr3UpscaleRatios[0] == 1.0f && scene::kFsr3UpscaleRatios[1] == 1.5f &&
+        scene::kFsr3UpscaleRatios[2] == 1.7f && scene::kFsr3UpscaleRatios[3] == 2.0f &&
+        scene::kFsr3UpscaleRatios[4] == 3.0f);
+  // FfxApiUpscaleQualityMode's order is the launcher's.
+  CHECK(uint32_t(mua::UpscaleQuality::kNative) == 0 && uint32_t(mua::UpscaleQuality::kQuality) == 1 &&
+        uint32_t(mua::UpscaleQuality::kBalanced) == 2 && uint32_t(mua::UpscaleQuality::kPerformance) == 3 &&
+        uint32_t(mua::UpscaleQuality::kUltraPerformance) == 4);
+  CHECK(scene::Fsr3RenderSize(3840, 3) == 1920 && scene::Fsr3RenderSize(2160, 3) == 1080);
+  CHECK(scene::Fsr3RenderSize(3840, 2) == 2258 && scene::Fsr3RenderSize(2160, 2) == 1270);
+  CHECK(scene::Fsr3RenderSize(5120, 1) == 3413 && scene::Fsr3RenderSize(1280, 4) == 426);
+  for (uint32_t scale = 1; scale <= 4; ++scale) {
+    const uint32_t output_width = 1280 * scale, output_height = 720 * scale;
+    for (uint32_t mode = 0; mode < 5; ++mode) {
+      const uint32_t width = mode ? scene::SnapRenderWidth(scene::Fsr3RenderSize(output_width, mode), 1280, 0,
+                                                           output_width)
+                                  : output_width;
+      const uint32_t height = scene::Fsr3RenderSize(output_height, mode);
+      const mua::WindowSize launcher =
+          mua::Fsr3SceneSize({int(output_width), int(output_height)}, 1280, mua::UpscaleQuality(mode));
+      CHECK(int(width) == launcher.width && int(height) == launcher.height);
+      CHECK(width <= output_width && height <= output_height);
+      // MUA1's tile seam at guest x 640 is a whole render pixel.
+      CHECK(std::fmod(640.0 * width / 1280.0, 1.0) == 0.0);
+    }
+  }
+}
+
+void TestFsr3Jitter() {
+  std::printf("FSR 3.1's jitter: AMD's phase count and Halton(2,3) offsets\n");
+  CHECK(scene::Fsr3JitterPhaseCount(3840, 3840) == 8);
+  CHECK(scene::Fsr3JitterPhaseCount(2560, 3840) == 18);
+  CHECK(scene::Fsr3JitterPhaseCount(2256, 3840) == 23);
+  CHECK(scene::Fsr3JitterPhaseCount(1920, 3840) == 32);
+  CHECK(scene::Fsr3JitterPhaseCount(1280, 3840) == 72);
+  CHECK(scene::Fsr3JitterPhaseCount(1712, 5120) == 71);
+  for (int32_t index = 1; index <= 256; ++index) {
+    CHECK(scene::Halton(uint32_t(index), 2) == AmdHalton(index, 2));
+    CHECK(scene::Halton(uint32_t(index), 3) == AmdHalton(index, 3));
+  }
+  // The scene upscaler's offset of frame n is AMD's ffxFsr3UpscalerGetJitterOffset(n, phases): in (-0.5, 0.5), in render
+  // pixels, the sequence repeating after the phase count.
+  const uint32_t phases = scene::Fsr3JitterPhaseCount(1920, 3840);
+  for (uint64_t frame = 0; frame < 3 * phases; ++frame) {
+    const uint32_t index = uint32_t(frame % phases) + 1;
+    const float x = scene::Halton(index, 2) - 0.5f, y = scene::Halton(index, 3) - 0.5f;
+    CHECK(x == AmdHalton(int32_t(frame % phases) + 1, 2) - 0.5f && y == AmdHalton(int32_t(frame % phases) + 1, 3) - 0.5f);
+    CHECK(std::abs(x) < 0.5f && std::abs(y) < 0.5f);
+  }
+}
+
+void TestFsr3Depth() {
+  std::printf("FSR 3.1's camera: near, far and field of view from the game's matrices, read back by FSR's own depth\n");
+  const double near_z = 4.0, far_z = 6000.0, fov = 0.9, aspect = 16.0 / 9.0;
+  const scene::Matrix world = scene::Multiply(scene::Multiply(Translation(30.0, -5.0, 200.0), RotationY(0.7)),
+                                              scene::Matrix{2.5, 0, 0, 0, 0, 2.5, 0, 0, 0, 0, 2.5, 0, 0, 0, 0, 1});
+  const scene::Matrix view = scene::Multiply(RotationY(-0.3), Translation(-12.0, 3.0, 40.0));
+  struct Case {
+    const char* name;
+    double alpha, beta;
+    bool inverted;
+    bool infinite;
+  };
+  const Case cases[] = {
+      {"0 near, 1 far", far_z / (far_z - near_z), -near_z * far_z / (far_z - near_z), false, false},
+      {"1 near, 0 far", -near_z / (far_z - near_z), near_z * far_z / (far_z - near_z), true, false},
+      {"0 near, infinite far", 1.0, -near_z, false, true},
+      {"1 near, infinite far", 0.0, near_z, true, true},
+  };
+  for (const Case& c : cases) {
+    const scene::Matrix object_to_clip =
+        scene::Multiply(DepthProjection(c.alpha, c.beta, fov, aspect), scene::Multiply(view, world));
+    const std::optional<scene::CameraProjection> camera = scene::CameraProjectionFor(object_to_clip, 1.0, 0.0, c.inverted);
+    CHECK(camera.has_value());
+    if (!camera) {
+      std::printf("    %s: no camera\n", c.name);
+      continue;
+    }
+    CHECK(std::abs(camera->near_depth - near_z) < 1.0e-6 * near_z);
+    CHECK(c.infinite ? std::isinf(camera->far_depth) : std::abs(camera->far_depth - far_z) < 1.0e-6 * far_z);
+    CHECK(std::abs(camera->fov_y - fov) < 1.0e-9);
+    // What the scene upscaler passes: FLT_MAX for an infinite far plane.
+    const float camera_far = std::isfinite(camera->far_depth) ? float(camera->far_depth) : FLT_MAX;
+    double worst = 0.0;
+    for (const double view_depth : {5.0, 12.0, 80.0, 400.0, 2500.0, 5900.0}) {
+      const float device_depth = float(c.alpha + c.beta / view_depth);
+      const float fsr = AmdViewDepth(device_depth, float(camera->near_depth), camera_far, c.inverted);
+      worst = std::max(worst, std::abs(fsr - view_depth) / view_depth);
+    }
+    std::printf("    %s: near %.4g, far %.4g, FSR view depth error %.2g\n", c.name, camera->near_depth,
+                camera->far_depth, worst);
+    CHECK(worst < 2.0e-3);
+  }
+  // A viewport that maps depth 0 to 1 the other way round is the same camera with inverted depth.
+  const scene::Matrix standard = scene::Multiply(DepthProjection(cases[0].alpha, cases[0].beta, fov, aspect), view);
+  const std::optional<scene::CameraProjection> flipped = scene::CameraProjectionFor(standard, -1.0, 1.0, true);
+  CHECK(flipped && std::abs(flipped->near_depth - near_z) < 1.0e-6 * near_z &&
+        std::abs(flipped->far_depth - far_z) < 1.0e-6 * far_z);
+  // An orthographic or degenerate matrix gives no camera.
+  CHECK(!scene::CameraProjectionFor(scene::kIdentity, 1.0, 0.0, false));
+  // The projection most draws share; a sky drawn with its own far plane and a stretched object don't win.
+  const scene::CameraProjection shared = {near_z, far_z, fov};
+  const std::vector<scene::CameraProjection> projections = {shared, {near_z, 1.0e6, fov}, shared, {near_z, far_z, 1.2},
+                                                            shared};
+  const std::optional<scene::CameraProjection> consensus = scene::ConsensusCameraProjection(projections);
+  CHECK(consensus && scene::NearlyEqual(*consensus, shared));
+  CHECK(!scene::ConsensusCameraProjection({}));
+}
+
+void TestFsr3MotionVectors() {
+  std::printf("FSR 3.1 reprojects the camera motion vectors to where each surface was, whatever the jitter\n");
+  const std::array<float, 6> viewport = {640.0f, 640.0f, -360.0f, 360.0f, 1.0f, 0.0f};
+  const uint32_t render_width = 1920, render_height = 1080;
+  const std::array<float, 2> render_scale = {float(render_width) / 1280.0f, float(render_height) / 720.0f};
+  const scene::Matrix projection = Perspective();
+  const scene::Matrix previous = scene::Multiply(projection, scene::Multiply(RotationY(0.0), Translation(0, -2, 10)));
+  const scene::Matrix current = scene::Multiply(projection, scene::Multiply(RotationY(0.03), Translation(0.4, -2, 9.5)));
+  scene::Matrix current_inverse;
+  CHECK(scene::Invert(current, current_inverse));
+  const scene::Matrix clip_to_previous_clip = scene::Multiply(previous, current_inverse);
+  double worst = 0.0;
+  for (const std::array<float, 2>& jitter :
+       std::array<std::array<float, 2>, 3>{{{0.0f, 0.0f}, {0.4375f, -0.2963f}, {-0.3125f, 0.1852f}}}) {
+    for (uint32_t y = 3; y < render_height; y += 97) {
+      for (uint32_t x = 11; x < render_width; x += 131) {
+        const float depth = 0.97f + 0.02f * float(x) / float(render_width);
+        const std::array<float, 2> motion =
+            scene::CameraMotion(clip_to_previous_clip, viewport, render_scale, jitter, x, y, depth);
+        // FSR: the sample of render pixel (x, y) holds the scene at the pixel center minus the jitter; its previous
+        // position is that UV plus motion * motionVectorScale / renderSize, with motionVectorScale 1.
+        const double uv_x = (x + 0.5 - jitter[0]) / render_width, uv_y = (y + 0.5 - jitter[1]) / render_height;
+        const double reprojected_x = (uv_x + motion[0] * 1.0 / render_width) * render_width;
+        const double reprojected_y = (uv_y + motion[1] * 1.0 / render_height) * render_height;
+        // The same surface point seen by the previous camera.
+        const double ndc[4] = {((x + 0.5 - jitter[0]) / render_scale[0] - viewport[1]) / viewport[0],
+                               ((y + 0.5 - jitter[1]) / render_scale[1] - viewport[3]) / viewport[2],
+                               (depth - viewport[5]) / viewport[4], 1.0};
+        double world[4] = {};
+        for (size_t r = 0; r < 4; ++r) {
+          for (size_t c = 0; c < 4; ++c) {
+            world[r] += current_inverse[r * 4 + c] * ndc[c];
+          }
+        }
+        const std::array<double, 3> before =
+            Project(previous, {world[0] / world[3], world[1] / world[3], world[2] / world[3]}, viewport, render_scale);
+        worst = std::max({worst, std::abs(reprojected_x - before[0]), std::abs(reprojected_y - before[1])});
+      }
+    }
+  }
+  CHECK(worst < 2.0e-2);
+}
+
+void TestFsr3SceneComposition() {
+  std::printf("FSR 3.1's scene sizes compose MUA1's two tiles and their depth without gaps\n");
+  struct Size {
+    uint32_t output_scale, render_width, render_height;
+  };
+  // 4K Performance (the first manual test), Quality, Balanced and Ultra Performance; 5K and 1440p Ultra Performance.
+  for (const Size& size : {Size{3, 1920, 1080}, Size{3, 2560, 1440}, Size{3, 2256, 1270}, Size{3, 1280, 720},
+                           Size{4, 1712, 960}, Size{2, 848, 480}}) {
+    uint64_t wrong = 1;
+    const std::vector<scene::CaptureRegion> regions = ComposeTwoTiles(size.render_width, size.render_height, wrong);
+    CHECK(wrong == 0);
+    CHECK(regions.size() == 2 && regions[1].dest_x == size.render_width / 2);
+    const DepthComposeResult depth =
+        ComposeDepth(size.output_scale, size.render_width, size.render_height, true, DepthRule::kScenePlanes);
+    CHECK(depth.wrong == 0 && depth.uncovered == 0);
+    CHECK(depth.non_clear == uint64_t(size.render_width) * size.render_height);
+  }
+}
+
+void TestFsr3SceneAlpha() {
+  std::printf("FSR 3.1's write-back takes the scene's own alpha at each output pixel's unjittered point\n");
+  const uint32_t render_width = 1920, render_height = 1080, output_width = 3840, output_height = 2160;
+  const std::array<float, 2> source_scale = {float(render_width) / output_width, float(render_height) / output_height};
+  const std::array<float, 4> source_clamp = {0.0f, 0.0f, float(render_width), float(render_height)};
+  // The game's alpha over the screen, in unjittered render pixels; a linear ramp, which bilinear sampling keeps exactly.
+  const auto scene_alpha = [](double x, double y) { return 0.2 + 0.003 * x + 0.001 * y; };
+  double worst = 0.0, worst_unjittered = 0.0;
+  for (const std::array<float, 2>& jitter :
+       std::array<std::array<float, 2>, 3>{{{0.0f, 0.0f}, {0.4375f, -0.2963f}, {-0.3125f, 0.1852f}}}) {
+    // Each render pixel holds the scene at its center minus the jitter.
+    const auto rendered = [&](int32_t x, int32_t y) {
+      x = std::clamp<int32_t>(x, 0, render_width - 1);
+      y = std::clamp<int32_t>(y, 0, render_height - 1);
+      return scene_alpha(x + 0.5 - jitter[0], y + 0.5 - jitter[1]);
+    };
+    const auto bilinear = [&](float px, float py) {
+      const double fx = px - 0.5, fy = py - 0.5;
+      const int32_t x0 = int32_t(std::floor(fx)), y0 = int32_t(std::floor(fy));
+      const double tx = fx - x0, ty = fy - y0;
+      return (rendered(x0, y0) * (1 - tx) + rendered(x0 + 1, y0) * tx) * (1 - ty) +
+             (rendered(x0, y0 + 1) * (1 - tx) + rendered(x0 + 1, y0 + 1) * tx) * ty;
+    };
+    for (uint32_t y = 4; y < output_height - 4; y += 113) {
+      for (uint32_t x = 4; x < output_width - 4; x += 157) {
+        const std::array<float, 2> source = scene::SceneAlphaSourcePosition(x, y, source_scale, jitter, source_clamp);
+        const double expected = scene_alpha((x + 0.5) * source_scale[0], (y + 0.5) * source_scale[1]);
+        worst = std::max(worst, std::abs(bilinear(source[0], source[1]) - expected));
+        const std::array<float, 2> unjittered =
+            scene::SceneAlphaSourcePosition(x, y, source_scale, {0.0f, 0.0f}, source_clamp);
+        worst_unjittered = std::max(worst_unjittered, std::abs(bilinear(unjittered[0], unjittered[1]) - expected));
+      }
+    }
+  }
+  CHECK(worst < 1.0e-4);
+  // Ignoring the jitter would read the alpha up to half a render pixel off.
+  CHECK(worst_unjittered > 5.0e-4);
+  // Within the render size at the edges, like the stretched copies (mode 1) without jitter.
+  const std::array<float, 2> corner = scene::SceneAlphaSourcePosition(0, 0, source_scale, {-0.4f, -0.4f}, source_clamp);
+  CHECK(corner[0] == 0.5f && corner[1] == 0.5f);
+  const std::array<float, 2> far_corner =
+      scene::SceneAlphaSourcePosition(output_width - 1, output_height - 1, source_scale, {0.4f, 0.4f}, source_clamp);
+  CHECK(far_corner[0] == render_width - 0.5f && far_corner[1] == render_height - 0.5f);
+  const std::array<float, 2> center =
+      scene::SceneAlphaSourcePosition(1000, 600, source_scale, {0.0f, 0.0f}, source_clamp);
+  CHECK(center[0] == 1000.5f * source_scale[0] && center[1] == 600.5f * source_scale[1]);
+}
+
 }  // namespace
 
 int main() {
@@ -866,6 +1123,12 @@ int main() {
   TestScenePlanes();
   TestDepthCompose();
   TestNativePreSceneTargets();
+  TestFsr3RenderSizes();
+  TestFsr3Jitter();
+  TestFsr3Depth();
+  TestFsr3MotionVectors();
+  TestFsr3SceneComposition();
+  TestFsr3SceneAlpha();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

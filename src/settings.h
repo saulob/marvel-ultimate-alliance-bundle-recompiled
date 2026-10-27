@@ -89,6 +89,10 @@ void LogUpscaling();
 // its files in the game's cache folder. Call after ApplyGameSettings and before the GPU starts.
 void ApplyDlss(const std::filesystem::path& cache_root);
 
+// Sets the Direct3D 12 runtime's AMD FSR 3.1 mode and sharpness from the Upscaling choice, with AMD's DLL beside the
+// program; any other choice turns it off.
+void ApplyFsr3();
+
 // Keeps the guest video mode off the window size, which ReXGlue otherwise reports. Call once the window exists and
 // before the guest starts.
 void PinGuestVideoMode();

@@ -18,7 +18,7 @@ inline constexpr char kUpdateHelper[] = "trg-updater.exe";
 
 // Every program and library of the bundle: a release that lacks one is refused, so a package never replaces
 // the launcher without the game programs it starts.
-inline constexpr std::array<const char*, 12> kBundleFiles = {
+inline constexpr std::array<const char*, 13> kBundleFiles = {
     "marvel_ultimate_alliance_bundle.exe",
     "marvel_ultimate_alliance_mua1.exe",
     "marvel_ultimate_alliance_mua1_gold.exe",
@@ -26,6 +26,7 @@ inline constexpr std::array<const char*, 12> kBundleFiles = {
     "trg-updater.exe",
     "rexruntime.dll",
     "rexgpu-xenos.dll",
+    "amd_fidelityfx_dx12.dll",
     "marvel_ultimate_alliance.toml",
     "assets/launcher/header-art-mua1.png",
     "assets/launcher/header-art-mua1-gold.png",

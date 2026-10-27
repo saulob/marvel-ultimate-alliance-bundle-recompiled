@@ -26,6 +26,7 @@
 #include "crash_report.h"
 #include "diagnostics.h"
 #include "dlss_support.h"
+#include "fsr3_support.h"
 #include "frame_limiter.h"
 #include "game_files.h"
 #include "game_handoff.h"
@@ -67,9 +68,13 @@ REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
                       "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
 REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance",
                       "Upscaler from the game's picture to the window: off, fsr (AMD FSR 1), or in Marvel Ultimate "
-                      "Alliance also dlss (NVIDIA DLSS); applied at start");
+                      "Alliance also fsr3 (AMD FSR 3.1) and dlss (NVIDIA DLSS); applied at start");
 REXCVAR_DEFINE_STRING(mua_upscale_quality, "native", "Marvel Ultimate Alliance",
-                      "With an upscaler, draw below the Render resolution: native, quality, balanced or performance");
+                      "With an upscaler, draw below the Render resolution: native, quality, balanced, performance or "
+                      "(AMD FSR 3.1) ultra_performance");
+REXCVAR_DEFINE_INT32(mua_fsr3_sharpness, mua::kDefaultFsr3Sharpness, "Marvel Ultimate Alliance",
+                     "AMD FSR 3.1's sharpening, 0 (off) to 100; applied at start")
+    .range(0, 100);
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
                       "Graphics card: the index d3d12_adapter takes; anything else uses the first (applied at start)");
 REXCVAR_DEFINE_STRING(mua_player_1_name, "Player 1", "Marvel Ultimate Alliance",
@@ -112,6 +117,7 @@ std::vector<std::string> GameSettingKeys() {
       "resolution_scale",
       "mua_upscaler",
       "mua_upscale_quality",
+      "mua_fsr3_sharpness",
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
@@ -135,8 +141,8 @@ std::vector<std::string> GameSettingKeys() {
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
-constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro", "mua_frame_rate", "mua_aspect_ratio",
-                                                 "mua_upscaler", "mua_upscale_quality"};
+constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro",  "mua_frame_rate",      "mua_aspect_ratio",
+                                                 "mua_upscaler",    "mua_upscale_quality", "mua_fsr3_sharpness"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
@@ -654,6 +660,37 @@ void ApplyDlss(const std::filesystem::path& cache_root) {
   REXLOG_INFO("NVIDIA DLSS: {} requested; NVIDIA's runtime starts with the first 3D scene", mode);
 }
 
+void ApplyFsr3() {
+  const bool selected = ActiveUpscaler() == Upscaler::kFsr3;
+  if (!rex::cvar::GetFlagInfo("d3d12_fsr3_mode")) {
+    if (selected) {
+      REXLOG_WARN("AMD FSR 3.1: this runtime has none (Direct3D 12 patched runtime only); the game draws without it");
+    }
+    return;
+  }
+  if (!selected) {
+    rex::cvar::SetFlagByName("d3d12_fsr3_mode", "off");
+    return;
+  }
+  const std::filesystem::path library = rex::filesystem::GetExecutableFolder() / kFidelityFxLibraryFile;
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(library, error)) {
+    REXLOG_WARN("AMD FSR 3.1: {} is not next to the program (built without the AMD FidelityFX SDK); the game draws "
+                "without it",
+                kFidelityFxLibraryFile);
+    rex::cvar::SetFlagByName("d3d12_fsr3_mode", "off");
+    return;
+  }
+  const UpscaleQuality quality =
+      EffectiveQuality(Upscaler::kFsr3, ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
+  const int sharpness = std::clamp(REXCVAR_GET(mua_fsr3_sharpness), 0, 100);
+  rex::cvar::SetFlagByName("d3d12_fsr3_library", Utf8(library));
+  rex::cvar::SetFlagByName("d3d12_fsr3_sharpness", std::to_string(sharpness));
+  rex::cvar::SetFlagByName("d3d12_fsr3_mode", Fsr3ModeFor(quality));
+  REXLOG_INFO("AMD FSR 3.1: {} requested, sharpness {} (FidelityFX SDK {}, {}); it starts with the first 3D scene",
+              Fsr3ModeFor(quality), sharpness, kFidelityFxSdkVersion, kFidelityFxLibraryFile);
+}
+
 // The requested upscaler; the presenter logs the passes that actually run ("Presenter: ... effects:").
 void LogUpscaling() {
   const Upscaler upscaler = ActiveUpscaler();
@@ -663,9 +700,10 @@ void LogUpscaling() {
       RenderSizesFor(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)),
                      std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()), upscaler, quality);
   const bool on = upscaler != Upscaler::kOff;
-  const std::string input = info.scene_only ? "the 3D scene at NVIDIA's size (DLSS: Super Resolution line)"
-                            : on            ? SizeText(sizes.internal)
-                                            : "none";
+  const std::string input = upscaler == Upscaler::kDlss    ? "the 3D scene at NVIDIA's size (DLSS: Super Resolution line)"
+                            : upscaler == Upscaler::kFsr3  ? "the 3D scene at AMD's size (FSR 3.1: AMD FSR 3.1 line)"
+                            : on                           ? SizeText(sizes.internal)
+                                                           : "none";
   const std::string output = info.scene_only ? "the 3D scene at " + SizeText(sizes.native)
                              : on            ? "presenter output (Presenter line)"
                                              : "none";

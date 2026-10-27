@@ -38,7 +38,8 @@ $Sdk = Join-Path $SdkRoot 'bin'
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $BuildFiles = @('marvel_ultimate_alliance_bundle.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
-    'marvel_ultimate_alliance_mua2.exe', 'rexruntime.dll', 'rexgpu-xenos.dll', 'marvel_ultimate_alliance.toml')
+    'marvel_ultimate_alliance_mua2.exe', 'rexruntime.dll', 'rexgpu-xenos.dll', 'amd_fidelityfx_dx12.dll',
+    'marvel_ultimate_alliance.toml')
 $RootFiles = $BuildFiles + @('trg-updater.exe', 'README.txt')
 $LicenseFiles = @('ReXGlue-LICENSE.txt', 'THIRD-PARTY-LICENSES.txt')
 $AssetFiles = @('assets\launcher\header-art-mua1.png', 'assets\launcher\header-art-mua1-gold.png', 'assets\launcher\header-art-mua2.png')

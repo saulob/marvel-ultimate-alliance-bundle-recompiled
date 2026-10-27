@@ -9,10 +9,13 @@ FPS and its GPU wait from 23.67 to 19.66 ms (log 250). The fifth version takes t
 (0163; it was the clear value in every gameplay frame, see "Fourth run") and, in Performance, draws the pre-scene
 targets only the scene samples at the game's own 1x (0164).
 
-MUA1 on Windows offers NVIDIA DLSS in the launcher's Upscaling choice (Off, AMD FSR 1, NVIDIA DLSS), on a GeForce RTX
-card that uses the rasterizer-ordered view (ROV) render path. DLSS upscales the 3D scene only, from the scene's own
-color and depth, camera motion vectors and a jitter the port adds; the HUD and menus keep drawing at the Render
-resolution. Gold Edition and MUA2 do not offer it. Nothing about DLSS runs unless it is selected.
+AMD FSR 3.1 ([fsr3.md](fsr3.md)) is a second backend of the same scene upscaler, with the same scene, depth, motion
+vectors, jitter, pre-scene targets and write-back.
+
+MUA1 on Windows offers NVIDIA DLSS in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1, NVIDIA DLSS), on a
+GeForce RTX card that uses the rasterizer-ordered view (ROV) render path. DLSS upscales the 3D scene only, from the
+scene's own color and depth, camera motion vectors and a jitter the port adds; the HUD and menus keep drawing at the
+Render resolution. Gold Edition and MUA2 do not offer it. Nothing about DLSS runs unless it is selected.
 
 ## Pieces
 

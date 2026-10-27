@@ -844,7 +844,7 @@ void TestBundleDefinitions() {
   for (const char* required :
        {"marvel_ultimate_alliance_bundle.exe", "marvel_ultimate_alliance_mua1.exe", "marvel_ultimate_alliance_mua1_gold.exe",
         "marvel_ultimate_alliance_mua2.exe", "trg-updater.exe", "rexruntime.dll", "rexgpu-xenos.dll",
-        "marvel_ultimate_alliance.toml", "assets/launcher/header-art-mua1.png",
+        "amd_fidelityfx_dx12.dll", "marvel_ultimate_alliance.toml", "assets/launcher/header-art-mua1.png",
         "assets/launcher/header-art-mua1-gold.png", "assets/launcher/header-art-mua2.png",
         "licenses/THIRD-PARTY-LICENSES.txt"}) {
     CHECK(std::find(bundle.begin(), bundle.end(), required) != bundle.end());

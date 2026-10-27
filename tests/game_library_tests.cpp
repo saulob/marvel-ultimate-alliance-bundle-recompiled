@@ -136,17 +136,22 @@ void TestFramePolicies() {
 }
 
 void TestUpscalers() {
-  std::printf("DLSS belongs to MUA 1; Gold Edition and MUA 2 keep Off and FSR 1; NIS and CAS are gone\n");
+  std::printf("FSR 3.1 and DLSS belong to MUA 1; Gold Edition and MUA 2 keep Off and FSR 1; NIS and CAS are gone\n");
   CHECK(Mua1().upscalers == mua::kAllUpscalers);
   CHECK(Gold().upscalers == mua::kFsr1Upscalers);
   CHECK(Mua2().upscalers == mua::kFsr1Upscalers);
   for (const mua::GameDefinition* game : {&Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) == mua::Upscaler::kOff);
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) == mua::Upscaler::kOff);
+    CHECK((game->upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
           (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
   }
   CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, Mua1().upscalers) ==
         (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
+  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, Mua1().upscalers) ==
+        (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+  CHECK((Mua1().upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) != 0);
   for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler("nis", game->upscalers) == mua::Upscaler::kOff);
     CHECK(mua::ParseUpscaler("cas", game->upscalers) == mua::Upscaler::kOff);

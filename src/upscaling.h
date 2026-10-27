@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -10,7 +13,7 @@
 
 namespace mua {
 
-enum class Upscaler { kOff, kFsr1, kDlss };
+enum class Upscaler { kOff, kFsr1, kDlss, kFsr3 };
 
 using UpscalerMask = uint32_t;
 
@@ -19,11 +22,13 @@ constexpr UpscalerMask UpscalerBit(Upscaler upscaler) {
 }
 
 inline constexpr UpscalerMask kFsr1Upscalers = UpscalerBit(Upscaler::kOff) | UpscalerBit(Upscaler::kFsr1);
-inline constexpr UpscalerMask kAllUpscalers = kFsr1Upscalers | UpscalerBit(Upscaler::kDlss);
+inline constexpr UpscalerMask kAllUpscalers =
+    kFsr1Upscalers | UpscalerBit(Upscaler::kFsr3) | UpscalerBit(Upscaler::kDlss);
 
 inline constexpr char kUpscalerOff[] = "off";
 inline constexpr char kUpscalerFsr1[] = "fsr";
 inline constexpr char kUpscalerDlss[] = "dlss";
+inline constexpr char kUpscalerFsr3[] = "fsr3";
 
 struct UpscalerInfo {
   Upscaler upscaler;
@@ -38,6 +43,8 @@ struct UpscalerInfo {
 inline constexpr UpscalerInfo kUpscalers[] = {
     {Upscaler::kOff, kUpscalerOff, "Off", "", nullptr, false, false},
     {Upscaler::kFsr1, kUpscalerFsr1, "AMD FSR 1", "FSR 1", "fsr", true, false},
+    // Plain presentation, so FSR 1's sharpening never runs on top of FSR 3.1's.
+    {Upscaler::kFsr3, kUpscalerFsr3, "AMD FSR 3.1", "FSR 3.1", "bilinear", false, true},
     {Upscaler::kDlss, kUpscalerDlss, "NVIDIA DLSS", "DLSS", nullptr, false, true},
 };
 
@@ -61,13 +68,13 @@ inline const DeprecatedUpscaler* FindDeprecatedUpscaler(std::string_view value) 
   return nullptr;
 }
 
-enum class UpscaleQuality { kNative, kQuality, kBalanced, kPerformance };
+enum class UpscaleQuality { kNative, kQuality, kBalanced, kPerformance, kUltraPerformance };
 
 struct UpscaleQualityInfo {
   UpscaleQuality quality;
   const char* key;
   const char* label;
-  // AMD's FSR 1 modes: output size over render size along each axis.
+  // AMD's FSR modes: output size over render size along each axis.
   double ratio;
 };
 
@@ -76,7 +83,13 @@ inline constexpr UpscaleQualityInfo kUpscaleQualities[] = {
     {UpscaleQuality::kQuality, "quality", "Quality", 1.5},
     {UpscaleQuality::kBalanced, "balanced", "Balanced", 1.7},
     {UpscaleQuality::kPerformance, "performance", "Performance", 2.0},
+    {UpscaleQuality::kUltraPerformance, "ultra_performance", "Ultra Performance", 3.0},
 };
+
+// Only FSR 3.1 offers Ultra Performance.
+inline bool OffersQuality(Upscaler upscaler, UpscaleQuality quality) {
+  return quality != UpscaleQuality::kUltraPerformance || upscaler == Upscaler::kFsr3;
+}
 
 // The game's render targets and resolves keep its back buffer width a multiple of 16 pixels, and resolves work in
 // 8-line rows.
@@ -128,10 +141,13 @@ inline UpscaleQuality ParseUpscaleQuality(std::string_view value) {
   return UpscaleQuality::kNative;
 }
 
-// Off draws natively at every quality.
+// Off draws natively at every quality, and a quality the upscaler doesn't offer is its Performance.
 inline UpscaleQuality EffectiveQuality(Upscaler upscaler, UpscaleQuality quality) {
   const UpscalerInfo& info = UpscalerInfoFor(upscaler);
-  return info.lowers_resolution || info.scene_only ? quality : UpscaleQuality::kNative;
+  if (!info.lowers_resolution && !info.scene_only) {
+    return UpscaleQuality::kNative;
+  }
+  return OffersQuality(upscaler, quality) ? quality : UpscaleQuality::kPerformance;
 }
 
 // DLSS at Native is DLAA.
@@ -153,6 +169,44 @@ inline const char* DlssModeFor(UpscaleQuality quality) {
   }
 }
 
+// The GPU plugin's d3d12_fsr3_mode for a quality.
+inline const char* Fsr3ModeFor(UpscaleQuality quality) {
+  return QualityInfoFor(quality).key;
+}
+
+// FSR 3.1's sharpening (RCAS), 0 (off) to 100; AMD's samples use 80.
+inline constexpr int kDefaultFsr3Sharpness = 80;
+
+inline int ParseFsr3Sharpness(std::string_view value) {
+  int sharpness = -1;
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), sharpness);
+  const bool valid = error == std::errc() && end == value.data() + value.size() && sharpness >= 0 && sharpness <= 100;
+  return valid ? sharpness : kDefaultFsr3Sharpness;
+}
+
+// The GPU plugin's render width for a scene upscaler's size: EDRAM tile edges (80 pixels apart in the guest's canvas)
+// land on whole render pixels (patches/rexglue-sdk/0161, SnapRenderWidth).
+inline int SnapSceneWidth(int width, int canvas_width, int max_width) {
+  const int step = canvas_width / std::gcd(canvas_width, 80);
+  int snapped = std::max(step, (width + step / 2) / step * step);
+  if (max_width && snapped > max_width) {
+    snapped -= step;
+  }
+  return snapped;
+}
+
+// The 3D scene FSR 3.1 draws for an output size: AMD's render size of the quality
+// (ffxFsr3UpscalerGetRenderResolutionFromQualityMode), with the GPU plugin's width snap.
+inline WindowSize Fsr3SceneSize(WindowSize output, int canvas_width, UpscaleQuality quality) {
+  if (quality == UpscaleQuality::kNative) {
+    return output;
+  }
+  const float ratio = float(QualityInfoFor(quality).ratio);
+  const int width = int(uint32_t(float(output.width) / ratio));
+  const int height = int(uint32_t(float(output.height) / ratio));
+  return {SnapSceneWidth(width, canvas_width, output.width), height};
+}
+
 // The present_effect the upscaler needs; none leaves the player's own value alone.
 inline std::optional<std::string_view> PresentEffectFor(Upscaler upscaler) {
   if (const char* effect = UpscalerInfoFor(upscaler).present_effect) {
@@ -169,7 +223,8 @@ inline int AlignedDivide(int size, double ratio, int alignment) {
 // The back buffer the game draws into for a canvas: smaller by the quality's ratio, so the GPU draws fewer pixels and
 // the upscaler brings the picture back to the output size.
 inline WindowSize UpscaledBackBuffer(WindowSize canvas, Upscaler upscaler, UpscaleQuality quality) {
-  const double ratio = UpscalerInfoFor(upscaler).lowers_resolution ? QualityInfoFor(quality).ratio : 1.0;
+  const double ratio =
+      UpscalerInfoFor(upscaler).lowers_resolution ? QualityInfoFor(EffectiveQuality(upscaler, quality)).ratio : 1.0;
   if (ratio == 1.0) {
     return canvas;
   }

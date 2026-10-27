@@ -203,6 +203,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       mua::ApplyAspectRatio();
       const rex::PathConfig routed = RoutedPaths(defaults, selected);
       mua::ApplyDlss(routed.cache_root);
+      mua::ApplyFsr3();
       for (const mua::ShaderStorageRepair& repair : mua::RepairShaderStorage(routed.cache_root)) {
         REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);
       }

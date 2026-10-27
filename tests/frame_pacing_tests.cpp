@@ -287,18 +287,19 @@ void TestWiring() {
   CHECK(pacing.find("#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)") == std::string::npos);
   CHECK(Has(counters, "rex::perf::IncrementCounter(CounterId::kGuestUpdates, 1);"));
   const std::string watchdog = ReadSource("hang_watchdog.cpp");
-  CHECK(Has(watchdog, "std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();"));
+  CHECK(Has(watchdog, "std::thread(run, \"Hitch sampler\", SampleHitches, static_cast<HWND>(native_window)).detach();"));
   CHECK(Has(watchdog, "kHitchSampleAfter = std::chrono::milliseconds(150)"));
   CHECK(Has(watchdog, "kHitchStackAfter = std::chrono::milliseconds(500)"));
   CHECK(Has(watchdog, "Hitch sample: {} ms open | top {} | guest {}"));
   // The hitch sampler runs in every game program, never in the launcher; no profiler is left behind.
-  const size_t sampler = watchdog.find("std::thread(SampleHitches");
+  const size_t sampler = watchdog.find("std::thread(run, \"Hitch sampler\", SampleHitches");
   CHECK(sampler != std::string::npos && watchdog.rfind("#if MUA_HAS_RECOMPILED_CODE", sampler) + 40 > sampler);
   CHECK(!Has(watchdog, "MUA_RUNTIME_MUA1"));
   CHECK(!Has(watchdog, "ProfileRenderThread"));
   CHECK(!Has(watchdog, "DEBUG_SAULO"));
   // Without a PDB a frame still names its module and offset.
-  CHECK(Has(watchdog, "fmt::format(\"{}+0x{:X}\", Utf8(module.ModuleName), address - module.BaseOfImage)"));
+  CHECK(Has(watchdog, "LogText(module.ModuleName)"));
+  CHECK(Has(watchdog, "fmt::format(\"{}+0x{:X}\", module_name, address - module.BaseOfImage)"));
   // Everything goes to the session log: no hang_N.txt or hitch_stacks_N.txt.
   CHECK(!Has(watchdog, "ofstream"));
   CHECK(!Has(watchdog, "hang_\""));

@@ -419,6 +419,19 @@ else()
     set(MUA_DLSS_BRIDGE OFF CACHE INTERNAL "Whether mua_dlss_bridge.dll is built")
 endif()
 
+# AMD FSR 3.1 (Windows): AMD's signed amd_fidelityfx_dx12.dll, which tools/setup-fidelityfx.ps1 downloads, goes beside the
+# programs unmodified; the GPU plugin (patches/rexglue-sdk/0165) loads it from there.
+set(MUA_FIDELITYFX_DLL "${CMAKE_CURRENT_SOURCE_DIR}/tools/amd-fidelityfx/1.1.4/PrebuiltSignedDLL/amd_fidelityfx_dx12.dll")
+if(WIN32 AND EXISTS "${MUA_FIDELITYFX_DLL}")
+    set(MUA_FSR3_RUNTIME ON CACHE INTERNAL "Whether amd_fidelityfx_dx12.dll is staged")
+    add_custom_target(mua_fidelityfx_runtime ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MUA_FIDELITYFX_DLL}" "${CMAKE_BINARY_DIR}"
+        VERBATIM
+    )
+else()
+    set(MUA_FSR3_RUNTIME OFF CACHE INTERNAL "Whether amd_fidelityfx_dx12.dll is staged")
+endif()
+
 mua_add_game_executable(marvel_ultimate_alliance_bundle "" launcher)
 mua_add_game_executable(marvel_ultimate_alliance_mua1 mua1 mua1)
 mua_add_game_executable(marvel_ultimate_alliance_mua1_gold mua1-gold mua1-gold)

@@ -141,7 +141,7 @@ function Install-PatchedRuntime {
     # Another branch may have left other patches in the tree, in any tracked file. The build tree under out\ stays.
     $patchedBefore = Get-PatchedSourceState $src
     Invoke-Native 'git checkout' { git -C $src checkout -- . }
-    Invoke-Native 'git clean' { git -C $src clean -fdq -- src include tests cmake }
+    Invoke-Native 'git clean' { git -C $src clean -fdq -- @RuntimePatchedRoots }
     $patches = Get-RuntimePatchFiles
     foreach ($patch in $patches) {
         & git -C $src apply --check $patch.FullName
@@ -149,7 +149,7 @@ function Install-PatchedRuntime {
         Invoke-Native "git apply $($patch.Name)" { git -C $src apply $patch.FullName }
     }
     $unchanged = Restore-UnchangedFileTimes $src $patchedBefore
-    $patchedNow = @(& git -C $src diff --name-only).Count + @(& git -C $src ls-files --others --exclude-standard -- src include tests cmake).Count
+    $patchedNow = @(& git -C $src diff --name-only).Count + @(& git -C $src ls-files --others --exclude-standard -- @RuntimePatchedRoots).Count
     Write-Host "ReXGlue source: $($patches.Count) patches applied; $unchanged of $patchedNow patched files unchanged, $($patchedNow - $unchanged) new or changed"
 
     Import-VsEnvironment

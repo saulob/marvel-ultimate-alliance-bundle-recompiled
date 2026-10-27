@@ -266,9 +266,12 @@ fi
 COMMIT="$(git -C "$SRC" rev-parse HEAD)"
 [ "$COMMIT" = "$SDK_COMMIT" ] || fail "$SRC is at $COMMIT; expected $SDK_TAG $SDK_COMMIT (delete the folder to fetch it again)"
 
+# The folders whose untracked files only patches add; the rest of thirdparty is submodules.
+PATCHED_ROOTS=(src include tests cmake thirdparty/fidelityfx-api)
+
 patched_files() {  # the files the patches changed or added in the ReXGlue source
   git -C "$SRC" diff --name-only
-  git -C "$SRC" ls-files --others --exclude-standard -- src include tests cmake
+  git -C "$SRC" ls-files --others --exclude-standard -- "${PATCHED_ROOTS[@]}"
 }
 
 echo "== Patch ($(patch_names))"
@@ -280,7 +283,7 @@ while IFS= read -r file; do
 done < <(patched_files)
 # Another branch may have left other patches in the tree, in any tracked file. The build tree under out/ stays.
 git -C "$SRC" checkout -- .
-git -C "$SRC" clean -fdq -- src include tests cmake
+git -C "$SRC" clean -fdq -- "${PATCHED_ROOTS[@]}"
 for name in "${PATCHES[@]}"; do
   git -C "$SRC" apply --check "$PATCH_DIR/$name" || fail "$name no longer applies to ReXGlue $SDK_TAG"
   git -C "$SRC" apply "$PATCH_DIR/$name"

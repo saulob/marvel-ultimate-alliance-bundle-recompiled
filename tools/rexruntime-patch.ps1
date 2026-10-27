@@ -6,6 +6,9 @@ $RuntimePatchDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'patches\rexglue
 $RuntimeStampName = 'rexruntime-patch.txt'
 $RuntimeFiles = @('bin/rexruntime.dll', 'bin/rexruntimerd.dll', 'lib/rexruntime.lib', 'lib/rexruntimerd.lib',
                   'bin/rexgpu-xenos.dll', 'bin/rexgpu-xenosrd.dll', 'bin/rexglue.exe')
+# The folders whose untracked files only patches add, cleaned before patching again; the rest of thirdparty is
+# submodules.
+$RuntimePatchedRoots = @('src', 'include', 'tests', 'cmake', 'thirdparty/fidelityfx-api')
 # Patched ReXGlue sources the game's own build compiles from the SDK folder (ReXApp is part of the executable).
 $RuntimeSourceFiles = @{ 'share/rexglue/rex_app.cpp' = 'src/ui/rex_app.cpp' }
 # How the patched files are built; part of the fingerprint, so changing them invalidates the installed files.
@@ -60,7 +63,7 @@ function Get-FileSha256([string]$Path) {
 # The files the patches changed or added in the ReXGlue source, with their content hash and time. Resetting the source
 # and applying the patches again rewrites all of them, and Ninja rebuilds whatever is newer than its object.
 function Get-PatchedSourceState([string]$Src) {
-    $names = @(& git -C $Src diff --name-only) + @(& git -C $Src ls-files --others --exclude-standard -- src include tests cmake)
+    $names = @(& git -C $Src diff --name-only) + @(& git -C $Src ls-files --others --exclude-standard -- @RuntimePatchedRoots)
     $state = @{}
     foreach ($name in $names) {
         $path = Join-Path $Src $name

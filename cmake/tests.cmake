@@ -77,9 +77,10 @@ if(TARGET mua_dlss_bridge)
 else()
     mua_add_test(dlss_bridge_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 endif()
+mua_add_test(fsr3_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 if(WIN32)
     mua_add_test(d3d12_copy_validation_tests headless LIBS d3d12 dxgi)
-    # The staged SDK source: scene_layout.h (patches/rexglue-sdk/0161 to 0163) before a runtime build installs it,
+    # The staged SDK source: scene_layout.h (patches/rexglue-sdk/0161 to 0165) before a runtime build installs it,
     # and the renderer's own depth conversion.
     mua_add_test(scene_upscaler_math_tests headless
         SOURCES out/rexglue-sdk-src/src/graphics/xenos.cpp out/rexglue-sdk-src/src/core/math_msvc.cpp)

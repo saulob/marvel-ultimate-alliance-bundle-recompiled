@@ -486,6 +486,61 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   fs::remove(scratch.player);
 }
 
+void TestFsr3Settings(const Scratch& scratch) {
+  std::printf("AMD FSR 3.1, its quality and sharpness are MUA 1's own, and FSR 1 stays fsr\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.Get("mua_fsr3_sharpness") == "80");
+  settings.Set("mua_upscaler", "fsr3");
+  settings.Set("mua_upscale_quality", "ultra_performance");
+  settings.Set("mua_fsr3_sharpness", "35");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_fsr3_sharpness") == "80");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Save());
+  const toml::table mua1 = toml::parse_file((root / "mua1" / "game_settings.toml").string());
+  CHECK(mua1["mua_upscaler"].value<std::string>() == "fsr3");
+  CHECK(mua1["mua_upscale_quality"].value<std::string>() == "ultra_performance");
+  CHECK(mua1["mua_fsr3_sharpness"].value<int64_t>() == 35 || mua1["mua_fsr3_sharpness"].value<std::string>() == "35");
+
+  const std::string effect = rex::cvar::GetFlagByName("present_effect");
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  reopened.SelectGame(mua::GameId::kMua1);
+  CHECK(reopened.Get("mua_upscaler") == "fsr3");
+  CHECK(reopened.Get("mua_fsr3_sharpness") == "35");
+  // FSR 3.1 presents plainly, so FSR 1's sharpening never runs on its output.
+  mua::ApplyUpscaler(reopened);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::kUpscalerAvailable ? "bilinear" : effect));
+  reopened.ApplyGameSettings();
+  CHECK(rex::cvar::GetFlagByName("mua_upscaler") == "fsr3");
+  CHECK(rex::cvar::GetFlagByName("mua_upscale_quality") == "ultra_performance");
+  CHECK(rex::cvar::GetFlagByName("mua_fsr3_sharpness") == "35");
+  // Without the GPU plugin's d3d12_fsr3_mode (this test's runtime has none) nothing is set.
+  mua::ApplyFsr3();
+  CHECK(!rex::cvar::GetFlagInfo("d3d12_fsr3_mode"));
+  mua::LogUpscaling();
+
+  // A saved FSR 1 choice is still FSR 1.
+  reopened.Set("mua_upscaler", "fsr");
+  reopened.Set("mua_upscale_quality", "balanced");
+  mua::ApplyUpscaler(reopened);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::kUpscalerAvailable ? "fsr" : effect));
+
+  rex::cvar::SetFlagByName("present_effect", effect);
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
+  rex::cvar::SetFlagByName("mua_fsr3_sharpness", "80");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  fs::remove_all(root / "mua1");
+  fs::remove(scratch.player);
+}
+
 void TestDeprecatedUpscalersAreOff(const Scratch& scratch) {
   std::printf("NVIDIA NIS and AMD CAS saved by earlier versions are Off and saved as off\n");
   const fs::path root = scratch.player.parent_path();
@@ -686,6 +741,7 @@ int main() {
   TestAspectRatioPerGame(scratch);
   TestAspectRatioVideoMode();
   TestUpscalingPerGame(scratch);
+  TestFsr3Settings(scratch);
   TestDeprecatedUpscalersAreOff(scratch);
   TestPlayerNamesAreShared(scratch);
   TestHdTextIsShared(scratch);

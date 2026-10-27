@@ -37,6 +37,7 @@
 #include "game_definition.h"
 #include "disc_identity.h"
 #include "dlss_support.h"
+#include "fsr3_support.h"
 #include "game_files.h"
 #include "game_install.h"
 #include "game_library.h"
@@ -253,15 +254,19 @@ const char* UpscalingHelp(UpscalerMask offered) {
            "GPU time, and FSR 1 scales it up to the window.";
   }
   return "AMD FSR 1 scales the game's picture to the window with sharper edges than plain scaling; its Quality, "
-         "Balanced and Performance draw the game below the Render resolution, which costs less GPU time. NVIDIA DLSS "
-         "(GeForce RTX) draws only the 3D scene smaller and rebuilds it at the Render resolution from several frames, "
-         "so the HUD and menus stay sharp.";
+         "Balanced and Performance draw the game below the Render resolution, which costs less GPU time. AMD FSR 3.1 "
+         "(any graphics card: NVIDIA, AMD and Intel) and NVIDIA DLSS (GeForce RTX) draw only the 3D scene smaller and "
+         "rebuild it at the Render resolution from several frames, using motion and depth, so the HUD and menus stay "
+         "sharp.";
 }
 
 // Each quality with the size the game draws at and the Render resolution the upscaler brings it to.
 std::vector<trg::Option> UpscaleQualityOptions(AspectRatio aspect, int render_scale) {
   std::vector<trg::Option> options;
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
+    if (!OffersQuality(Upscaler::kFsr1, info.quality)) {
+      continue;
+    }
     const RenderSizes sizes = RenderSizesFor(aspect, render_scale, Upscaler::kFsr1, info.quality);
     std::string label = std::string(info.label) + " \xE2\x80\x94 " + SizeText(sizes.internal);
     if (info.quality != UpscaleQuality::kNative) {
@@ -276,10 +281,24 @@ std::vector<trg::Option> UpscaleQualityOptions(AspectRatio aspect, int render_sc
 std::vector<trg::Option> DlssQualityOptions(AspectRatio aspect, int render_scale) {
   std::vector<trg::Option> options;
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
+    if (!OffersQuality(Upscaler::kDlss, info.quality)) {
+      continue;
+    }
     const RenderSizes sizes = RenderSizesFor(aspect, render_scale, Upscaler::kFsr1, info.quality);
     std::string label = std::string(QualityLabel(Upscaler::kDlss, info.quality)) + " \xE2\x80\x94 3D scene ";
     label += info.quality == UpscaleQuality::kNative ? SizeText(sizes.native) : "about " + SizeText(sizes.internal);
     options.push_back({info.key, label});
+  }
+  return options;
+}
+
+// AMD's ratios give the exact scene size of each mode; the HUD and menus stay at the Render resolution.
+std::vector<trg::Option> Fsr3QualityOptions(AspectRatio aspect, int render_scale) {
+  std::vector<trg::Option> options;
+  const WindowSize output = RenderSize(aspect, ClampRenderScale(render_scale));
+  for (const UpscaleQualityInfo& info : kUpscaleQualities) {
+    const WindowSize scene = Fsr3SceneSize(output, CanvasWidth(aspect), info.quality);
+    options.push_back({info.key, std::string(info.label) + " \xE2\x80\x94 3D scene " + SizeText(scene)});
   }
   return options;
 }
@@ -1004,6 +1023,14 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
              "resolution_scale", "1", RenderResolutionOptions(SelectedAspectRatio()));
     if (UpscalingApplies()) {
       UpscalerMask offered = Selected().game->upscalers;
+      std::string fsr3_unavailable;
+      if ((offered & UpscalerBit(Upscaler::kFsr3)) && !Fsr3().available) {
+        offered &= ~UpscalerBit(Upscaler::kFsr3);
+        fsr3_unavailable = "Unavailable: " + Fsr3().reason + ".";
+        if (settings_.Get("mua_upscaler") == kUpscalerFsr3) {
+          settings_.Set("mua_upscaler", kUpscalerOff);
+        }
+      }
       std::string dlss_unavailable;
       if ((offered & UpscalerBit(Upscaler::kDlss)) && !Dlss().available) {
         offered &= ~UpscalerBit(Upscaler::kDlss);
@@ -1014,12 +1041,28 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       }
       ui.Choice("Upscaling", UpscalingHelp(Selected().game->upscalers), "mua_upscaler", kUpscalerOff,
                 UpscalerOptions(offered));
+      if (!fsr3_unavailable.empty()) {
+        ui.Info("AMD FSR 3.1", fsr3_unavailable.c_str());
+      }
       if (!dlss_unavailable.empty()) {
         ui.Info("NVIDIA DLSS", dlss_unavailable.c_str());
       }
       const Upscaler upscaler = ParseUpscaler(settings_.Get("mua_upscaler", kUpscalerOff), offered);
       const UpscalerInfo& info = UpscalerInfoFor(upscaler);
-      if (info.scene_only) {
+      if ((info.scene_only || info.lowers_resolution) &&
+          !OffersQuality(upscaler, ParseUpscaleQuality(settings_.Get("mua_upscale_quality", "native")))) {
+        settings_.Set("mua_upscale_quality", QualityInfoFor(UpscaleQuality::kPerformance).key);
+      }
+      if (upscaler == Upscaler::kFsr3) {
+        ui.Combo("Upscaling quality",
+                 "How far below the Render resolution AMD FSR 3.1 draws the 3D scene before rebuilding it at the Render "
+                 "resolution from motion and depth. Native keeps the full size and uses FSR 3.1 only to smooth edges. "
+                 "Works on NVIDIA, AMD and Intel graphics; the HUD and menus always draw at the Render resolution.",
+                 "mua_upscale_quality", "native",
+                 Fsr3QualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
+        ui.SliderInt("Sharpness", "AMD FSR 3.1's own sharpening of the rebuilt 3D scene. 0 turns it off.",
+                     "mua_fsr3_sharpness", kDefaultFsr3Sharpness, 0, 100);
+      } else if (info.scene_only) {
         ui.Combo("Upscaling quality",
                  "How far below the Render resolution NVIDIA DLSS draws the 3D scene before rebuilding it at the Render "
                  "resolution. DLAA keeps the full size and uses DLSS only to smooth edges. The HUD and menus always "
@@ -1074,6 +1117,22 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
                   dlss_support_->available ? std::string("available") : "unavailable: " + dlss_support_->reason);
     }
     return *dlss_support_;
+  }
+
+  // AMD's DLL beside the program and the rasterizer-ordered views path; checked again when the graphics card changes.
+  const Fsr3Support& Fsr3() {
+    const std::string adapter = settings_.Get("mua_graphics_adapter");
+    if (!fsr3_support_ || adapter != fsr3_adapter_) {
+      fsr3_adapter_ = adapter;
+      std::error_code error;
+      fsr3_support_ = Fsr3SupportFor(
+          kUpscalerAvailable,
+          std::filesystem::is_regular_file(rex::filesystem::GetExecutableFolder() / kFidelityFxLibraryFile, error),
+          MultisamplingApplies());
+      REXLOG_INFO("Launcher: AMD FSR 3.1 {}",
+                  fsr3_support_->available ? std::string("available") : "unavailable: " + fsr3_support_->reason);
+    }
+    return *fsr3_support_;
   }
 
   bool HdTextApplies() const { return Selected().game && hd_text::AssetsFor(Selected().game->id); }
@@ -1239,6 +1298,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
   std::string host_render_targets_adapter_;
   std::string dlss_adapter_;
   std::optional<DlssSupport> dlss_support_;
+  std::string fsr3_adapter_;
+  std::optional<Fsr3Support> fsr3_support_;
   bool host_render_targets_checked_ = false;
   bool host_render_targets_ = true;
   struct HeaderArt {
