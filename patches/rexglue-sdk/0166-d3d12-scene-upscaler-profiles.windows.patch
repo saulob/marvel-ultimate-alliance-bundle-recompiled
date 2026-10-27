@@ -1,0 +1,180 @@
+Scene profiles for the scene upscaler of 0161 to 0165: DLSS and FSR 3.1 run only for a game whose renderer has one.
+d3d12_scene_profile names it (empty by default, which leaves both off before anything loads); scene_layout.h's
+kSceneProfiles holds the rule that finds the game's 3D scene surface: the least multisampling, the color formats and
+the draws in a frame. mua1 is Marvel Ultimate Alliance's and its Gold Edition's, and keeps the rule 0161 had
+(2x or more, k_8_8_8_8 or k_8_8_8_8_GAMMA, 20 draws), so their scene detection is unchanged. The scene surface and
+runtime log lines name the profile.
+
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index 685f390..8c7cd42 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -7,6 +7,7 @@
+ #include <cstring>
+ #include <numeric>
+ #include <optional>
++#include <string_view>
+ #include <vector>
+ 
+ // Geometry and math of the scene upscaler (NVIDIA DLSS, AMD FSR 3.1) that doesn't need a GPU.
+@@ -634,4 +635,38 @@ inline std::optional<CameraProjection> ConsensusCameraProjection(const std::vect
+   return best == SIZE_MAX ? std::nullopt : std::optional<CameraProjection>(projections[best]);
+ }
+ 
++// xenos::MsaaSamples and xenos::ColorRenderTargetFormat values.
++inline constexpr uint32_t kMsaa2xLog2 = 1;
++inline constexpr uint32_t kColorFormat8888 = 0;
++inline constexpr uint32_t kColorFormat8888Gamma = 1;
++
++// How a game's renderer draws its 3D scene: the scene is the multisampled color and depth surface with depth-tested
++// draws that a frame draws into most, at least min_draws times, in one of color_formats.
++struct SceneProfile {
++  std::string_view key;
++  uint32_t min_msaa_samples_log2;
++  std::array<uint32_t, 2> color_formats;
++  uint32_t min_draws;
++};
++
++// Marvel Ultimate Alliance and its Gold Edition draw with one renderer and the same assets and shaders.
++inline constexpr std::array kSceneProfiles = {
++    SceneProfile{"mua1", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20},
++};
++
++inline const SceneProfile* FindSceneProfile(std::string_view key) {
++  for (const SceneProfile& profile : kSceneProfiles) {
++    if (profile.key == key) {
++      return &profile;
++    }
++  }
++  return nullptr;
++}
++
++inline bool IsSceneSurfaceCandidate(const SceneProfile& profile, uint32_t msaa_samples_log2, uint32_t color_format) {
++  return msaa_samples_log2 >= profile.min_msaa_samples_log2 &&
++         std::find(profile.color_formats.begin(), profile.color_formats.end(), color_format) !=
++             profile.color_formats.end();
++}
++
+ }  // namespace rex::graphics::d3d12::scene
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index 036ab98..afe70c8 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -155,6 +155,7 @@ class SceneUpscaler {
+   D3D12TextureCache& texture_cache_;
+   D3D12SharedMemory& shared_memory_;
+ 
++  const scene::SceneProfile* profile_ = nullptr;
+   bool enabled_ = false;
+   bool runtime_ready_ = false;
+   bool disabled_ = false;
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index 8a5af62..fbd0de8 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -54,6 +54,10 @@ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_native, true, "GPU/D3D12",
+                     "With DLSS Performance or Ultra Performance, draw the targets drawn before the 3D scene that only "
+                     "the scene samples at the game's own resolution")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_STRING(d3d12_scene_profile, "", "GPU/D3D12",
++                      "How the game's renderer draws its 3D scene, for DLSS and FSR 3.1: mua1 (Marvel Ultimate "
++                      "Alliance and its Gold Edition); empty leaves both off")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::d3d12 {
+ 
+@@ -66,9 +70,10 @@ namespace shaders {
+ 
+ namespace {
+ 
+-// A scene needs this many depth-tested draws into one multisampled surface in a frame to be taken for the game's 3D
+-// scene.
+-constexpr uint32_t kSceneSurfaceMinDraws = 20;
++static_assert(scene::kMsaa2xLog2 == uint32_t(xenos::MsaaSamples::k2X));
++static_assert(scene::kColorFormat8888 == uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8));
++static_assert(scene::kColorFormat8888Gamma == uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA));
++
+ constexpr size_t kMaxTrackedMatrices = 2048;
+ constexpr size_t kMaxReprojectionSamples = 256;
+ constexpr size_t kMaxProjectionSamples = 64;
+@@ -221,6 +226,12 @@ bool SceneUpscaler::Initialize(uint32_t draw_resolution_scale_x, uint32_t draw_r
+   if (quality && fsr3_quality) {
+     REXGPU_WARN("FSR 3.1: off, d3d12_dlss_mode is set too and DLSS runs instead");
+   }
++  profile_ = scene::FindSceneProfile(REXCVAR_GET(d3d12_scene_profile));
++  if (!profile_) {
++    REXGPU_WARN("{}: off, no scene profile for this game (d3d12_scene_profile \"{}\") - the scene renders without it",
++                Tag(), REXCVAR_GET(d3d12_scene_profile));
++    return true;
++  }
+   if (backend_ == Backend::kDlss && REXCVAR_GET(d3d12_dlss_bridge).empty()) {
+     REXGPU_WARN("DLSS: off, no DLSS bridge (d3d12_dlss_bridge) - the scene renders without it");
+     return true;
+@@ -434,21 +445,21 @@ bool SceneUpscaler::StartFsr3() {
+ 
+ void SceneUpscaler::LogRuntime() const {
+   if (backend_ == Backend::kFsr3) {
+-    REXGPU_INFO("FSR 3.1: AMD FSR 3.1 {} | scene {}x{} -> output {}x{} | AMD's render size {}x{} | FidelityFX "
+-                "upscaler {} | jitter Halton(2,3) {} phases | motion vectors render pixels, current to previous, "
+-                "without jitter | depth R32F 0 to 1 | color RGBA8 SDR, no auto exposure, pre-exposure 1 | output "
+-                "alpha the scene's own | sharpness {}",
++    REXGPU_INFO("FSR 3.1: AMD FSR 3.1 {} | scene {}x{} -> output {}x{} | scene profile {} | AMD's render size {}x{} | "
++                "FidelityFX upscaler {} | jitter Halton(2,3) {} phases | motion vectors render pixels, current to "
++                "previous, without jitter | depth R32F 0 to 1 | color RGBA8 SDR, no auto exposure, pre-exposure 1 | "
++                "output alpha the scene's own | sharpness {}",
+                 Fsr3QualityName(fsr3_quality_), render_width_, render_height_, output_width_, output_height_,
+-                fsr3_render_width_, fsr3_render_height_, fsr3_->versions(), jitter_phases_,
++                profile_->key, fsr3_render_width_, fsr3_render_height_, fsr3_->versions(), jitter_phases_,
+                 fsr3_sharpness_ ? std::to_string(fsr3_sharpness_) : std::string("off"));
+     return;
+   }
+   REXGPU_INFO(
+-      "DLSS: Super Resolution {} | output {}x{} | NVIDIA recommends {}x{} (dynamic {}x{} to {}x{}) | scene input {}x{} "
+-      "| jitter Halton(2,3) {} phases | preset {}",
+-      QualityName(quality_), output_width_, output_height_, optimal_.render_width, optimal_.render_height,
+-      optimal_.min_render_width, optimal_.min_render_height, optimal_.max_render_width, optimal_.max_render_height,
+-      render_width_, render_height_, jitter_phases_,
++      "DLSS: Super Resolution {} | scene profile {} | output {}x{} | NVIDIA recommends {}x{} (dynamic {}x{} to {}x{}) "
++      "| scene input {}x{} | jitter Halton(2,3) {} phases | preset {}",
++      QualityName(quality_), profile_->key, output_width_, output_height_, optimal_.render_width,
++      optimal_.render_height, optimal_.min_render_width, optimal_.min_render_height, optimal_.max_render_width,
++      optimal_.max_render_height, render_width_, render_height_, jitter_phases_,
+       REXCVAR_GET(d3d12_dlss_preset) ? std::to_string(REXCVAR_GET(d3d12_dlss_preset)) : std::string("default"));
+ }
+ 
+@@ -555,10 +566,10 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+     const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+     const auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
+     if (edram_mode == xenos::EdramMode::kColorDepth && pixel_shader_writes_color &&
+-        surface_info.msaa_samples >= xenos::MsaaSamples::k2X && (depth_control.z_enable || depth_control.z_write_enable)) {
++        (depth_control.z_enable || depth_control.z_write_enable)) {
+       const auto color_info = regs.Get<reg::RB_COLOR_INFO>();
+-      if (color_info.color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
+-          color_info.color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
++      if (scene::IsSceneSurfaceCandidate(*profile_, uint32_t(surface_info.msaa_samples),
++                                         uint32_t(color_info.color_format))) {
+         const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+         const uint64_t key = uint64_t(color_info.color_base) | uint64_t(depth_info.depth_base) << 16 |
+                              uint64_t(surface_info.msaa_samples) << 32 | uint64_t(color_info.color_format) << 40 |
+@@ -1278,7 +1289,7 @@ void SceneUpscaler::BeforeSwap() {
+         best_draws = draws;
+       }
+     }
+-    if (best_draws >= kSceneSurfaceMinDraws) {
++    if (best_draws >= profile_->min_draws) {
+       Surface surface;
+       surface.color_base = uint32_t(best_key & 0xFFFF);
+       surface.depth_base = uint32_t((best_key >> 16) & 0xFFFF);
+@@ -1287,8 +1298,10 @@ void SceneUpscaler::BeforeSwap() {
+       surface.depth_format = xenos::DepthRenderTargetFormat((best_key >> 48) & 0xFF);
+       surface_ = surface;
+       reset_history_ = true;
+-      REXGPU_INFO("{}: scene surface found: color base {} {}x MSAA, depth base {}, {} draws in a frame", Tag(),
+-                  surface.color_base, 1u << uint32_t(surface.msaa), surface.depth_base, best_draws);
++      REXGPU_INFO("{}: scene surface found (scene profile {}): color base {} {}x MSAA, depth base {}, {} draws in a "
++                  "frame",
++                  Tag(), profile_->key, surface.color_base, 1u << uint32_t(surface.msaa), surface.depth_base,
++                  best_draws);
+     }
+   }
+   candidate_draws_.clear();

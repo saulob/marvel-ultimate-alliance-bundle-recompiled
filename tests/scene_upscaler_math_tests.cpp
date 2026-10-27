@@ -6,7 +6,9 @@
 // and the DLSS depth (0163): the ROV's D24S8 and D24FS8 read back with the renderer's own conversion, which resolve it
 // is taken from, and its composition from both tiles at the scene's scale. AMD FSR 3.1 (0165): AMD's render sizes,
 // jitter phases and offsets, the camera planes recovered from the game's matrices and read back through FSR's own depth
-// conversion, and the motion vectors reprojected the way FSR's shaders do.
+// conversion, and the motion vectors reprojected the way FSR's shaders do. Scene profiles (0166, 0167): MUA1's keeps
+// 0161's scene surface rule, Gold Edition's adds its Direct3D's 4x MSAA draws over the scene's memory to the scene's
+// pass, and MUA2 has none.
 // Run: mua_scene_upscaler_math_tests
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,6 +25,7 @@
 #include <rex/graphics/d3d12/scene_layout.h>
 #include <rex/graphics/xenos.h>
 
+#include "game_definition.h"
 #include "upscaling.h"
 
 namespace {
@@ -1106,6 +1110,435 @@ void TestFsr3SceneAlpha() {
   CHECK(center[0] == 1000.5f * source_scale[0] && center[1] == 600.5f * source_scale[1]);
 }
 
+void TestSceneProfiles() {
+  std::printf("scene profiles: mua1 keeps 0161's scene rule, mua1-gold finds the same surface, MUA 2 has none\n");
+  using Format = rex::graphics::xenos::ColorRenderTargetFormat;
+  using Msaa = rex::graphics::xenos::MsaaSamples;
+  const scene::SceneProfile* mua1 = scene::FindSceneProfile("mua1");
+  const scene::SceneProfile* gold = scene::FindSceneProfile("mua1-gold");
+  CHECK(mua1 != nullptr && gold != nullptr && mua1 != gold && scene::kSceneProfiles.size() == 2);
+  CHECK(!scene::FindSceneProfile("") && !scene::FindSceneProfile("mua2") && !scene::FindSceneProfile("MUA1") &&
+        !scene::FindSceneProfile("gold"));
+  if (!mua1 || !gold) {
+    return;
+  }
+  // Only mua1-gold takes its Direct3D's 4x MSAA draws into the scene's pass.
+  CHECK(!mua1->scene_memory_4x_draws && gold->scene_memory_4x_draws);
+  for (const scene::SceneProfile* profile : {mua1, gold}) {
+    CHECK(profile->min_draws == 20 && profile->min_msaa_samples_log2 == mua1->min_msaa_samples_log2 &&
+          profile->color_formats == mua1->color_formats);
+    // 0161's rule over every sample count and color format: 2x or more, k_8_8_8_8 or k_8_8_8_8_GAMMA.
+    for (uint32_t samples = 0; samples <= uint32_t(Msaa::k4X); ++samples) {
+      for (uint32_t format = 0; format < 16; ++format) {
+        const bool rule = samples >= uint32_t(Msaa::k2X) &&
+                          (format == uint32_t(Format::k_8_8_8_8) || format == uint32_t(Format::k_8_8_8_8_GAMMA));
+        CHECK(scene::IsSceneSurfaceCandidate(*profile, samples, format) == rule);
+      }
+    }
+  }
+  // MUA1's targets in a 3x FSR 3.1 Performance run: only the scene (2x, k_8_8_8_8) qualifies, not the composite,
+  // glow and atlas (1x, k_8_8_8_8) or the shadow maps (1x, k_32_FLOAT).
+  CHECK(scene::IsSceneSurfaceCandidate(*mua1, uint32_t(Msaa::k2X), uint32_t(Format::k_8_8_8_8)));
+  CHECK(!scene::IsSceneSurfaceCandidate(*mua1, uint32_t(Msaa::k1X), uint32_t(Format::k_8_8_8_8)));
+  CHECK(!scene::IsSceneSurfaceCandidate(*mua1, uint32_t(Msaa::k1X), uint32_t(Format::k_32_FLOAT)));
+  // The profiles the app passes as d3d12_scene_profile.
+  const auto profile_of = [](mua::GameId id) { return scene::FindSceneProfile(mua::Game(id).scene_profile); };
+  CHECK(profile_of(mua::GameId::kMua1) == mua1);
+  CHECK(profile_of(mua::GameId::kMua1Gold) == gold);
+  CHECK(profile_of(mua::GameId::kMua2) == nullptr);
+}
+
+using Targets = scene::PreSceneTargets;
+
+// Gold's targets in log 264 (3x DLSS Performance): the scene is EDRAM color base 0 and depth base 1128, 2x MSAA,
+// pitch 800 (10 tiles); its Direct3D also draws at 4x MSAA, pitch 400, on base 0 (color and depth-only) and 1128
+// (depth-only). MUA1's (log 263) are the same without the 4x draws.
+constexpr uint32_t kSceneColorBase = 0, kSceneDepthBase = 1128;
+const uint32_t kSceneKey = Targets::Key(800, 1);
+
+void TestSceneMemoryDraws() {
+  std::printf("mua1-gold: 4x MSAA draws over the scene's memory are the scene's; nothing else is\n");
+  const scene::SceneProfile& mua1 = *scene::FindSceneProfile("mua1");
+  const scene::SceneProfile& gold = *scene::FindSceneProfile("mua1-gold");
+  CHECK(scene::PitchSamples(kSceneKey) == 800 && scene::PitchSamples(Targets::Key(400, 2)) == 800);
+  CHECK(scene::PitchSamples(Targets::Key(1280, 0)) == 1280 && scene::PitchSamples(Targets::Key(640, 2)) == 1280);
+  const auto memory_draw = [](const scene::SceneProfile& profile, uint32_t key, uint32_t base) {
+    return scene::IsSceneMemoryDraw(profile, kSceneKey, key, base, kSceneColorBase, kSceneDepthBase);
+  };
+  for (const uint32_t base : {kSceneColorBase, kSceneDepthBase}) {
+    CHECK(memory_draw(gold, Targets::Key(400, 2), base));
+    CHECK(!memory_draw(mua1, Targets::Key(400, 2), base));
+  }
+  // Another base, another width (a 4x draw over the 1280-wide composite), or another sample count.
+  CHECK(!memory_draw(gold, Targets::Key(400, 2), 500));
+  CHECK(!memory_draw(gold, Targets::Key(640, 2), kSceneColorBase));
+  CHECK(!memory_draw(gold, Targets::Key(800, 0), kSceneColorBase));
+  CHECK(!memory_draw(gold, Targets::Key(1600, 0), kSceneColorBase));
+  // Every other target of both logs: the composite, HUD and menus (pitch 1280), the glow (320), the shadow maps (560)
+  // and the light atlas (1040, depth base 1216).
+  for (const auto& [key, base] : std::array<std::pair<uint32_t, uint32_t>, 5>{
+           {{Targets::Key(1280, 0), 0},
+            {Targets::Key(320, 0), 0},
+            {Targets::Key(560, 0), 0},
+            {Targets::Key(1040, 0), 0},
+            {Targets::Key(1040, 0), 1216}}}) {
+    CHECK(!memory_draw(gold, key, base) && !memory_draw(mua1, key, base));
+  }
+  // Gold's 4x draws over the light atlas (depth base 1216) and the shadow maps (1824) aren't the scene's.
+  CHECK(!memory_draw(gold, Targets::Key(520, 2), 1216) && !memory_draw(gold, Targets::Key(280, 2), 1824));
+  // A scene drawn at 4x has no 4x draws over it.
+  CHECK(!scene::IsSceneMemoryDraw(gold, Targets::Key(400, 2), Targets::Key(400, 2), kSceneColorBase, kSceneColorBase,
+                                  kSceneDepthBase));
+  CHECK(scene::ScenePlanesAt(kSceneColorBase, kSceneColorBase, kSceneDepthBase) == scene::ScenePlanes::kColor);
+  CHECK(scene::ScenePlanesAt(kSceneDepthBase, kSceneColorBase, kSceneDepthBase) == scene::ScenePlanes::kDepth);
+  CHECK(scene::ScenePlanesAt(500, kSceneColorBase, kSceneDepthBase) == 0);
+}
+
+void TestScenePlanesClear() {
+  std::printf("a resolve's clears and Gold's 4x draws over a plane clear it the same way\n");
+  using Planes = scene::ScenePlanes;
+  const uint32_t both = Planes::kColor | Planes::kDepth;
+  // AfterResolve is Clear: the same takes after every combination, in MUA1's sequence of log 251.
+  for (uint32_t clears = 0; clears < 4; ++clears) {
+    Planes resolved, cleared;
+    for (Planes* planes : {&resolved, &cleared}) {
+      planes->NoteSceneDraw(true);
+      CHECK(planes->Take(false) == both);
+    }
+    resolved.AfterResolve(clears & 1, clears & 2);
+    cleared.Clear((clears & 1 ? Planes::kColor : 0) | (clears & 2 ? Planes::kDepth : 0));
+    for (const bool writes_depth : {false, true}) {
+      Planes resolved_copy = resolved, cleared_copy = cleared;
+      resolved_copy.NoteSceneDraw(writes_depth);
+      cleared_copy.NoteSceneDraw(writes_depth);
+      CHECK(resolved_copy.Take(false) == cleared_copy.Take(false));
+      CHECK(resolved_copy.Take(true) == cleared_copy.Take(true));
+    }
+    CHECK(resolved.Take(false) == cleared.Take(false));
+  }
+}
+
+// A draw of the model: its surface (pitch and sample count) and the EDRAM bases it writes color and depth at.
+constexpr uint32_t kNoBase = UINT32_MAX;
+struct ModelDraw {
+  uint32_t key;
+  uint32_t color_base;
+  uint32_t depth_base;
+};
+
+const ModelDraw kSceneDraw{kSceneKey, kSceneColorBase, kSceneDepthBase};
+const ModelDraw kSceneDepthDraw{kSceneKey, kNoBase, kSceneDepthBase};
+// Gold's 4x MSAA quads over the scene's memory (logs 265 and 266): color and depth, depth-only over the color, and
+// depth-only over the depth.
+const ModelDraw kGold4xColorDepth{Targets::Key(400, 2), kSceneColorBase, kSceneDepthBase};
+const ModelDraw kGold4xOverColor{Targets::Key(400, 2), kNoBase, kSceneColorBase};
+const ModelDraw kGold4xDepth{Targets::Key(400, 2), kNoBase, kSceneDepthBase};
+const ModelDraw kGlowDraw{Targets::Key(320, 0), 0, kNoBase};
+const ModelDraw kCompositeDraw{Targets::Key(1280, 0), 0, kNoBase};
+const ModelDraw kShadowDraw{Targets::Key(560, 0), 0, 1824};
+const ModelDraw kShadow4xDraw{Targets::Key(280, 2), kNoBase, 1824};
+const ModelDraw kAtlasDraw{Targets::Key(1040, 0), 0, 1216};
+const ModelDraw kAtlas4xDraw{Targets::Key(520, 2), kNoBase, 1216};
+
+struct ModelResolve {
+  scene::ResolveRect rect;
+  uint32_t dest;
+  uint32_t taken;
+};
+
+// SceneUpscaler's scene pass bookkeeping (BeginDraw, BeforeResolve, AfterResolve, FinishScene, BeforeSwap) for the
+// scene at kSceneKey: a scene resolve takes its planes and leaves the pass pending; a draw that is neither a scene
+// draw nor, before the frame's scene is done, one of the profile's draws over its memory finishes it; a second
+// finished pass in a frame turns the upscaler off.
+struct ScenePassModel {
+  const scene::SceneProfile& profile;
+  bool pending = false;
+  uint32_t finished = 0;
+  bool turned_off = false;
+  scene::ScenePlanes planes;
+  std::vector<ModelResolve> resolves;
+  std::vector<std::vector<ModelResolve>> passes;
+
+  void Draw(const ModelDraw& draw, uint32_t count = 1) {
+    const bool writes_color = draw.color_base != kNoBase;
+    const uint32_t base = writes_color ? draw.color_base : draw.depth_base;
+    for (uint32_t i = 0; i < count; ++i) {
+      if (Targets::SamplesLog2(draw.key) == Targets::SamplesLog2(kSceneKey) &&
+          base == (writes_color ? kSceneColorBase : kSceneDepthBase)) {
+        planes.NoteSceneDraw(draw.depth_base != kNoBase);
+      } else if (!finished &&
+                 scene::IsSceneMemoryDraw(profile, kSceneKey, draw.key, base, kSceneColorBase, kSceneDepthBase)) {
+        planes.Clear((writes_color ? scene::ScenePlanesAt(draw.color_base, kSceneColorBase, kSceneDepthBase) : 0) |
+                     (draw.depth_base != kNoBase
+                          ? scene::ScenePlanesAt(draw.depth_base, kSceneColorBase, kSceneDepthBase)
+                          : 0));
+      } else if (pending) {
+        Finish();
+      }
+    }
+  }
+  void Resolve(const scene::ResolveRect& rect, uint32_t dest, bool clears) {
+    resolves.push_back({rect, dest, planes.Take(false)});
+    pending = true;
+    planes.AfterResolve(clears, clears);
+  }
+  void Finish() {
+    pending = false;
+    if (resolves.empty()) {
+      return;
+    }
+    turned_off |= finished > 0;
+    ++finished;
+    passes.push_back(std::exchange(resolves, {}));
+  }
+  void Swap() {
+    if (pending) {
+      Finish();
+    }
+    finished = 0;
+    planes.EndFrame();
+  }
+};
+
+// The destinations of a pass that get the output: those of the resolves no later one covers.
+std::vector<uint32_t> WrittenDests(const std::vector<ModelResolve>& pass) {
+  std::vector<scene::ResolveRect> rects;
+  for (const ModelResolve& resolve : pass) {
+    rects.push_back(resolve.rect);
+  }
+  const std::vector<bool> covered = scene::CoveredByLater(rects);
+  std::vector<uint32_t> dests;
+  for (size_t i = 0; i < pass.size(); ++i) {
+    if (!covered[i]) {
+      dests.push_back(pass[i].dest);
+    }
+  }
+  return dests;
+}
+
+// Whether the output's resolves cover the whole 1280x720 screen.
+bool WrittenCoverScreen(const std::vector<ModelResolve>& pass) {
+  std::vector<scene::ResolveRect> rects;
+  for (const ModelResolve& resolve : pass) {
+    rects.push_back(resolve.rect);
+  }
+  const std::vector<bool> covered = scene::CoveredByLater(rects);
+  std::vector<uint8_t> screen(size_t(1280 / 8) * (720 / 8), 0);
+  for (size_t i = 0; i < rects.size(); ++i) {
+    for (int32_t y = rects[i].screen_y / 8; !covered[i] && y < (rects[i].screen_y + int32_t(rects[i].height)) / 8;
+         ++y) {
+      for (int32_t x = rects[i].screen_x / 8; x < (rects[i].screen_x + int32_t(rects[i].width)) / 8; ++x) {
+        screen[size_t(y) * (1280 / 8) + x] = 1;
+      }
+    }
+  }
+  return std::all_of(screen.begin(), screen.end(), [](uint8_t cell) { return cell != 0; });
+}
+
+std::vector<uint32_t> Taken(const std::vector<ModelResolve>& pass) {
+  std::vector<uint32_t> taken;
+  for (const ModelResolve& resolve : pass) {
+    taken.push_back(resolve.taken);
+  }
+  return taken;
+}
+
+// Both games' predicated tiles: screen 0..672, and 640..1280 at window offset -640.
+const scene::ResolveRect kLeftTile = scene::ResolveRectFor(0, 0, 10, 0, 1, 0, 0, 672 / 8, 720 / 8, 0, 0);
+const scene::ResolveRect kRightTile = scene::ResolveRectFor(0, 0, 10, 0, 1, 0, 0, 640 / 8, 720 / 8, -640, 0);
+// Their scene textures in logs 265 and 266: the early copies, and the later ones the glow and composite read.
+constexpr uint32_t kGoldEarlyLeft = 0x1CC06000, kGoldEarlyRight = 0x1CC1A000;
+constexpr uint32_t kGoldLeft = 0x1E9E0000, kGoldRight = 0x1E9F4000;
+
+// Gold's title screen (logs 265 and 266, first trace): each tile resolved once, clearing color and depth.
+void GoldTitleFrame(ScenePassModel& model) {
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xColorDepth);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xOverColor);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xDepth);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xDepth);
+  model.Draw(kSceneDraw, 15);
+  model.Draw(kGold4xDepth);
+  model.Resolve(kLeftTile, kGoldLeft, true);
+  model.Draw(kGold4xOverColor);
+  model.Draw(kGold4xDepth, 2);
+  model.Draw(kSceneDraw, 14);
+  model.Draw(kGold4xDepth);
+  model.Resolve(kRightTile, kGoldRight, true);
+  model.Draw(kGlowDraw, 3);
+  model.Draw(kCompositeDraw, 25);
+  model.Swap();
+}
+
+// Gold's gameplay (second trace): each tile resolved early without clears, then again into the texture the glow and
+// composite read, clearing color and depth.
+void GoldGameplayFrame(ScenePassModel& model) {
+  for (const ModelDraw& atlas : {kAtlasDraw, kAtlas4xDraw}) {
+    model.Draw(atlas);
+  }
+  model.Draw(kAtlasDraw, 171);
+  model.Draw(kShadowDraw);
+  model.Draw(kShadow4xDraw);
+  model.Draw(kShadowDraw, 205);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xColorDepth);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xOverColor);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xDepth);
+  model.Draw(kSceneDraw, 435);
+  model.Resolve(kLeftTile, kGoldEarlyLeft, false);
+  model.Draw(kSceneDraw, 2);
+  model.Draw(kGold4xDepth);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xDepth);
+  model.Draw(kSceneDraw, 4);
+  model.Draw(kGold4xDepth);
+  model.Resolve(kLeftTile, kGoldLeft, true);
+  model.Draw(kGold4xOverColor);
+  model.Draw(kGold4xDepth);
+  model.Draw(kSceneDraw, 435);
+  model.Resolve(kRightTile, kGoldEarlyRight, false);
+  model.Draw(kSceneDraw);
+  model.Draw(kGold4xDepth, 2);
+  model.Draw(kSceneDraw, 3);
+  model.Draw(kGold4xDepth);
+  model.Resolve(kRightTile, kGoldRight, true);
+  model.Draw(kGlowDraw, 3);
+  model.Draw(kCompositeDraw, 25);
+  model.Swap();
+}
+
+// MUA1's gameplay (log 250): each tile S199 C S8 C, the second resolve clearing color and depth.
+void Mua1GameplayFrame(ScenePassModel& model) {
+  model.Draw(kAtlasDraw, 171);
+  model.Draw(kShadowDraw, 205);
+  for (const auto& [tile, early, later] : {std::tuple{kLeftTile, 1u, 2u}, std::tuple{kRightTile, 3u, 4u}}) {
+    model.Draw(kSceneDraw, 199);
+    model.Resolve(tile, early, false);
+    model.Draw(kSceneDepthDraw, 8);
+    model.Resolve(tile, later, true);
+  }
+  model.Draw(kGlowDraw, 3);
+  model.Draw(kCompositeDraw, 25);
+  model.Swap();
+}
+
+void TestGoldScenePasses() {
+  std::printf("Gold's scene passes: title 2 of 2, gameplay 2 of 4 into the later copies, 4x draws inside the pass\n");
+  const scene::SceneProfile& gold = *scene::FindSceneProfile("mua1-gold");
+  const uint32_t both = scene::ScenePlanes::kColor | scene::ScenePlanes::kDepth;
+  // The right tile is drawn at window offset -640: it sits at the EDRAM origin and lands at screen x 640.
+  CHECK(kRightTile.edram_x == 0 && kRightTile.screen_x == 640 && kRightTile.width == 640);
+  CHECK(kLeftTile.edram_x == 0 && kLeftTile.screen_x == 0 && kLeftTile.width == 672 && kLeftTile.height == 720);
+
+  ScenePassModel title{gold};
+  GoldTitleFrame(title);
+  CHECK(!title.turned_off && title.passes.size() == 1 && title.passes[0].size() == 2);
+  if (title.passes.size() == 1) {
+    CHECK((WrittenDests(title.passes[0]) == std::vector<uint32_t>{kGoldLeft, kGoldRight}));
+    CHECK(WrittenCoverScreen(title.passes[0]));
+    // The 4x depth quad right before each resolve leaves its depth at the quad's.
+    CHECK((Taken(title.passes[0]) == std::vector<uint32_t>{scene::ScenePlanes::kColor, scene::ScenePlanes::kColor}));
+  }
+
+  ScenePassModel gameplay{gold};
+  GoldGameplayFrame(gameplay);
+  CHECK(!gameplay.turned_off && gameplay.passes.size() == 1 && gameplay.passes[0].size() == 4);
+  if (gameplay.passes.size() == 1) {
+    const std::vector<ModelResolve>& pass = gameplay.passes[0];
+    std::vector<scene::ResolveRect> rects;
+    for (const ModelResolve& resolve : pass) {
+      rects.push_back(resolve.rect);
+    }
+    CHECK((scene::CoveredByLater(rects) == std::vector<bool>{true, false, true, false}));
+    CHECK((WrittenDests(pass) == std::vector<uint32_t>{kGoldLeft, kGoldRight}));
+    CHECK(WrittenCoverScreen(pass));
+    // Each tile's depth from its early resolve, color from both: the trace's "takes".
+    CHECK((Taken(pass) == std::vector<uint32_t>{both, scene::ScenePlanes::kColor, both, scene::ScenePlanes::kColor}));
+  }
+  // At the logged 1920x1080 scene, the tiles' captures meet with no gap: 0..1008 and 960..1920.
+  const scene::CaptureRegion left = scene::CaptureRegionFor(kLeftTile, 1.5, 1.5, 1920, 1080);
+  const scene::CaptureRegion right = scene::CaptureRegionFor(kRightTile, 1.5, 1.5, 1920, 1080);
+  CHECK(left.source_x == 0 && left.dest_x == 0 && left.width == 1008 && left.height == 1080);
+  CHECK(right.source_x == 0 && right.dest_x == 960 && right.width == 960 && right.height == 1080);
+  CHECK(right.dest_x <= int32_t(left.width) && uint32_t(right.dest_x) + right.width == 1920);
+
+  // With mua1's rule the same frames split, as before the profile: off after the first pass of 1 resolve.
+  const scene::SceneProfile& mua1 = *scene::FindSceneProfile("mua1");
+  for (const auto frame : {GoldTitleFrame, GoldGameplayFrame}) {
+    ScenePassModel as_mua1{mua1};
+    frame(as_mua1);
+    CHECK(as_mua1.turned_off && as_mua1.passes.size() >= 2 && as_mua1.passes[0].size() == 1);
+  }
+}
+
+void TestScenePasses() {
+  std::printf("scene passes: MUA1's frames as before, any other draw still splits the pass and turns it off\n");
+  const scene::SceneProfile& mua1 = *scene::FindSceneProfile("mua1");
+  const scene::SceneProfile& gold = *scene::FindSceneProfile("mua1-gold");
+  const uint32_t both = scene::ScenePlanes::kColor | scene::ScenePlanes::kDepth;
+  // MUA1's gameplay comes out the same under either profile: one pass of 4, the output into each tile's second copy.
+  for (const scene::SceneProfile* profile : {&mua1, &gold}) {
+    ScenePassModel model{*profile};
+    Mua1GameplayFrame(model);
+    CHECK(!model.turned_off && model.passes.size() == 1 && model.passes[0].size() == 4);
+    if (model.passes.size() == 1) {
+      CHECK((WrittenDests(model.passes[0]) == std::vector<uint32_t>{2, 4}));
+      CHECK(WrittenCoverScreen(model.passes[0]));
+      CHECK((Taken(model.passes[0]) ==
+             std::vector<uint32_t>{both, scene::ScenePlanes::kColor, both, scene::ScenePlanes::kColor}));
+    }
+  }
+  // MUA1's title (log 263): each tile resolved once, 2 of 2.
+  {
+    ScenePassModel model{mua1};
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kLeftTile, 1, true);
+    model.Draw(kSceneDraw, 14);
+    model.Resolve(kRightTile, 2, true);
+    model.Draw(kGlowDraw);
+    CHECK(!model.turned_off && model.passes.size() == 1);
+    CHECK(model.passes.size() == 1 && (WrittenDests(model.passes[0]) == std::vector<uint32_t>{1, 2}));
+  }
+  // Anything else between the scene's resolves, such as a glow draw, still makes a second pass and turns it off.
+  for (const scene::SceneProfile* profile : {&mua1, &gold}) {
+    ScenePassModel model{*profile};
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kLeftTile, 1, true);
+    model.Draw(kGlowDraw);
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kRightTile, 2, true);
+    model.Draw(kCompositeDraw);
+    CHECK(model.turned_off && model.passes.size() == 2);
+  }
+  // Once the frame's scene is done, a 4x draw over its memory is no longer the scene's: it finishes a later pass.
+  {
+    ScenePassModel model{gold};
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kLeftTile, 1, true);
+    model.Draw(kCompositeDraw);
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kRightTile, 2, true);
+    model.Draw(kGold4xDepth);
+    CHECK(model.turned_off && model.passes.size() == 2);
+  }
+  // The HUD and menus (pitch 1280, 1x) are never the scene's, so they're drawn over the finished output.
+  {
+    ScenePassModel model{gold};
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kLeftTile, 1, true);
+    model.Draw(kSceneDraw, 15);
+    model.Resolve(kRightTile, 2, true);
+    CHECK(model.pending);
+    model.Draw(kCompositeDraw);
+    CHECK(!model.pending && model.passes.size() == 1);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1129,6 +1562,11 @@ int main() {
   TestFsr3MotionVectors();
   TestFsr3SceneComposition();
   TestFsr3SceneAlpha();
+  TestSceneProfiles();
+  TestSceneMemoryDraws();
+  TestScenePlanesClear();
+  TestGoldScenePasses();
+  TestScenePasses();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

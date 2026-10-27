@@ -1,17 +1,52 @@
-# AMD FSR 3.1 Super Resolution (MUA1)
+# AMD FSR 3.1 Super Resolution (MUA1 and Gold Edition)
 
-Status: **verified.** At Render resolution 3x with Performance (1920x1080 to 3840x2160) on an RTX 4070 the picture is
-correct, at 66 to 71 FPS in heavy gameplay and above 80 FPS in lighter sections.
+Status: **verified in MUA1 and Gold Edition.** At Render resolution 3x with Performance (1920x1080 to 3840x2160) on an
+RTX 4070 the picture is correct in both, at 66 to 71 FPS in MUA1's heavy gameplay and above 80 FPS in lighter sections;
+Gold Edition, through its own scene profile (see [Games](#games)), stays playable and stable with FSR 3.1 and DLSS.
 
-MUA1 on Windows offers AMD FSR 3.1 in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1, NVIDIA DLSS). It
-runs on any Direct3D 12 graphics card that uses the rasterizer-ordered view (ROV) render path (NVIDIA, AMD and Intel),
-with nothing to install: AMD's signed `amd_fidelityfx_dx12.dll` ships beside the programs. It is temporal upscaling
-only, with no frame generation. Gold Edition and MUA2 do not offer it, and nothing about it runs unless it is
+MUA1 and Gold Edition on Windows offer AMD FSR 3.1 in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1,
+NVIDIA DLSS). It runs on any Direct3D 12 graphics card that uses the rasterizer-ordered view (ROV) render path (NVIDIA,
+AMD and Intel), with nothing to install: AMD's signed `amd_fidelityfx_dx12.dll` ships beside the programs. It is
+temporal upscaling only, with no frame generation. MUA2 does not offer it yet, and nothing about it runs unless it is
 selected.
 
 FSR 3.1 is a second backend of the DLSS scene upscaler ([dlss.md](dlss.md)). It uses the same scene surface, scene-only
 color, depth (0163), camera motion vectors, jitter, scale domains, pre-scene targets (0162, 0164) and write-back to the
 scene's resolves. Only the runtime it calls is different.
+
+## Games
+
+| Game | Scene profile | FSR 3.1 and DLSS |
+|---|---|---|
+| Marvel Ultimate Alliance | `mua1` | Offered; verified |
+| Gold Edition | `mua1-gold` | Offered; verified |
+| Marvel Ultimate Alliance 2 | none | Not offered (Off and AMD FSR 1) |
+
+`d3d12_scene_profile` (patches 0166 and 0167) says how the game's renderer draws its 3D scene. The app sets it from the
+game being run, only with FSR 3.1 or DLSS chosen; without one the GPU plugin leaves both off before loading anything.
+The profile holds the rule that finds the scene surface (`kSceneProfiles` in `scene_layout.h`): `mua1` is 0161's rule
+unchanged, 2x multisampling or more, `k_8_8_8_8` or `k_8_8_8_8_GAMMA`, and at least 20 depth-tested draws in a frame.
+Each game runs in its own program, so no scene, history or upscaler context carries over from another game.
+
+Gold Edition draws the same scene as MUA1, from the same `alchemy.ini`, assets and shaders (rebuilt by a later shader
+compiler, with the same direct world transform the camera recovery reads): color at EDRAM base 0, 2x multisampling,
+D24S8 depth at base 1128, in two predicated tiles (screen 0..672, and 640..1280 at window offset -640). Its program
+links a later D3D library, which also draws full-surface quads over the scene's memory at 4x multisampling with half
+the pitch (400, the same width in samples), between the scene's draws and resolves. `mua1-gold` (0167) is `mua1`'s
+rule plus those quads: until the frame's scene is done they are part of its pass, drawn at the scene's scale without
+jitter, and the plane they draw over counts as cleared for the depth capture. Any other draw between the scene's
+resolves still ends the pass, and a second pass in a frame turns the upscaler off.
+
+In gameplay each tile is resolved twice: first without clears, into a copy the scene's later draws sample, then into
+the texture the glow and composite read, clearing color and depth. Of those 4 scene resolves, each tile's later one
+covers its first, so the output goes into the 2 later ones (`written to 2 of 4`); depth comes from each tile's first.
+The title screen resolves each tile once (`2 of 2`).
+
+MUA2 has no profile yet. It is a later Alchemy renderer with its own pass chain (`SceneDepth`, `hdrScene`, quarter-size
+`SceneScaled` and `SceneBright` blur and bloom passes, `DigitalGradingLUT`, `Composite`, all created `r8g8b8a8`, and
+variance shadow maps), and its scene's multisampling, passes, resolves and depth need a frame capture
+(`REX_DEV_FRAME_LOG`). 28 of the 85 vertex shaders in its `loosefiles.pak` have the direct position transform, so the
+camera recovery has something to read there.
 
 ## Version
 
@@ -28,7 +63,8 @@ FidelityFX source or shaders are compiled here. The log names the upscaler versi
 | Headers | `patches/rexglue-sdk/0165` (`thirdparty/fidelityfx-api/`) | `ffx_api.h`, `ffx_api_types.h`, `ffx_upscale.h` and `dx12/ffx_api_dx12.h` of that release, unmodified, with AMD's MIT license. `mua_fsr3_tests` checks their SHA-256 against AMD's files. |
 | Runtime | 0165, `Fsr3Upscaler` | Loads the DLL (never unloaded), lists the upscaler versions for the device, queries AMD's render size and jitter phase count, and creates the context and records each upscale on the command list. |
 | Scene upscaler | 0165, `SceneUpscaler` | The backend choice: `d3d12_fsr3_mode` when `d3d12_dlss_mode` is off. DLSS's code is moved, not changed; the shared log lines carry the backend's name. |
-| App | `src/settings.cpp` (`ApplyFsr3`), `src/upscaling.h`, `src/fsr3_support.h` | With FSR 3.1 chosen, sets `d3d12_fsr3_mode`, `d3d12_fsr3_sharpness` and `d3d12_fsr3_library` (the DLL beside the program). Any other choice sets `d3d12_fsr3_mode=off`. |
+| Scene profiles | 0166, 0167, `scene_layout.h` | `d3d12_scene_profile`: the game's rule for finding its scene surface and, for `mua1-gold`, its D3D library's 4x draws over it; none leaves FSR 3.1 and DLSS off. |
+| App | `src/settings.cpp` (`ApplyFsr3`), `src/upscaling.h`, `src/fsr3_support.h`, `src/game_definition.cpp` | With FSR 3.1 chosen, sets `d3d12_fsr3_mode`, `d3d12_fsr3_sharpness`, `d3d12_fsr3_library` (the DLL beside the program) and `d3d12_scene_profile` (the game's `scene_profile`). Any other choice sets `d3d12_fsr3_mode=off`. |
 | Launcher | `src/launcher.cpp` | Offers AMD FSR 3.1 when the DLL is beside the program and the card runs the ROV path. Otherwise an "AMD FSR 3.1: Unavailable: ..." row says why, and a saved FSR 3.1 choice becomes Off. Shows the five modes with their exact scene sizes, and Sharpness. |
 | Release | `tools/package-release.ps1`, `src/update_bundle.h`, `packaging/licenses/THIRD-PARTY-LICENSES.txt` | The DLL is a release file, the updater installs it, and AMD's license ships with it. |
 
@@ -138,12 +174,15 @@ to DLSS or FSR 1:
 
 ## Logs
 
-- `AMD FSR 3.1: performance requested, sharpness 80 (FidelityFX SDK 1.1.4, amd_fidelityfx_dx12.dll) ...` (app), and the
+- `AMD FSR 3.1: Marvel Ultimate Alliance Gold Edition: performance requested | scene 1920x1080 -> output 3840x2160 |
+  scene profile mua1-gold | sharpness 80 (FidelityFX SDK 1.1.4, amd_fidelityfx_dx12.dll) ...` (app), and the
   `Upscaling:` line.
-- `FSR 3.1: scene surface found: ...`.
-- `FSR 3.1: AMD FSR 3.1 Performance | scene 1920x1080 -> output 3840x2160 | AMD's render size 1920x1080 | FidelityFX
-  upscaler 3.1.4 | jitter Halton(2,3) 32 phases | motion vectors render pixels, current to previous, without jitter |
-  depth R32F 0 to 1 | color RGBA8 SDR, no auto exposure, pre-exposure 1 | output alpha the scene's own | sharpness 80`.
+- `FSR 3.1: scene surface found (scene profile mua1-gold): ...`.
+- `FSR 3.1: AMD FSR 3.1 Performance | scene 1920x1080 -> output 3840x2160 | scene profile mua1-gold | AMD's render size
+  1920x1080 | FidelityFX upscaler 3.1.4 | jitter Halton(2,3) 32 phases | motion vectors render pixels, current to
+  previous, without jitter | depth R32F 0 to 1 | color RGBA8 SDR, no auto exposure, pre-exposure 1 | output alpha the
+  scene's own | sharpness 80`.
+- `FSR 3.1: off, no scene profile for this game ...` when the game has none (FSR 3.1 never starts).
 - `FSR 3.1: scale domains | ...` and the targets drawn before the scene, as with DLSS.
 - `FSR 3.1: upscaler context created | FidelityFX upscaler ... | max render ... -> output ... | depth 0 near, 1 far`.
 - `FSR 3.1: camera from the game's projection | near ... | far ... | vertical field of view ... degrees | depth ...`,

@@ -136,26 +136,42 @@ void TestFramePolicies() {
 }
 
 void TestUpscalers() {
-  std::printf("FSR 3.1 and DLSS belong to MUA 1; Gold Edition and MUA 2 keep Off and FSR 1; NIS and CAS are gone\n");
+  std::printf("FSR 3.1 and DLSS belong to MUA 1 and Gold Edition; MUA 2 keeps Off and FSR 1; NIS and CAS are gone\n");
   CHECK(Mua1().upscalers == mua::kAllUpscalers);
-  CHECK(Gold().upscalers == mua::kFsr1Upscalers);
+  CHECK(Gold().upscalers == mua::kAllUpscalers);
   CHECK(Mua2().upscalers == mua::kFsr1Upscalers);
-  for (const mua::GameDefinition* game : {&Gold(), &Mua2()}) {
-    CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) == mua::Upscaler::kOff);
-    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) == mua::Upscaler::kOff);
-    CHECK((game->upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
+  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, Mua2().upscalers) == mua::Upscaler::kOff);
+  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, Mua2().upscalers) == mua::Upscaler::kOff);
+  CHECK((Mua2().upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold()}) {
+    CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+  }
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
           (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
-  }
-  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, Mua1().upscalers) ==
-        (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
-  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, Mua1().upscalers) ==
-        (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
-  CHECK((Mua1().upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) != 0);
-  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler("nis", game->upscalers) == mua::Upscaler::kOff);
     CHECK(mua::ParseUpscaler("cas", game->upscalers) == mua::Upscaler::kOff);
   }
+}
+
+void TestSceneProfiles() {
+  std::printf("DLSS and FSR 3.1 only for a game with a scene profile: MUA 1's and Gold Edition's own\n");
+  CHECK(Mua1().scene_profile == "mua1");
+  CHECK(Gold().scene_profile == "mua1-gold");
+  // A profile is named after its game.
+  CHECK(Mua1().scene_profile == Mua1().key && Gold().scene_profile == Gold().key);
+  CHECK(Mua2().scene_profile.empty());
+  const mua::UpscalerMask temporal = mua::UpscalerBit(mua::Upscaler::kFsr3) | mua::UpscalerBit(mua::Upscaler::kDlss);
+  for (const mua::GameDefinition& game : mua::AllGames()) {
+    CHECK(((game.upscalers & temporal) == temporal) == !game.scene_profile.empty());
+    CHECK((game.upscalers & temporal) == 0 || (game.upscalers & temporal) == temporal);
+  }
+  // Each game runs in its own program, so no scene, history or upscaler context outlives a change of game.
+  CHECK(Mua1().executable != Gold().executable && Gold().executable != Mua2().executable &&
+        Mua1().executable != Mua2().executable);
 }
 
 void TestSaveRoots() {
@@ -389,6 +405,7 @@ int main() {
   TestDefinitions();
   TestFramePolicies();
   TestUpscalers();
+  TestSceneProfiles();
   TestProfiles();
   TestSaveRoots();
   TestActiveGame();

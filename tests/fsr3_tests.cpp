@@ -1,8 +1,8 @@
 // AMD FSR 3.1: patches/rexglue-sdk/0165 adds it to the scene upscaler beside DLSS with AMD's signed
 // amd_fidelityfx_dx12.dll and its unmodified ffx_api headers (FidelityFX SDK v1.1.4), and feeds it the scene upscaler's
 // own color, depth, camera motion vectors and jitter in AMD's conventions; the app sets its mode only for the FSR 3.1
-// choice, only MUA1 offers it, the DLL comes only from AMD's pinned commit and ships with its license, and no frame
-// generation is involved.
+// choice, MUA1 and its Gold Edition offer it, the DLL comes only from AMD's pinned commit and ships with its license,
+// and no frame generation is involved.
 // Run: mua_fsr3_tests
 
 #include <algorithm>
@@ -246,14 +246,15 @@ void TestApp() {
 }
 
 void TestGames() {
-  std::printf("only Marvel Ultimate Alliance offers FSR 3.1\n");
-  CHECK((mua::Game(mua::GameId::kMua1).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) != 0);
-  CHECK((mua::Game(mua::GameId::kMua1Gold).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
-  CHECK((mua::Game(mua::GameId::kMua2).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
-  // A saved fsr3 in Gold Edition's or MUA 2's settings is Off, so neither ever sets d3d12_fsr3_mode.
-  for (const mua::GameId id : {mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
-    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, mua::Game(id).upscalers) == mua::Upscaler::kOff);
+  std::printf("Marvel Ultimate Alliance and its Gold Edition offer FSR 3.1, MUA 2 doesn't\n");
+  for (const mua::GameId id : {mua::GameId::kMua1, mua::GameId::kMua1Gold}) {
+    CHECK((mua::Game(id).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) != 0);
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, mua::Game(id).upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
   }
+  CHECK((mua::Game(mua::GameId::kMua2).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
+  // A saved fsr3 in MUA 2's settings is Off, so it never sets d3d12_fsr3_mode.
+  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, mua::Game(mua::GameId::kMua2).upscalers) == mua::Upscaler::kOff);
 }
 
 void TestSource(const std::string& patch) {

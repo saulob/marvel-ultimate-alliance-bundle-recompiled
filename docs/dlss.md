@@ -1,4 +1,4 @@
-# NVIDIA DLSS Super Resolution (MUA1)
+# NVIDIA DLSS Super Resolution (MUA1 and Gold Edition)
 
 Status: **fifth version, verified.** At Render resolution 3x with Performance (1920x1080 to 3840x2160) the picture
 is correct, the depth is valid and gameplay runs at 58.5 to 73.7 FPS. The picture was correct at every mode tried
@@ -12,10 +12,12 @@ targets only the scene samples at the game's own 1x (0164).
 AMD FSR 3.1 ([fsr3.md](fsr3.md)) is a second backend of the same scene upscaler, with the same scene, depth, motion
 vectors, jitter, pre-scene targets and write-back.
 
-MUA1 on Windows offers NVIDIA DLSS in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1, NVIDIA DLSS), on a
-GeForce RTX card that uses the rasterizer-ordered view (ROV) render path. DLSS upscales the 3D scene only, from the
-scene's own color and depth, camera motion vectors and a jitter the port adds; the HUD and menus keep drawing at the
-Render resolution. Gold Edition and MUA2 do not offer it. Nothing about DLSS runs unless it is selected.
+MUA1 and Gold Edition on Windows offer NVIDIA DLSS in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1,
+NVIDIA DLSS), on a GeForce RTX card that uses the rasterizer-ordered view (ROV) render path. DLSS upscales the 3D scene
+only, from the scene's own color and depth, camera motion vectors and a jitter the port adds; the HUD and menus keep
+drawing at the Render resolution. Gold Edition uses its own scene profile, `mua1-gold` (0167, see
+[fsr3.md](fsr3.md#games)), and is verified at 3x Performance. MUA2 does not offer it yet. Nothing about DLSS runs
+unless it is selected.
 
 ## Pieces
 
@@ -30,7 +32,8 @@ Render resolution. Gold Edition and MUA2 do not offer it. Nothing about DLSS run
 | Pre-scene targets | `patches/rexglue-sdk/0162-d3d12-dlss-pre-scene-target-scale.windows.patch` | Draws the surfaces drawn only before the scene at the scene's whole scale, `scene_edram_stretch` for their resolves, `Resolve`'s `copy_source`, the scale log lines and the GPU targets line's effective scales. |
 | Depth capture | `patches/rexglue-sdk/0163-d3d12-dlss-depth-capture.windows.patch` | Takes the DLSS depth once between depth clears, at the first resolve after draws wrote it (`scene::ScenePlanes`). |
 | Native pre-scene targets | `patches/rexglue-sdk/0164-d3d12-dlss-native-pre-scene-targets.windows.patch` | In Performance and Ultra Performance, draws the pre-scene targets the scene's draws sample at 1x, with the game's own depth bias. |
-| App | `src/settings.cpp` (`ApplyDlss`) | When DLSS is the Upscaling choice, sets `d3d12_dlss_mode` from the Upscaling quality and points `d3d12_dlss_bridge` and `d3d12_dlss_data_path` (`<game cache>\ngx`) at the bridge beside the program. Any other choice sets `d3d12_dlss_mode=off`. |
+| Scene profiles | `patches/rexglue-sdk/0166-d3d12-scene-upscaler-profiles.windows.patch`, `0167-d3d12-scene-upscaler-gold-profile.windows.patch` | `d3d12_scene_profile`: the game's rule for finding its scene surface (`mua1`, and `mua1-gold`, which also takes Gold Edition's 4x draws over the scene's memory into the scene's pass); none leaves DLSS and FSR 3.1 off. |
+| App | `src/settings.cpp` (`ApplyDlss`) | When DLSS is the Upscaling choice, sets `d3d12_dlss_mode` from the Upscaling quality, `d3d12_scene_profile` from the game, and points `d3d12_dlss_bridge` and `d3d12_dlss_data_path` (`<game cache>\ngx`) at the bridge beside the program. Any other choice sets `d3d12_dlss_mode=off`. |
 | Launcher | `src/launcher.cpp`, `src/dlss_support.cpp` | Offers DLSS only when the effective card is NVIDIA, NVIDIA's requirements check (through the bridge) accepts it, and the card runs the ROV path. Otherwise an "NVIDIA DLSS: Unavailable: ..." row says why, and a saved DLSS choice becomes Off. |
 
 ## Scale domains
@@ -176,9 +179,12 @@ next frame:
 
 ## Logs
 
-- `NVIDIA DLSS: <mode> requested` (app) and the `Upscaling:` line.
-- `DLSS: scene surface found: ...`.
-- `DLSS: Super Resolution <mode> | output ... | NVIDIA recommends ... | scene input ... | jitter ... | preset ...`.
+- `NVIDIA DLSS: <game>: <mode> requested | scene at NVIDIA's size -> output ... | scene profile <mua1 or mua1-gold>`
+  (app) and the `Upscaling:` line.
+- `DLSS: scene surface found (scene profile <profile>): ...`.
+- `DLSS: Super Resolution <mode> | scene profile <profile> | output ... | NVIDIA recommends ... | scene input ... |
+  jitter ... | preset ...`.
+- `DLSS: off, no scene profile for this game ...` when the game has none (NGX is never loaded).
 - `DLSS: scale domains | output, HUD and menus 5120x2880 (4x) | scene 2560x1440 (2x) | targets drawn before the scene
   2x`.
 - `DLSS: targets drawn before the scene at 2x: pitch 560 1x MSAA, pitch 1040 1x MSAA | kept at 4x (drawn into or

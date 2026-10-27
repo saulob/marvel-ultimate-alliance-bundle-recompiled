@@ -2,10 +2,10 @@
 // bridge only when 0161's scene upscaler first draws a scene with DLSS selected, 0161 evaluates DLSS on the command
 // list from the scene's own color, depth and motion, 0162 draws the targets drawn only before the scene at the scene's
 // whole scale and stretches their resolves back, 0163 takes the scene's depth once between depth clears, 0164 draws
-// the pre-scene targets only the scene samples at 1x in Performance, the app sets the DLSS mode only for the DLSS choice, only MUA1
-// offers it, the SDK comes only from NVIDIA's pinned commit, releases carry no DLSS file yet, and no patch carries
-// diagnostics. With the NVIDIA DLSS SDK, it also loads the built mua_dlss_bridge.dll and calls its interface without a
-// GPU.
+// the pre-scene targets only the scene samples at 1x in Performance, the app sets the DLSS mode only for the DLSS
+// choice, MUA1 and its Gold Edition offer it, the SDK comes only from NVIDIA's pinned commit, releases carry no DLSS
+// file yet, and no patch carries diagnostics. With the NVIDIA DLSS SDK, it also loads the built mua_dlss_bridge.dll and
+// calls its interface without a GPU.
 // Run: mua_dlss_bridge_tests
 
 #include <cstdio>
@@ -249,8 +249,9 @@ void TestApp() {
 
 void TestGames() {
   CHECK((mua::Game(mua::GameId::kMua1).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) != 0);
-  CHECK((mua::Game(mua::GameId::kMua1Gold).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) == 0);
+  CHECK((mua::Game(mua::GameId::kMua1Gold).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) != 0);
   CHECK((mua::Game(mua::GameId::kMua2).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) == 0);
+  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, mua::Game(mua::GameId::kMua2).upscalers) == mua::Upscaler::kOff);
 }
 
 void TestSdkSource() {

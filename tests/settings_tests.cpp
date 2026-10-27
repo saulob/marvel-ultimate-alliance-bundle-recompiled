@@ -541,6 +541,79 @@ void TestFsr3Settings(const Scratch& scratch) {
   fs::remove(scratch.player);
 }
 
+void TestTemporalUpscalersPerGame(const Scratch& scratch) {
+  std::printf("FSR 3.1 and DLSS are each game's own choice; MUA 2 reads a saved one as Off\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  settings.Set("mua_upscaler", "dlss");
+  settings.Set("mua_upscale_quality", "quality");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "native");
+  settings.Set("mua_upscaler", "fsr3");
+  settings.Set("mua_upscale_quality", "ultra_performance");
+  settings.Set("mua_fsr3_sharpness", "60");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_fsr3_sharpness") == "80");
+  settings.Set("mua_upscaler", "fsr");
+  settings.Set("mua_upscale_quality", "balanced");
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Get("mua_upscaler") == "dlss");
+  CHECK(settings.Save());
+  const auto saved = [&](const char* folder, const char* key) {
+    return toml::parse_file((root / folder / "game_settings.toml").string())[key].value<std::string>();
+  };
+  CHECK(saved("mua1", "mua_upscaler") == "dlss" && saved("mua1", "mua_upscale_quality") == "quality");
+  CHECK(saved("mua1_gold", "mua_upscaler") == "fsr3" &&
+        saved("mua1_gold", "mua_upscale_quality") == "ultra_performance");
+  CHECK(saved("mua2", "mua_upscaler") == "fsr" && saved("mua2", "mua_upscale_quality") == "balanced");
+  CHECK(!fs::exists(scratch.player) || !toml::parse_file(scratch.player.string()).contains("mua_upscaler"));
+
+  struct Expected {
+    mua::GameId game;
+    const char* upscaler;
+    mua::Upscaler parsed;
+  };
+  const mua::Upscaler fsr3 = mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff;
+  const mua::Upscaler dlss = mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff;
+  const mua::Upscaler fsr1 = mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff;
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  for (const Expected& expected : {Expected{mua::GameId::kMua1, "dlss", dlss},
+                                   Expected{mua::GameId::kMua1Gold, "fsr3", fsr3},
+                                   Expected{mua::GameId::kMua2, "fsr", fsr1}}) {
+    reopened.SelectGame(expected.game);
+    CHECK(reopened.Get("mua_upscaler") == expected.upscaler);
+    CHECK(mua::ParseUpscaler(reopened.Get("mua_upscaler"), mua::Game(expected.game).upscalers) == expected.parsed);
+  }
+  reopened.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(reopened.Get("mua_fsr3_sharpness") == "60");
+
+  // A MUA 2 file naming FSR 3.1 or DLSS still loads; the game takes it as Off.
+  for (const char* temporal : {"fsr3", "dlss"}) {
+    std::ofstream(root / "mua2" / "game_settings.toml", std::ios::trunc)
+        << "mua_upscaler = \"" << temporal << "\"\nmua_upscale_quality = \"performance\"\n";
+    mua::GameSettings older;
+    older.Capture(scratch.player, scratch.shipped);
+    older.SelectGame(mua::GameId::kMua2);
+    CHECK(older.Get("mua_upscaler") == temporal);
+    CHECK(mua::ParseUpscaler(older.Get("mua_upscaler"), mua::Game(mua::GameId::kMua2).upscalers) ==
+          mua::Upscaler::kOff);
+  }
+
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
+  rex::cvar::SetFlagByName("mua_fsr3_sharpness", "80");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  for (const char* folder : {"mua1", "mua1_gold", "mua2"}) {
+    fs::remove_all(root / folder);
+  }
+  fs::remove(scratch.player);
+}
+
 void TestDeprecatedUpscalersAreOff(const Scratch& scratch) {
   std::printf("NVIDIA NIS and AMD CAS saved by earlier versions are Off and saved as off\n");
   const fs::path root = scratch.player.parent_path();
@@ -742,6 +815,7 @@ int main() {
   TestAspectRatioVideoMode();
   TestUpscalingPerGame(scratch);
   TestFsr3Settings(scratch);
+  TestTemporalUpscalersPerGame(scratch);
   TestDeprecatedUpscalersAreOff(scratch);
   TestPlayerNamesAreShared(scratch);
   TestHdTextIsShared(scratch);

@@ -29,6 +29,7 @@ constexpr std::array kGames = {
         .data_folder = "mua1",
         .frame_policy = kMua1FramePolicy,
         .upscalers = kAllUpscalers,
+        .scene_profile = "mua1",
     },
     GameDefinition{
         .id = GameId::kMua1Gold,
@@ -44,7 +45,9 @@ constexpr std::array kGames = {
         .executable = "marvel_ultimate_alliance_mua1_gold.exe",
         .data_folder = "mua1_gold",
         .frame_policy = kMua1FramePolicy,
-        .upscalers = kFsr1Upscalers,
+        .upscalers = kAllUpscalers,
+        // MUA1's scene, which its later Direct3D also draws over at 4x MSAA between the scene's resolves.
+        .scene_profile = "mua1-gold",
     },
     GameDefinition{
         .id = GameId::kMua2,

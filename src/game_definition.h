@@ -37,6 +37,9 @@ struct GameDefinition {
   std::string_view data_folder;  // the game's folder under the user data root
   FramePolicy frame_policy;      // how the launcher's frame rates meet the game's own timing
   UpscalerMask upscalers;        // the Upscaling choices the launcher offers and the runtime accepts
+  // How the GPU plugin finds the 3D scene for NVIDIA DLSS and AMD FSR 3.1 (d3d12_scene_profile); a game without one
+  // offers neither.
+  std::string_view scene_profile;
 
   bool HasPage(LauncherPage page) const { return (pages & PageBit(page)) != 0; }
 };

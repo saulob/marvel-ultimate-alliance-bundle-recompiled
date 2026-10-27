@@ -600,6 +600,17 @@ bool HostRenderTargetsActive() {
   return active;
 }
 
+void ApplySceneProfile(const GameDefinition& game) {
+  if (rex::cvar::GetFlagInfo("d3d12_scene_profile")) {
+    rex::cvar::SetFlagByName("d3d12_scene_profile", std::string(game.scene_profile));
+  }
+}
+
+WindowSize TemporalOutputSize() {
+  return RenderSize(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)),
+                    std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str())));
+}
+
 }  // namespace
 
 // Also replaces a native_2x_msaa = false written by launchers that labelled it Off.
@@ -653,11 +664,15 @@ void ApplyDlss(const std::filesystem::path& cache_root) {
     rex::cvar::SetFlagByName("d3d12_dlss_mode", "off");
     return;
   }
+  const GameDefinition& game = *ActiveGame();
   const char* mode = DlssModeFor(ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
+  ApplySceneProfile(game);
   rex::cvar::SetFlagByName("d3d12_dlss_bridge", Utf8(bridge));
   rex::cvar::SetFlagByName("d3d12_dlss_data_path", Utf8(cache_root / "ngx"));
   rex::cvar::SetFlagByName("d3d12_dlss_mode", mode);
-  REXLOG_INFO("NVIDIA DLSS: {} requested; NVIDIA's runtime starts with the first 3D scene", mode);
+  REXLOG_INFO("NVIDIA DLSS: {}: {} requested | scene at NVIDIA's size -> output {} | scene profile {}; NVIDIA's "
+              "runtime starts with the first 3D scene",
+              game.display_name, mode, SizeText(TemporalOutputSize()), game.scene_profile);
 }
 
 void ApplyFsr3() {
@@ -681,14 +696,21 @@ void ApplyFsr3() {
     rex::cvar::SetFlagByName("d3d12_fsr3_mode", "off");
     return;
   }
+  const GameDefinition& game = *ActiveGame();
   const UpscaleQuality quality =
       EffectiveQuality(Upscaler::kFsr3, ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
   const int sharpness = std::clamp(REXCVAR_GET(mua_fsr3_sharpness), 0, 100);
+  ApplySceneProfile(game);
   rex::cvar::SetFlagByName("d3d12_fsr3_library", Utf8(library));
   rex::cvar::SetFlagByName("d3d12_fsr3_sharpness", std::to_string(sharpness));
   rex::cvar::SetFlagByName("d3d12_fsr3_mode", Fsr3ModeFor(quality));
-  REXLOG_INFO("AMD FSR 3.1: {} requested, sharpness {} (FidelityFX SDK {}, {}); it starts with the first 3D scene",
-              Fsr3ModeFor(quality), sharpness, kFidelityFxSdkVersion, kFidelityFxLibraryFile);
+  const WindowSize output = TemporalOutputSize();
+  const WindowSize scene =
+      Fsr3SceneSize(output, CanvasWidth(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio))), quality);
+  REXLOG_INFO("AMD FSR 3.1: {}: {} requested | scene {} -> output {} | scene profile {} | sharpness {} (FidelityFX "
+              "SDK {}, {}); it starts with the first 3D scene",
+              game.display_name, Fsr3ModeFor(quality), SizeText(scene), SizeText(output), game.scene_profile,
+              sharpness, kFidelityFxSdkVersion, kFidelityFxLibraryFile);
 }
 
 // The requested upscaler; the presenter logs the passes that actually run ("Presenter: ... effects:").
