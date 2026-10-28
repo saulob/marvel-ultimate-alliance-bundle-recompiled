@@ -98,6 +98,13 @@ REXCVAR_DEFINE_BOOL(mua_launcher_maximized, false, "Marvel Ultimate Alliance",
                     "Launcher window was maximized when closed");
 REXCVAR_DEFINE_BOOL(mua_launcher_fullscreen, false, "Marvel Ultimate Alliance",
                     "Launcher was left in its own F11 fullscreen, written by the launcher");
+REXCVAR_DEFINE_BOOL(mua_cheat_health, false, "Marvel Ultimate Alliance",
+                    "Infinite health for every party hero (Gold Edition)");
+REXCVAR_DEFINE_BOOL(mua_cheat_energy, false, "Marvel Ultimate Alliance",
+                    "Infinite energy for every party hero (Gold Edition)");
+REXCVAR_DEFINE_INT32(mua_cheat_coin_multiplier, 0, "Marvel Ultimate Alliance",
+                     "Coin awards multiplier: 0 (off), 2, 5 or 10 (Gold Edition)")
+    .range(0, 10);
 
 namespace mua {
 namespace {
@@ -130,6 +137,9 @@ std::vector<std::string> GameSettingKeys() {
       "mua_show_frame_counter",
       "detailed_logging",
       "mnk_mode",
+      "mua_cheat_health",
+      "mua_cheat_energy",
+      "mua_cheat_coin_multiplier",
   };
   for (const KeyboardAction& action : kKeyboardActions) {
     keys.emplace_back(action.key);
@@ -143,7 +153,8 @@ std::vector<std::string> GameSettingKeys() {
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
 constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro",  "mua_frame_rate",      "mua_aspect_ratio",
-                                                 "mua_upscaler",    "mua_upscale_quality", "mua_fsr3_sharpness"};
+                                                 "mua_upscaler",    "mua_upscale_quality", "mua_fsr3_sharpness",
+                                                 "mua_cheat_health", "mua_cheat_energy",  "mua_cheat_coin_multiplier"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);

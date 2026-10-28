@@ -735,6 +735,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
          [this](trg::Ui& ui) { PageGraphics(ui); }, {}, PageShown(LauncherPage::kGraphics)},
         {"Gameplay", "What the window shows while you play.", [this](trg::Ui& ui) { PageGameplay(ui); }, {},
          PageShown(LauncherPage::kGameplay)},
+        {"Cheats", "Optional gameplay modifiers for the Gold Edition.",
+         [](trg::Ui& ui) { PageCheats(ui); }, {}, PageShown(LauncherPage::kCheats)},
         {"Achievements", "Your achievements on this PC.", [this](trg::Ui& ui) { PageAchievements(ui); }, {},
          PageShown(LauncherPage::kAchievements)},
         {"Controls", "Controller and keyboard.", [](trg::Ui& ui) { PageControls(ui); }, {},
@@ -1167,6 +1169,17 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
           PixelShaderEdramSupported(ResolveGraphicsAdapter(adapter, graphics_adapters_).value_or(-1)));
     }
     return host_render_targets_;
+  }
+
+  static void PageCheats(trg::Ui& ui) {
+    ui.Help("Press F10 while playing to open the Cheats menu. Changes made there apply only to the current session.");
+    ui.Spacer(12);
+    ui.Toggle("Infinite Health", "All four party heroes stay at their own maximum health", "mua_cheat_health", false,
+              "Off", "On");
+    ui.Toggle("Infinite Energy", "All four party heroes stay at their own maximum energy", "mua_cheat_energy", false,
+              "Off", "On");
+    ui.Choice("Coin Multiplier", "Multiply the coins the game awards", "mua_cheat_coin_multiplier", "0",
+              {{"0", "Off"}, {"2", "2x"}, {"5", "5x"}, {"10", "10x"}}, 4);
   }
 
   void PageAchievements(trg::Ui& ui) {

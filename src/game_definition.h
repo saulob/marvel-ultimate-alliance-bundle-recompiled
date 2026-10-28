@@ -14,7 +14,7 @@ namespace mua {
 
 enum class GameId { kMua1, kMua1Gold, kMua2 };
 
-enum class LauncherPage { kPlay, kDisplay, kGraphics, kGameplay, kAchievements, kControls, kAbout };
+enum class LauncherPage { kPlay, kDisplay, kGraphics, kGameplay, kCheats, kAchievements, kControls, kAbout };
 
 using PageMask = uint32_t;
 

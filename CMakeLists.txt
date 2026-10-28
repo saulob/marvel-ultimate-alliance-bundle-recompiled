@@ -242,6 +242,8 @@ set(MUA_RUNTIME_SOURCES
     src/aspect_render.cpp
     src/audio_mixer_priority.cpp
     src/audio_pcm_firewall.cpp
+    src/cheat_menu.cpp
+    src/cheats.cpp
     src/crt_native.cpp
     src/d3d_state_filter.cpp
     src/frame_limiter.cpp

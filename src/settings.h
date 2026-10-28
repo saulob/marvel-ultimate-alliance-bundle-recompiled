@@ -37,6 +37,9 @@ REXCVAR_DECLARE(int32_t, mua_launcher_width);
 REXCVAR_DECLARE(int32_t, mua_launcher_height);
 REXCVAR_DECLARE(bool, mua_launcher_maximized);
 REXCVAR_DECLARE(bool, mua_launcher_fullscreen);
+REXCVAR_DECLARE(bool, mua_cheat_health);
+REXCVAR_DECLARE(bool, mua_cheat_energy);
+REXCVAR_DECLARE(int32_t, mua_cheat_coin_multiplier);
 
 namespace mua {
 

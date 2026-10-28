@@ -28,6 +28,7 @@
 #include "achievements_overlay.h"
 #include "active_log.h"
 #include "aspect_ratio.h"
+#include "cheat_menu.h"
 #include "diagnostics.h"
 #include "disc_identity.h"
 #include "frame_counter.h"
@@ -292,9 +293,16 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
         mua::QueueStartupSkipIntroNotice(REXCVAR_GET(mua_skip_intro));
         mua::CreateSkipIntroNotice(imgui_drawer());
         CreateCursorSync(imgui_drawer());
+#if defined(MUA_RUNTIME_MUA1_GOLD)
+        cheat_menu_.Attach(window(), imgui_drawer());
+#endif
         if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
           // Replaces ReXApp's own callback: the modal overlay keeps the game's input until its close press is released.
+#if defined(MUA_RUNTIME_MUA1_GOLD)
+          input->SetActiveCallback([this] { return cheat_menu_.GameInputActive(); });
+#else
           input->SetActiveCallback([this] { return GameInputActive(); });
+#endif
         }
         mua::ModalDialog::AttachEscapeKey(window());
       }
@@ -308,6 +316,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     }
     mua::ModalDialog::DetachEscapeKey();
     delete achievements_;
+#if defined(MUA_RUNTIME_MUA1_GOLD)
+    cheat_menu_.Detach();
+#endif
     DetachWindowHost();
     REXLOG_INFO("{}", mua::FormatCleanExit(mua::ProcessUptimeText()));
   }
@@ -489,5 +500,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   std::filesystem::path shipped_config_;
   mua::UserDataSelection user_data_;
   mua::AchievementsOverlay* achievements_ = nullptr;
+#if defined(MUA_RUNTIME_MUA1_GOLD)
+  mua::CheatMenu cheat_menu_;
+#endif
   bool show_launcher_ = false;
 };

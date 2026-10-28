@@ -92,6 +92,7 @@ endif()
 mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(keyboard_tests headless)
+mua_add_test(cheat_session_tests headless)
 mua_add_test(relaunch_tests headless)
 mua_add_test(launcher_handoff_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 mua_add_test(lifecycle_tests headless)

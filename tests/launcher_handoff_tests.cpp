@@ -316,14 +316,17 @@ void TestPackagedPrograms() {
 }
 
 void TestPlayablePages() {
-  std::printf("every game offers the same pages on every platform\n");
+  std::printf("every game offers the shared pages and only Gold Edition offers Cheats\n");
   for (const GameDefinition& game : AllGames()) {
     for (const LauncherPage page : {LauncherPage::kPlay, LauncherPage::kDisplay, LauncherPage::kGraphics,
                                     LauncherPage::kGameplay, LauncherPage::kAchievements, LauncherPage::kControls,
                                     LauncherPage::kAbout}) {
       CHECK(game.HasPage(page));
     }
+    CHECK(game.HasPage(LauncherPage::kCheats) == (game.id == GameId::kMua1Gold));
   }
+  CHECK(LauncherPage::kGameplay < LauncherPage::kCheats);
+  CHECK(LauncherPage::kCheats < LauncherPage::kAchievements);
   CHECK(!Has(ReadSource("launcher.cpp"), "_WIN32"));
   CHECK(!Has(ReadSource("game_definition.cpp"), "_WIN32"));
 }
