@@ -342,6 +342,8 @@ function(mua_add_game_executable target module_key icon_key)
             endif()
         endforeach()
     else()
+        # glibc 2.31 keeps dlopen in libdl, which the graphics card list loads the Vulkan loader with.
+        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE_DIR:${target}>"
             VERBATIM

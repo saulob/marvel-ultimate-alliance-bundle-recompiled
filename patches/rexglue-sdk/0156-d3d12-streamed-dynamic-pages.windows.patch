@@ -1,0 +1,44 @@
+The Direct3D 12 half of 0134: uploads through CopyPagesForUpload, ends the guest frame for the streamed page set and
+streams vertex fetches.
+
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -324,13 +324,11 @@
+         return false;
+       }
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+-      std::memcpy(upload_buffer_mapping,
+-                  memory().TranslatePhysical(upload_range_start << page_size_log2()),
+-                  upload_buffer_size);
++      uint32_t upload_buffer_pages = uint32_t(upload_buffer_size >> page_size_log2());
++      CopyPagesForUpload(upload_range_start, upload_buffer_pages, upload_buffer_mapping);
+       command_list.D3DCopyBufferRegion(buffer_, upload_range_start << page_size_log2(),
+                                        upload_buffer, UINT64(upload_buffer_offset),
+                                        UINT64(upload_buffer_size));
+-      uint32_t upload_buffer_pages = uint32_t(upload_buffer_size >> page_size_log2());
+       upload_range_start += upload_buffer_pages;
+       upload_range_length -= upload_buffer_pages;
+     }
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -2436,6 +2436,9 @@
+   NoteGpuWorkSwap(submission_current_, idle_wait_ns_, texture_cache_->draw_resolution_scale_x(),
+                   texture_cache_->draw_resolution_scale_y(),
+                   render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock);
++  if (shared_memory_) {
++    shared_memory_->OnGuestFrameEnd();
++  }
+ 
+   // In case the swap command is the only one in the frame.
+   if (!BeginSubmission(true)) {
+@@ -3202,7 +3205,7 @@
+         // shared memory has nothing mapped (undefined on Tiled Resources Tier 1: GPU hangs).
+         vfetch_request_size = 4096;
+       }
+-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size)) {
++      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size, true)) {
+         REXGPU_ERROR(
+             "Failed to request vertex buffer at 0x{:08X} (size {}) in the "
+             "shared memory",

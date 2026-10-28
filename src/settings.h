@@ -12,6 +12,7 @@
 #include "trg/settings.h"
 
 #include "game_definition.h"
+#include "graphics_backend.h"
 #include "window_placement.h"
 
 REXCVAR_DECLARE(bool, mua_launcher);
@@ -43,7 +44,7 @@ struct MonitorInfo;
 class GameSettings;
 
 // Allowing tearing is VSync Off.
-inline constexpr char kTearingSetting[] = "d3d12_allow_variable_refresh_rate_and_tearing";
+inline constexpr const char* kTearingSetting = kBackendSettings.tearing[0];
 
 inline constexpr char kSelectedGameKey[] = "mua_game";
 
@@ -75,6 +76,9 @@ void ApplyPlayerNames();
 // Turns on gpu_stream_dynamic_pages for a game runtime, unless the config sets it. Call with ApplyMultisampling.
 void ApplyDynamicPageStreaming(std::optional<GameId> game);
 
+// The upscalers this runtime runs: FSR 1 needs a presenter whose present_effect accepts it.
+UpscalerMask RuntimeUpscalers();
+
 // The active game's Upscaling choice; Off for a choice that game doesn't offer, or before a game is active.
 Upscaler ActiveUpscaler();
 
@@ -101,9 +105,13 @@ void PinGuestVideoMode();
 // PinGuestVideoMode.
 void ApplyAspectRatio();
 
-// Sets d3d12_adapter from the launcher's Graphics card choice. Call once the player settings are loaded and
-// before the graphics device is created; Automatic leaves the SDK's own preference alone.
+// Sets the backend's graphics card index from the launcher's Graphics card choice. Call once the player settings are
+// loaded and before the graphics device is created.
 void ApplyGraphicsAdapter();
+
+// Sets every presenter setting that allows tearing to the saved VSync choice. Call once the player settings are loaded
+// and before the presenter is created.
+void ApplyVsync();
 
 struct StartupWindowInfo {
   int selected_width = -1;

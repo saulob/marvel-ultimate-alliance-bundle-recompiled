@@ -1,7 +1,9 @@
-// Launcher to game handoff: the game's own program starts restored, keeps its own window settings and takes the
-// foreground once. Policy checks plus source checks; the native calls need a real window and a second process.
+// Launcher to game handoff: the game's own program is found and started on each platform, starts restored, keeps its
+// own window settings and takes the foreground once. Policy checks plus source checks; the native calls need a real
+// window and a second process.
 // Run: mua_launcher_handoff_tests
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -9,9 +11,12 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "game_definition.h"
 #include "game_handoff.h"
+#include "relaunch_command.h"
 #include "window_placement.h"
 
 using namespace mua;
@@ -135,7 +140,7 @@ void TestShutdownOrder() {
   CHECK(InOrder(start, {"if (!StartRuntime(game)) {", "return false;",
                         "mua::HideNativeWindow(window()->GetNativeWindowHandle())", "ExitLauncher()"}));
   CHECK(!Has(start, "chrono") && !Has(start, "Wait"));
-  CHECK(Has(app, "mua::RelaunchExecutable(executable, L\"--mua_skip_launcher=true\")"));
+  CHECK(Has(app, "mua::RelaunchExecutable(program, L\"--mua_skip_launcher=true\")"));
   CHECK(Has(app, "std::_Exit(0);"));
   CHECK(Count(app, "mua::RelaunchExecutable(") == 1);
   CHECK(Has(app, "StartRuntimeAndExit(library_->State(selected));"));
@@ -155,22 +160,172 @@ void TestFailedStartLeavesLauncherUsable() {
                         "Could not start the game's program. Press Play to try again."}));
 }
 
-void TestGamePrograms() {
-  std::printf("each game starts its own program\n");
-  CHECK(Game(GameId::kMua1).executable == "marvel_ultimate_alliance_mua1.exe");
-  CHECK(Game(GameId::kMua1Gold).executable == "marvel_ultimate_alliance_mua1_gold.exe");
-  CHECK(Game(GameId::kMua2).executable == "marvel_ultimate_alliance_mua2.exe");
-  std::set<std::string_view> programs;
+std::set<std::string> GamePrograms() {
+  std::set<std::string> programs;
   for (const GameDefinition& game : AllGames()) {
-    CHECK(!game.executable.empty());
-    CHECK(game.executable != "marvel_ultimate_alliance_bundle.exe");
-    programs.insert(game.executable);
+    programs.emplace(game.program);
   }
-  CHECK(programs.size() == AllGames().size());
+  return programs;
+}
+
+// The names between `case "${MUA_APPIMAGE_PROGRAM:-}" in` and the `)` that selects them.
+std::set<std::string> AppRunPrograms() {
+  const std::string apprun = ReadSource("../packaging/linux/AppRun");
+  const std::string head = "case \"${MUA_APPIMAGE_PROGRAM:-}\" in";
+  const std::string cases = Region(apprun, head, ")");
+  std::set<std::string> programs;
+  std::string name;
+  for (const char c : cases.substr(std::min(cases.size(), head.size()))) {
+    if (c == '|' || c == ' ' || c == '\n') {
+      if (!name.empty()) {
+        programs.insert(std::exchange(name, {}));
+      }
+    } else {
+      name += c;
+    }
+  }
+  if (!name.empty()) {
+    programs.insert(name);
+  }
+  return programs;
+}
+
+void TestGamePrograms() {
+  std::printf("each game starts its own program, named for each platform\n");
+  CHECK(Game(GameId::kMua1).program == "marvel_ultimate_alliance_mua1");
+  CHECK(Game(GameId::kMua1Gold).program == "marvel_ultimate_alliance_mua1_gold");
+  CHECK(Game(GameId::kMua2).program == "marvel_ultimate_alliance_mua2");
+  for (const GameDefinition& game : AllGames()) {
+    CHECK(!game.program.empty() && game.program != "marvel_ultimate_alliance_bundle");
+    CHECK(game.program.find('.') == std::string_view::npos && game.program.find('/') == std::string_view::npos);
+    CHECK(ProgramFileName(game.program, ProgramPlatform::kWindows) == std::string(game.program) + ".exe");
+    CHECK(ProgramFileName(game.program, ProgramPlatform::kLinux) == game.program);
+  }
+  CHECK(GamePrograms().size() == AllGames().size());
+  CHECK(ProgramFileName("", ProgramPlatform::kWindows).empty());
+#if defined(_WIN32)
+  CHECK(kHostProgramPlatform == ProgramPlatform::kWindows);
+#else
+  CHECK(kHostProgramPlatform == ProgramPlatform::kLinux);
+#endif
+  CHECK(GameProgramPath(Game(GameId::kMua1Gold), "C:/Games/MUA", ProgramPlatform::kWindows) ==
+        std::filesystem::path("C:/Games/MUA") / "marvel_ultimate_alliance_mua1_gold.exe");
+  CHECK(GameProgramPath(Game(GameId::kMua2), "/home/deck/mua", ProgramPlatform::kLinux) ==
+        std::filesystem::path("/home/deck/mua") / "marvel_ultimate_alliance_mua2");
 
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");
-  CHECK(Has(app, "mua::PortFolder() / std::string(game.game->executable)"));
+  CHECK(Has(app, "mua::LauncherRuntimeBlocker(game, mua::ProgramFolder(), mua::kHostProgramPlatform)"));
+  CHECK(Has(app, "mua::GameProgramPath(*game.game, mua::ProgramFolder(), mua::kHostProgramPlatform)"));
+  CHECK(!Has(app, "PortFolder() / std::string(game"));
   CHECK(!Has(app, "marvel_ultimate_alliance_mua"));
+}
+
+struct ScratchFolder {
+  std::filesystem::path root = std::filesystem::temp_directory_path() / "mua_launcher_handoff_tests";
+  ScratchFolder() {
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+  }
+  ~ScratchFolder() { std::filesystem::remove_all(root); }
+};
+
+void Touch(const std::filesystem::path& file) {
+  std::filesystem::create_directories(file.parent_path());
+  std::ofstream(file) << "program";
+}
+
+void TestRuntimeAvailability() {
+  std::printf("a game is playable when its program is beside the launcher's, and only then\n");
+  const ScratchFolder scratch;
+  // The AppImage file and the game data live in the port folder; the programs run from the mount.
+  const std::filesystem::path port = scratch.root / "Games";
+  const std::filesystem::path mount = scratch.root / ".mount_MarvelAbCdEf" / "usr" / "bin";
+  Touch(port / "MarvelUltimateAlliance-v0.1.0-x86_64.AppImage");
+  std::filesystem::create_directories(port / "game");
+  for (const GameDefinition& game : AllGames()) {
+    Touch(GameProgramPath(game, mount, ProgramPlatform::kLinux));
+  }
+  for (const GameDefinition& game : AllGames()) {
+    CHECK(LauncherRuntimeBlocker(game, mount, ProgramPlatform::kLinux).empty());
+    CHECK(LauncherRuntimeBlocker(game, port, ProgramPlatform::kLinux) ==
+          "The " + std::string(game.display_name) + " runtime is not part of this build.");
+    // Windows names never stand for the Linux programs, nor the other way round.
+    CHECK(!LauncherRuntimeBlocker(game, mount, ProgramPlatform::kWindows).empty());
+  }
+
+  const std::filesystem::path windows = scratch.root / "windows";
+  for (const GameDefinition& game : AllGames()) {
+    Touch(GameProgramPath(game, windows, ProgramPlatform::kWindows));
+  }
+  for (const GameDefinition& game : AllGames()) {
+    CHECK(LauncherRuntimeBlocker(game, windows, ProgramPlatform::kWindows).empty());
+    CHECK(!LauncherRuntimeBlocker(game, windows, ProgramPlatform::kLinux).empty());
+  }
+
+  std::filesystem::remove(GameProgramPath(Game(GameId::kMua2), mount, ProgramPlatform::kLinux));
+  CHECK(LauncherRuntimeBlocker(Game(GameId::kMua2), mount, ProgramPlatform::kLinux) ==
+        "The Marvel Ultimate Alliance 2 runtime is not part of this build.");
+  CHECK(LauncherRuntimeBlocker(Game(GameId::kMua1), mount, ProgramPlatform::kLinux).empty());
+  std::filesystem::create_directories(GameProgramPath(Game(GameId::kMua2), mount, ProgramPlatform::kLinux));
+  CHECK(!LauncherRuntimeBlocker(Game(GameId::kMua2), mount, ProgramPlatform::kLinux).empty());
+
+  GameDefinition no_runtime = Game(GameId::kMua1);
+  no_runtime.program = "";
+  CHECK(LauncherRuntimeBlocker(no_runtime, mount, ProgramPlatform::kLinux) ==
+        "Marvel Ultimate Alliance has no runtime yet.");
+}
+
+void TestLinuxLaunch() {
+  std::printf("Linux starts the sibling program, or the AppImage again with the program's name\n");
+  const std::filesystem::path mount = "/tmp/.mount_MarvelAbCdEf/usr/bin";
+  const std::string launcher = (mount / "marvel_ultimate_alliance_bundle").generic_string();
+  const char* appimage = "/home/deck/Games/MarvelUltimateAlliance-v0.1.0-x86_64.AppImage";
+  const std::vector<std::string> extra = {"--mua_skip_launcher=true", "--mua_launcher_handoff=true"};
+  const std::set<std::string> apprun = AppRunPrograms();
+  CHECK(apprun == GamePrograms());
+  for (const GameDefinition& game : AllGames()) {
+    const std::string program = GameProgramPath(game, mount, ProgramPlatform::kLinux).generic_string();
+    const auto packaged = MakeRelaunchCommand({launcher}, appimage, program, extra);
+    CHECK(packaged && packaged->executable == appimage);
+    CHECK(packaged && packaged->appimage_program == game.program);
+    CHECK(packaged && apprun.contains(packaged->appimage_program));
+
+    const std::filesystem::path dev = "/home/user/mua/out/build/linux-amd64-release";
+    const std::string sibling = GameProgramPath(game, dev, ProgramPlatform::kLinux).generic_string();
+    const auto direct =
+        MakeRelaunchCommand({(dev / "marvel_ultimate_alliance_bundle").generic_string()}, nullptr, sibling, extra);
+    CHECK(direct && direct->executable == sibling && direct->appimage_program.empty());
+    CHECK(direct && direct->argv.front() == sibling);
+  }
+}
+
+void TestPackagedPrograms() {
+  std::printf("the packages carry exactly the programs the launcher looks for\n");
+  const std::string package = ReadSource("../tools/package-linux.sh");
+  const std::string list = Region(package, "GAME_PROGRAMS=(", ")");
+  const std::string cmake = ReadSource("../CMakeLists.txt");
+  const std::string release = ReadSource("../tools/package-release.ps1");
+  for (const GameDefinition& game : AllGames()) {
+    const std::string program(game.program);
+    CHECK(Has(list + " ", program + " "));
+    CHECK(Has(cmake, "mua_add_game_executable(" + program + " "));
+    CHECK(Has(release, "'" + ProgramFileName(program, ProgramPlatform::kWindows) + "'"));
+  }
+  CHECK(Count(list, "marvel_ultimate_alliance_") == AllGames().size());
+  CHECK(Has(package, "\"$ROOT/src/game_definition.cpp\""));
+}
+
+void TestPlayablePages() {
+  std::printf("every game offers the same pages on every platform\n");
+  for (const GameDefinition& game : AllGames()) {
+    for (const LauncherPage page : {LauncherPage::kPlay, LauncherPage::kDisplay, LauncherPage::kGraphics,
+                                    LauncherPage::kGameplay, LauncherPage::kAchievements, LauncherPage::kControls,
+                                    LauncherPage::kAbout}) {
+      CHECK(game.HasPage(page));
+    }
+  }
+  CHECK(!Has(ReadSource("launcher.cpp"), "_WIN32"));
+  CHECK(!Has(ReadSource("game_definition.cpp"), "_WIN32"));
 }
 
 void TestDirectLaunch() {
@@ -238,6 +393,10 @@ int main() {
   TestShutdownOrder();
   TestFailedStartLeavesLauncherUsable();
   TestGamePrograms();
+  TestRuntimeAvailability();
+  TestLinuxLaunch();
+  TestPackagedPrograms();
+  TestPlayablePages();
   TestDirectLaunch();
   TestOneShotFlag();
   TestPlacementIsNotPropagated();

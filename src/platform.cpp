@@ -179,6 +179,10 @@ std::filesystem::path PortFolder() {
   return rex::filesystem::GetExecutableFolder();
 }
 
+std::filesystem::path ProgramFolder() {
+  return rex::filesystem::GetExecutableFolder();
+}
+
 const char* ArchitectureName() {
 #if defined(_M_ARM64)
   return "arm64";

@@ -163,7 +163,7 @@ void TestCurrentReferencePatches() {
   CHECK(Has(occlusion, "std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));"));
   CHECK(!Has(occlusion, "+    CompleteOcclusionQueries(true);\n     occlusion_query_cursor_ = 0;"));
 
-  const std::string bits = ReadFile(dir + "0085-inline-bit-scan-forward.windows.patch");
+  const std::string bits = ReadFile(dir + "0085-inline-bit-scan-forward.patch");
   CHECK(Has(bits, "+inline bool bit_scan_forward(uint32_t v, uint32_t* out_first_set_index) {"));
   CHECK(Has(bits, "-bool bit_scan_forward(uint32_t v, uint32_t* out_first_set_index) {"));
 
@@ -351,7 +351,7 @@ void TestPerformancePass() {
   std::printf("performance pass patches\n");
   const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
 
-  const std::string index = ReadFile(dir + "0125-texture-cache-resolve-target-index.windows.patch");
+  const std::string index = ReadFile(dir + "0125-texture-cache-resolve-target-index.patch");
   CHECK(Has(index, "+  std::unordered_multimap<uint32_t, Texture*> textures_by_base_page_;"));
   CHECK(Has(index, "+  auto [page_first, page_last] = textures_by_base_page_.equal_range(dest_page);"));
   CHECK(Has(index, "+  textures_by_base_page_.clear();"));
@@ -367,7 +367,7 @@ void TestPerformancePass() {
   CHECK(Has(builder, "\"-DREXGPU_PGO_USE=$pgoProfile\""));
 
   // FSR 1 and CAS no longer need the FidelityFX SDK; the temporal FSR 2/3 path still does.
-  const std::string fsr = ReadFile(dir + "0127-presenter-spatial-upscalers.windows.patch");
+  const std::string fsr = ReadFile(dir + "0127-presenter-spatial-upscalers.patch");
   CHECK(Has(fsr, "+    .allowed({\"bilinear\", \"cas\", \"fsr\"})"));
   CHECK(Has(fsr, "-    .allowed({\"bilinear\"})"));
   CHECK(Has(fsr, "+bool IsFsrEffect(GuestOutputPaintConfig::Effect effect) {"));
@@ -551,7 +551,8 @@ void TestDrawFastPathPatches() {
   std::printf("draw fast path patches\n");
   const std::string dir = std::string(MUA_SRC_DIR) + "/../patches/rexglue-sdk/";
 
-  const std::string streamed = ReadFile(dir + "0134-gpu-streamed-dynamic-pages.windows.patch");
+  const std::string streamed = ReadFile(dir + "0134-gpu-streamed-dynamic-pages.patch") +
+                               ReadFile(dir + "0156-d3d12-streamed-dynamic-pages.windows.patch");
   CHECK(Has(streamed, "YesterMester/TheSimpsonsGameRecomp"));
   CHECK(Has(streamed, "+REXCVAR_DEFINE_BOOL(gpu_stream_dynamic_pages, false"));
   // Every game runtime turns it on, the launcher does not, and never over a configured value.
@@ -723,11 +724,107 @@ void TestNoNvidiaImageScaling() {
     CHECK(!Has(text, "src/ui/shaders/nis/") && !Has(text, "present_nis_sharpness") && !Has(text, "\"nis\""));
   }
   CHECK(patches > 100);
-  const std::string fsr = ReadFile((dir / "0127-presenter-spatial-upscalers.windows.patch").string());
+  const std::string fsr = ReadFile((dir / "0127-presenter-spatial-upscalers.patch").string());
   CHECK(Has(fsr, "+    .allowed({\"bilinear\", \"cas\", \"fsr\"})"));
   const std::string licenses =
       ReadFile(std::string(MUA_SRC_DIR) + "/../packaging/licenses/THIRD-PARTY-LICENSES.txt");
   CHECK(!licenses.empty() && !Has(licenses, "NVIDIA Image Scaling"));
+}
+
+// Each patch applies on Windows unless named .linux.patch, and on Linux unless named .windows.patch
+// (tools/rexruntime-patch.ps1, tools/build-patched-rexruntime.sh). A Windows-only patch is either Direct3D 12 or Win32
+// only by nature, or has its Vulkan half in a .linux patch.
+void TestLinuxParityPatches() {
+  std::printf("Linux parity: every Direct3D 12 fix and speed-up with a Vulkan meaning has its Vulkan half\n");
+  const std::filesystem::path dir = std::filesystem::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk";
+  std::set<std::string> windows_only, linux_only, shared;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    const std::string name = entry.path().filename().string();
+    if (entry.path().extension() != ".patch") {
+      continue;
+    }
+    if (name.ends_with(".windows.patch")) {
+      windows_only.insert(name.substr(0, 4));
+    } else if (name.ends_with(".linux.patch")) {
+      linux_only.insert(name.substr(0, 4));
+    } else {
+      shared.insert(name.substr(0, 4));
+    }
+  }
+  const std::set<std::string> expected_windows_only = {
+      "0027", "0049", "0055", "0056", "0075", "0076", "0078", "0080", "0082", "0084", "0086", "0087", "0088", "0090",
+      "0091", "0092", "0093", "0103", "0105", "0106", "0107", "0108", "0110", "0114", "0118", "0121", "0123", "0126",
+      "0128", "0130", "0133", "0135", "0136", "0156", "0160", "0161", "0162", "0163", "0164", "0165", "0166", "0167",
+      "0168", "0169"};
+  CHECK(windows_only == expected_windows_only);
+  for (const char* now_shared : {"0048", "0085", "0117", "0120", "0122", "0125", "0127", "0134", "0148"}) {
+    CHECK(shared.contains(now_shared));
+  }
+  // The Vulkan halves.
+  const std::set<std::string> vulkan_halves = {"0149", "0151", "0170", "0171", "0172", "0173", "0174", "0175",
+                                               "0176", "0177", "0178", "0179", "0180", "0181", "0182"};
+  for (const std::string& number : vulkan_halves) {
+    CHECK(linux_only.contains(number));
+  }
+
+  auto patch = [&](const char* name) { return ReadFile((dir / name).string()); };
+  const std::string wait = patch("0048-pipeline-wait.patch");
+  CHECK(Has(wait, "+REXCVAR_DEFINE_INT32(async_shader_wait_ms, 0, \"GPU\","));
+  const std::string vulkan_wait = patch("0170-vulkan-pipeline-wait.linux.patch");
+  CHECK(Has(vulkan_wait, "+bool VulkanPipelineCache::WaitForPipeline(void* handle, int64_t& budget_us) const {"));
+  CHECK(Has(vulkan_wait, "+    pipeline_wait_left_us_ = int64_t(REXCVAR_GET(async_shader_wait_ms)) * 1000;"));
+  CHECK(Has(vulkan_wait, "pipeline_cache_->WaitForPipeline(pipeline_handle, pipeline_wait_left_us_)"));
+
+  const std::string residency = patch("0171-vulkan-per-draw-vertex-buffer-residency.linux.patch");
+  CHECK(Has(residency, "+  uint64_t vertex_buffers_resident[2] = {};"));
+  CHECK(Has(residency, "-  std::array<VertexBufferState, 96> vertex_buffer_states_{};"));
+  CHECK(!Has(residency, "+      VertexBufferState& state"));
+
+  const std::string empty_fetch = patch("0172-vulkan-back-empty-invalid-vertex-fetch.linux.patch");
+  CHECK(Has(empty_fetch, "vfetch_constant.type == xenos::FetchConstantType::kInvalidVertex"));
+  CHECK(Has(empty_fetch, "+        vfetch_request_size = 4096;"));
+
+  const std::string occlusion = patch("0173-vulkan-occlusion-query-end-pairing.linux.patch");
+  CHECK(Has(occlusion, "+void VulkanCommandProcessor::AbandonActiveOcclusionQuery() {"));
+  CHECK(Has(occlusion, "+  if (!active_occlusion_query_.valid) {"));
+  CHECK(Has(occlusion, "+    std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));"));
+  CHECK(Has(occlusion, "-      active_occlusion_query_.sample_count_address != sample_count_addr) {"));
+
+  const std::string zero_clamp = patch("0174-spirv-vertex-fetch-zero-clamp.linux.patch");
+  CHECK(Has(zero_clamp, "builder_->makeUintConstant((uint32_t(1) << 24) - 1)"));
+  CHECK(Has(zero_clamp, "builder_->createTriOp(spv::OpSelect, words_type, fetch_disabled, words_zero, words);"));
+
+  const std::string wrapper = patch("0175-vulkan-3d-as-2d-wrapper-scaled-size.linux.patch");
+  CHECK(Has(wrapper, "+      image_create_info.extent.width *= vulkan_texture_cache.draw_resolution_scale_x();"));
+  CHECK(Has(wrapper, "+      image_create_info.extent.height *= vulkan_texture_cache.draw_resolution_scale_y();"));
+
+  const std::string transfers = patch("0176-vulkan-render-target-transfers.linux.patch");
+  CHECK(Has(transfers, "+        overwritten = GetDrawOverwrittenRenderTargets("));
+  CHECK(Has(transfers, "ext_EXT_shader_stencil_export;"));
+  CHECK(Has(transfers, "+          // Entirely inside what the draw replaces."));
+  CHECK(Has(transfers, "-      assert_not_zero(transfer_rectangle_count);"));
+
+  const std::string streamed = patch("0177-vulkan-streamed-dynamic-pages.linux.patch");
+  CHECK(Has(streamed, "+      CopyPagesForUpload(upload_range_start, uint32_t(upload_buffer_size >> page_size_log2()),"));
+  CHECK(Has(streamed, "+    shared_memory_->OnGuestFrameEnd();"));
+  CHECK(Has(streamed, "vfetch_request_size, true)) {"));
+
+  const std::string upscalers = patch("0178-vulkan-presenter-spatial-upscalers.linux.patch");
+  CHECK(Count(upscalers, "-#if defined(REX_HAS_FIDELITYFX_SDK)") == 7);
+  CHECK(!Has(upscalers, "+#if"));
+  CHECK(Has(upscalers, "guest_output_ffx_fsr_easu_ps"));
+
+  const std::string constants = patch("0179-vulkan-unchanged-constant-writes.linux.patch");
+  CHECK(Has(constants, "+REXCVAR_DEFINE_BOOL(gpu_skip_unchanged_constant_writes, true"));
+  CHECK(Has(constants, "+    if (frame_open_ && !unchanged) {"));
+  const std::string runs = patch("0180-vulkan-float-constant-runs.linux.patch");
+  CHECK(Count(runs, "+      CopyUsedFloatConstants(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_") == 2);
+  const std::string index = patch("0181-vulkan-index-buffer-binding-memo.linux.patch");
+  CHECK(Has(index, "+    current_index_buffer_ = {};"));
+  CHECK(Has(index, "first_index, 0, 0);"));
+  const std::string lto = patch("0182-gpu-plugin-thinlto.linux.patch");
+  CHECK(Has(lto, "+if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES \"Clang\")"));
+  CHECK(Has(lto, "$<$<CONFIG:Release>:-flto=thin>"));
 }
 
 }  // namespace
@@ -748,6 +845,7 @@ int main() {
   TestWriteFaultCallbackFirst();
   TestPipelineStoragePendingFlush();
   TestNoNvidiaImageScaling();
+  TestLinuxParityPatches();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

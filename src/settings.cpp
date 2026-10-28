@@ -76,7 +76,8 @@ REXCVAR_DEFINE_INT32(mua_fsr3_sharpness, mua::kDefaultFsr3Sharpness, "Marvel Ult
                      "AMD FSR 3.1's sharpening, 0 (off) to 100; applied at start")
     .range(0, 100);
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
-                      "Graphics card: the index d3d12_adapter takes; anything else uses the first (applied at start)");
+                      "Graphics card: the index d3d12_adapter (Windows) or vulkan_device (Linux) takes; anything "
+                      "else uses the first (applied at start)");
 REXCVAR_DEFINE_STRING(mua_player_1_name, "Player 1", "Marvel Ultimate Alliance",
                       "Name shown for local player 1 in every game; save data is not affected");
 REXCVAR_DEFINE_STRING(mua_player_2_name, "Player 2", "Marvel Ultimate Alliance",
@@ -147,12 +148,6 @@ constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro",  "mua_frame_ra
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
 }
-
-#if defined(_WIN32)
-constexpr char kGraphicsBackend[] = "Direct3D 12";
-#else
-constexpr char kGraphicsBackend[] = "Vulkan";
-#endif
 
 const std::vector<std::string> kWindowKeys = {
     "window_width",
@@ -570,6 +565,9 @@ void GameSettings::ApplyGameSettings() const {
 }
 
 void ApplyShaderWait() {
+  if (!rex::cvar::GetFlagInfo("async_shader_wait_ms")) {
+    return;
+  }
   rex::cvar::SetFlagByName("async_shader_wait_ms",
                            std::to_string(ShaderWaitMsFor(FrameRateOrDefault(REXCVAR_GET(mua_frame_rate)))));
 }
@@ -578,11 +576,7 @@ void ApplyDynamicPageStreaming(std::optional<GameId> game) {
   constexpr char kKey[] = "gpu_stream_dynamic_pages";
   const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(kKey);
   if (!info) {
-#if defined(_WIN32)
     REXLOG_WARN("Dynamic page streaming: {} is not in this runtime", kKey);
-#else
-    REXLOG_INFO("Dynamic page streaming: off (Direct3D 12 only)");
-#endif
     return;
   }
   if (game && info->source == rex::cvar::Source::kDefault) {
@@ -595,8 +589,8 @@ namespace {
 
 bool HostRenderTargetsActive() {
   static const bool active = HostRenderTargetsUsed(
-      rex::cvar::GetFlagByName("render_target_path_d3d12"),
-      RasterizerOrderedViewsSupported(std::atoi(CvarText("d3d12_adapter", "-1").c_str())));
+      rex::cvar::GetFlagByName(kBackendSettings.render_target_path),
+      PixelShaderEdramSupported(std::atoi(CvarText(kBackendSettings.graphics_card, "-1").c_str())));
   return active;
 }
 
@@ -636,14 +630,25 @@ void ApplyPlayerNames() {
   }
 }
 
+UpscalerMask RuntimeUpscalers() {
+  UpscalerMask upscalers = kBackendUpscalers;
+  const rex::cvar::FlagEntry* present_effect = rex::cvar::GetFlagInfo("present_effect");
+  const std::string_view fsr1 = UpscalerInfoFor(Upscaler::kFsr1).present_effect;
+  if (!present_effect || std::ranges::find(present_effect->constraints.allowed_values, fsr1) ==
+                             present_effect->constraints.allowed_values.end()) {
+    upscalers &= ~UpscalerBit(Upscaler::kFsr1);
+  }
+  return upscalers;
+}
+
 Upscaler ActiveUpscaler() {
   const GameDefinition* game = ActiveGame();
-  return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers) : Upscaler::kOff;
+  return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers & RuntimeUpscalers()) : Upscaler::kOff;
 }
 
 void ApplyUpscaler(const GameSettings& settings) {
-  const Upscaler upscaler =
-      ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff), Game(settings.SelectedGame()).upscalers);
+  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff),
+                                          Game(settings.SelectedGame()).upscalers & RuntimeUpscalers());
   if (const auto effect = PresentEffectFor(upscaler); effect && rex::cvar::GetFlagByName("present_effect") != *effect) {
     rex::cvar::SetFlagByName("present_effect", *effect);
   }
@@ -738,7 +743,7 @@ void LogUpscaling() {
   REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | Upscaler input: {} | Upscaler output: {} | "
               "Render resolution: {} | present_effect={} | Backend: {}",
               UpscalingText(upscaler, quality), SizeText(sizes.guest), SizeText(sizes.internal), input, output,
-              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"), kGraphicsBackend);
+              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"), kBackendSettings.name);
 }
 
 void PinGuestVideoMode() {
@@ -760,7 +765,7 @@ void ApplyGraphicsAdapter() {
   const std::vector<GraphicsAdapter> adapters = ListGraphicsAdapters();
   const std::optional<int> index = ResolveGraphicsAdapter(setting, adapters);
   if (!index) {
-    REXLOG_WARN("No usable Direct3D 12 graphics card found");
+    REXLOG_WARN("No usable {} graphics card found", kBackendSettings.name);
     return;
   }
   const auto chosen = std::find_if(adapters.begin(), adapters.end(),
@@ -770,8 +775,17 @@ void ApplyGraphicsAdapter() {
   } else {
     REXLOG_INFO("Graphics card: {} (adapter {})", chosen->name, *index);
   }
-  rex::cvar::SetFlagByName("d3d12_adapter", std::to_string(*index));
+  rex::cvar::SetFlagByName(kBackendSettings.graphics_card, std::to_string(*index));
   rex::cvar::SetFlagByName("mua_graphics_adapter", std::to_string(*index));
+}
+
+void ApplyVsync() {
+  const std::string tearing = CvarText(kTearingSetting, "true");
+  for (const char* key : kBackendSettings.tearing.subspan(1)) {
+    if (rex::cvar::GetFlagInfo(key)) {
+      rex::cvar::SetFlagByName(key, tearing);
+    }
+  }
 }
 
 void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& display, int monitor,
@@ -779,8 +793,8 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   const AspectRatio aspect = ParseAspectRatio(settings.Get("mua_aspect_ratio", "16:9"));
   const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
   const WindowSize render = RenderSize(aspect, scale);
-  const Upscaler upscaler =
-      ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff), Game(settings.SelectedGame()).upscalers);
+  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff),
+                                          Game(settings.SelectedGame()).upscalers & RuntimeUpscalers());
   const UpscaleQuality quality =
       EffectiveQuality(upscaler, ParseUpscaleQuality(settings.Get("mua_upscale_quality", "native")));
   const RenderSizes sizes = RenderSizesFor(aspect, scale, upscaler, quality);
@@ -813,7 +827,8 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
                   settings.Get("swap_post_effect", "none"), "Off");
   const bool host_render_targets = HostRenderTargetsActive();
   const bool msaa_compatibility = settings.GetBool("mua_msaa_compatibility", false);
-  diagnostics.launcher_graphics.multisampling = MsaaLauncherText(host_render_targets, msaa_compatibility);
+  diagnostics.launcher_graphics.multisampling =
+      MsaaLauncherText(host_render_targets, msaa_compatibility, kBackendSettings.pixel_shader_edram);
   diagnostics.launcher_graphics.texture_filtering =
       TextureFilteringName(settings.Get("anisotropic_override", "3"));
   diagnostics.launcher_graphics.upscaling = UpscalingText(upscaler, quality);
@@ -824,7 +839,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
 
   diagnostics.gpu.selected = selected_card;
   const GraphicsAdapterDetails adapter =
-      EffectiveGraphicsAdapter(std::atoi(CvarText("d3d12_adapter", "-1").c_str()));
+      EffectiveGraphicsAdapter(std::atoi(CvarText(kBackendSettings.graphics_card, "-1").c_str()));
   diagnostics.gpu.resolved = adapter.name;
   diagnostics.gpu.adapter = adapter.index;
   diagnostics.gpu.vendor_id = adapter.vendor_id;
@@ -868,15 +883,12 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.graphics.upscaling = UpscalingText(upscaler, quality);
   diagnostics.graphics.guest_width = sizes.guest.width;
   diagnostics.graphics.guest_height = sizes.guest.height;
-  diagnostics.graphics.msaa = MsaaRuntimeText(host_render_targets, msaa_compatibility);
+  diagnostics.graphics.msaa =
+      MsaaRuntimeText(host_render_targets, msaa_compatibility, kBackendSettings.pixel_shader_edram);
   diagnostics.graphics.anti_aliasing = diagnostics.launcher_graphics.anti_aliasing;
   diagnostics.graphics.texture_filtering = diagnostics.launcher_graphics.texture_filtering;
   diagnostics.graphics.allow_invalid_fetch_constants = CvarText("gpu_allow_invalid_fetch_constants", "false");
-#if defined(_WIN32)
-  diagnostics.graphics.render_target_path = CvarText("render_target_path_d3d12", "default");
-#else
-  diagnostics.graphics.render_target_path = CvarText("render_target_path_vulkan", "default");
-#endif
+  diagnostics.graphics.render_target_path = CvarText(kBackendSettings.render_target_path, "default");
 
   diagnostics.input.keyboard_mode = settings.GetBool("mnk_mode", true) ? "On" : "Off";
   diagnostics.input.controller = window.controller;

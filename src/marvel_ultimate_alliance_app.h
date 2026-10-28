@@ -131,6 +131,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       REXLOG_WARN("Recompiled game code is not part of this build");
     }
     mua::ApplyGraphicsAdapter();
+    mua::ApplyVsync();
   }
 
   void OnPostLoadXexImage() override {
@@ -385,14 +386,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     if (!IsLauncher()) {
       return LocalRuntimeBlocker(game);
     }
-    if (game.executable.empty()) {
-      return std::format("{} has no runtime yet.", game.display_name);
-    }
-    std::error_code ec;
-    if (std::filesystem::exists(mua::PortFolder() / std::string(game.executable), ec)) {
-      return {};
-    }
-    return std::format("The {} runtime is not part of this build.", game.display_name);
+    return mua::LauncherRuntimeBlocker(game, mua::ProgramFolder(), mua::kHostProgramPlatform);
   }
 
   void LogAchievementStore(const mua::RecompiledImage& image) {
@@ -426,9 +420,10 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   }
 
   static bool StartRuntime(const mua::GameState& game) {
-    const std::filesystem::path executable = mua::PortFolder() / std::string(game.game->executable);
-    REXLOG_INFO("Starting {}", mua::Utf8(executable));
-    return mua::RelaunchExecutable(executable, L"--mua_skip_launcher=true");
+    const std::filesystem::path program =
+        mua::GameProgramPath(*game.game, mua::ProgramFolder(), mua::kHostProgramPlatform);
+    REXLOG_INFO("Starting {}", mua::Utf8(program));
+    return mua::RelaunchExecutable(program, L"--mua_skip_launcher=true");
   }
 
   [[noreturn]] static void ExitLauncher() {

@@ -168,7 +168,7 @@ void TestText() {
 
 void TestParsing() {
   std::printf("saved values and presenter effect\n");
-  const auto available = [](Upscaler upscaler) { return kUpscalerAvailable ? upscaler : Upscaler::kOff; };
+  const auto available = [](Upscaler upscaler) { return UpscalerOnBackend(upscaler) ? upscaler : Upscaler::kOff; };
   CHECK(ParseUpscaler("fsr", kFsr1Upscalers) == available(Upscaler::kFsr1));
   CHECK(ParseUpscaler("fsr", kAllUpscalers) == available(Upscaler::kFsr1));
   CHECK(ParseUpscaler("off", kAllUpscalers) == Upscaler::kOff);
@@ -188,6 +188,18 @@ void TestParsing() {
   }
   CHECK(PresentEffectFor(Upscaler::kFsr1) == std::optional<std::string_view>("fsr"));
   CHECK(!PresentEffectFor(Upscaler::kOff));
+}
+
+void TestBackendUpscalers() {
+  std::printf("FSR 1 runs on both backends, DLSS and FSR 3.1 on Direct3D 12 only\n");
+  CHECK(BackendUpscalers(GraphicsBackend::kDirect3D12) == kAllUpscalers);
+  CHECK(BackendUpscalers(GraphicsBackend::kVulkan) == kFsr1Upscalers);
+  CHECK(UpscalerOnBackend(Upscaler::kOff) && UpscalerOnBackend(Upscaler::kFsr1));
+  CHECK(UpscalerOnBackend(Upscaler::kDlss) == (kGraphicsBackend == GraphicsBackend::kDirect3D12));
+  CHECK(UpscalerOnBackend(Upscaler::kFsr3) == (kGraphicsBackend == GraphicsBackend::kDirect3D12));
+  // A runtime without FSR 1 leaves a saved FSR 1 choice Off.
+  CHECK(ParseUpscaler("fsr", kAllUpscalers & ~UpscalerBit(Upscaler::kFsr1)) == Upscaler::kOff);
+  CHECK(ParseUpscaler("fsr", kFsr1Upscalers) == Upscaler::kFsr1);
 }
 
 void TestDeprecatedUpscalers() {
@@ -250,7 +262,7 @@ void TestDlss() {
 
 void TestFsr3Choice() {
   std::printf("AMD FSR 3.1: offered with Marvel Ultimate Alliance's choices only, saved as fsr3, FSR 1 stays fsr\n");
-  const auto available = [](Upscaler upscaler) { return kUpscalerAvailable ? upscaler : Upscaler::kOff; };
+  const auto available = [](Upscaler upscaler) { return UpscalerOnBackend(upscaler) ? upscaler : Upscaler::kOff; };
   const UpscalerInfo& fsr3 = UpscalerInfoFor(Upscaler::kFsr3);
   CHECK(std::string_view(fsr3.key) == "fsr3" && std::string_view(kUpscalerFsr3) == "fsr3");
   CHECK(std::string_view(fsr3.label) == "AMD FSR 3.1" && std::string_view(fsr3.name) == "FSR 3.1");
@@ -397,6 +409,7 @@ int main() {
   TestPixelSavings();
   TestText();
   TestParsing();
+  TestBackendUpscalers();
   TestDeprecatedUpscalers();
   TestDlss();
   TestFsr3Choice();

@@ -250,7 +250,7 @@ void TestGames() {
   for (const mua::GameId id : {mua::GameId::kMua1, mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
     CHECK((mua::Game(id).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) != 0);
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, mua::Game(id).upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr3) ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
   }
 }
 

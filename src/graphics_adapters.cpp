@@ -147,7 +147,7 @@ bool WithEffectiveGraphicsAdapter(int configured_index,
   return found;
 }
 
-bool RasterizerOrderedViewsSupported(int configured_index) {
+bool PixelShaderEdramSupported(int configured_index) {
   bool supported = false;
   const HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   const auto create_device =
@@ -174,22 +174,201 @@ bool RasterizerOrderedViewsSupported(int configured_index) {
 
 #else
 
-namespace mua {
+#include <dlfcn.h>
 
-std::vector<GraphicsAdapter> ListGraphicsAdapters() {
-  return {};
+#include <algorithm>
+#include <cstdlib>
+#include <string_view>
+
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
+
+namespace mua {
+namespace {
+
+// The loader and Mesa's device selection layer already put the chosen device first then (SDK patch 0148).
+bool DeviceSelectedByEnvironment() {
+  for (const char* name :
+       {"DRI_PRIME", "MESA_VK_DEVICE_SELECT", "VK_LOADER_DEVICE_SELECT", "__NV_PRIME_RENDER_OFFLOAD"}) {
+    const char* value = std::getenv(name);
+    if (value && *value) {
+      return true;
+    }
+  }
+  return false;
 }
 
-GraphicsAdapterDetails EffectiveGraphicsAdapter(int) {
-  return {};
+uint32_t DeviceTypeRank(VkPhysicalDeviceType type) {
+  switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+      return 3;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+      return 2;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+struct VulkanDevice {
+  GraphicsAdapterDetails details;
+  bool fragment_shader_interlock = false;
+};
+
+// ReXGlue's condition for the render_target_path_vulkan = "fsi" path (VulkanRenderTargetCache::Initialize), with the
+// shared memory binding count of SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2.
+bool FragmentShaderInterlockPathSupported(bool interlock, const VkPhysicalDeviceFeatures& features,
+                                          const VkPhysicalDeviceLimits& limits) {
+  const uint32_t shared_memory_bindings = limits.maxStorageBufferRange >= (UINT32_C(512) << 20)   ? 1
+                                          : limits.maxStorageBufferRange >= (UINT32_C(256) << 20) ? 2
+                                                                                                   : 4;
+  return interlock && features.fragmentStoresAndAtomics && features.sampleRateShading &&
+         limits.standardSampleLocations && shared_memory_bindings < limits.maxPerStageDescriptorStorageBuffers;
+}
+
+// The hardware devices in the order ReXGlue's Vulkan provider tries them; `index` is the one vulkan_device takes.
+std::vector<VulkanDevice> EnumerateVulkanDevices() {
+  std::vector<VulkanDevice> devices;
+  // Left loaded: the runtime uses the same loader for its own device.
+  void* loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+  const auto get_proc =
+      loader ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(loader, "vkGetInstanceProcAddr")) : nullptr;
+  const auto create_instance =
+      get_proc ? reinterpret_cast<PFN_vkCreateInstance>(get_proc(VK_NULL_HANDLE, "vkCreateInstance")) : nullptr;
+  const auto instance_version_of = get_proc ? reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+                                                  get_proc(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"))
+                                            : nullptr;
+  uint32_t instance_version = VK_API_VERSION_1_0;
+  if (instance_version_of && instance_version_of(&instance_version) != VK_SUCCESS) {
+    instance_version = VK_API_VERSION_1_0;
+  }
+  // Fragment shader interlock is only reported through vkGetPhysicalDeviceFeatures2 (Vulkan 1.1).
+  const bool features_2 = instance_version >= VK_API_VERSION_1_1;
+  VkApplicationInfo application{};
+  application.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+  application.apiVersion = features_2 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_0;
+  VkInstanceCreateInfo create_info{};
+  create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+  create_info.pApplicationInfo = &application;
+  VkInstance instance = VK_NULL_HANDLE;
+  if (!create_instance || create_instance(&create_info, nullptr, &instance) != VK_SUCCESS) {
+    return devices;
+  }
+  const auto destroy_instance = reinterpret_cast<PFN_vkDestroyInstance>(get_proc(instance, "vkDestroyInstance"));
+  const auto enumerate =
+      reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(get_proc(instance, "vkEnumeratePhysicalDevices"));
+  const auto properties_of =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(get_proc(instance, "vkGetPhysicalDeviceProperties"));
+  const auto features_of =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(get_proc(instance, "vkGetPhysicalDeviceFeatures"));
+  const auto features_2_of = features_2 ? reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+                                              get_proc(instance, "vkGetPhysicalDeviceFeatures2"))
+                                        : nullptr;
+  const auto extensions_of = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+      get_proc(instance, "vkEnumerateDeviceExtensionProperties"));
+  auto interlock_of = [&](VkPhysicalDevice device, const VkPhysicalDeviceProperties& properties) {
+    if (!features_2_of || !extensions_of || properties.apiVersion < VK_API_VERSION_1_1) {
+      return false;
+    }
+    uint32_t extension_count = 0;
+    std::vector<VkExtensionProperties> extensions;
+    if (extensions_of(device, nullptr, &extension_count, nullptr) != VK_SUCCESS) {
+      return false;
+    }
+    extensions.resize(extension_count);
+    if (extensions_of(device, nullptr, &extension_count, extensions.data()) < VK_SUCCESS) {
+      return false;
+    }
+    if (std::ranges::none_of(extensions, [](const VkExtensionProperties& extension) {
+          return std::string_view(extension.extensionName) == VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME;
+        })) {
+      return false;
+    }
+    VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT interlock{};
+    interlock.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT;
+    VkPhysicalDeviceFeatures2 features{};
+    features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features.pNext = &interlock;
+    features_2_of(device, &features);
+    return interlock.fragmentShaderSampleInterlock || interlock.fragmentShaderPixelInterlock;
+  };
+  uint32_t count = 0;
+  std::vector<VkPhysicalDevice> physical_devices;
+  if (enumerate && properties_of && features_of && enumerate(instance, &count, nullptr) == VK_SUCCESS) {
+    physical_devices.resize(count);
+    if (enumerate(instance, &count, physical_devices.data()) < VK_SUCCESS) {
+      count = 0;
+    }
+    physical_devices.resize(count);
+  }
+  const bool by_type = !DeviceSelectedByEnvironment();
+  std::vector<std::pair<VulkanDevice, uint32_t>> scored;
+  for (uint32_t index = 0; index < physical_devices.size(); ++index) {
+    VkPhysicalDeviceProperties properties{};
+    properties_of(physical_devices[index], &properties);
+    if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+      continue;
+    }
+    VkPhysicalDeviceFeatures features{};
+    features_of(physical_devices[index], &features);
+    const uint32_t feature_score = uint32_t(features.geometryShader) + uint32_t(features.fragmentStoresAndAtomics) +
+                                   uint32_t(features.vertexPipelineStoresAndAtomics) +
+                                   uint32_t(features.fillModeNonSolid);
+    const uint32_t score = feature_score * 4 + (by_type ? DeviceTypeRank(properties.deviceType) : 0);
+    VulkanDevice device;
+    device.details = {int(index), properties.deviceName, properties.vendorID, properties.deviceID, true};
+    device.fragment_shader_interlock = FragmentShaderInterlockPathSupported(
+        interlock_of(physical_devices[index], properties), features, properties.limits);
+    scored.push_back({std::move(device), score});
+  }
+  if (destroy_instance) {
+    destroy_instance(instance, nullptr);
+  }
+  std::ranges::stable_sort(scored, std::ranges::greater{}, [](const auto& device) { return device.second; });
+  for (auto& device : scored) {
+    devices.push_back(std::move(device.first));
+  }
+  return devices;
+}
+
+const std::vector<VulkanDevice>& VulkanDevices() {
+  static const std::vector<VulkanDevice> devices = EnumerateVulkanDevices();
+  return devices;
+}
+
+const VulkanDevice* EffectiveVulkanDevice(int configured_index) {
+  const std::vector<VulkanDevice>& devices = VulkanDevices();
+  const auto configured = std::ranges::find(devices, configured_index,
+                                            [](const VulkanDevice& device) { return device.details.index; });
+  if (configured != devices.end()) {
+    return &*configured;
+  }
+  return devices.empty() ? nullptr : &devices.front();
+}
+
+}  // namespace
+
+std::vector<GraphicsAdapter> ListGraphicsAdapters() {
+  std::vector<GraphicsAdapter> adapters;
+  for (const VulkanDevice& device : VulkanDevices()) {
+    adapters.push_back({device.details.index, device.details.name});
+  }
+  return adapters;
+}
+
+GraphicsAdapterDetails EffectiveGraphicsAdapter(int configured_index) {
+  const VulkanDevice* device = EffectiveVulkanDevice(configured_index);
+  return device ? device->details : GraphicsAdapterDetails{};
 }
 
 bool WithEffectiveGraphicsAdapter(int, const std::function<void(IDXGIAdapter1*, const GraphicsAdapterDetails&)>&) {
   return false;
 }
 
-bool RasterizerOrderedViewsSupported(int) {
-  return false;
+bool PixelShaderEdramSupported(int configured_index) {
+  const VulkanDevice* device = EffectiveVulkanDevice(configured_index);
+  return device && device->fragment_shader_interlock;
 }
 
 }  // namespace mua

@@ -1,0 +1,27 @@
+The Vulkan half of 0114: a size-0 vertex fetch of an admitted invalid constant still makes the shader read
+at its address, which sparse shared memory does not back, so 4 KB there are requested.
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index b510d11..51ebe08 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4017,11 +4017,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                       vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+           return false;
+       }
+-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
++      uint32_t vfetch_request_size = vfetch_constant.size << 2;
++      if (!vfetch_request_size && vfetch_constant.type == xenos::FetchConstantType::kInvalidVertex) {
++        // An absent optional stream the shader may still read, at guest address 0, where sparse
++        // shared memory has nothing bound (undefined without residencyNonResidentStrict).
++        vfetch_request_size = 4096;
++      }
++      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size)) {
+         REXGPU_ERROR(
+             "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
+             "memory",
+-            vfetch_constant.address << 2, vfetch_constant.size << 2);
++            vfetch_constant.address << 2, vfetch_request_size);
+         return false;
+       }
+       vertex_buffers_resident[vfetch_index >> 6] |= vfetch_bit;

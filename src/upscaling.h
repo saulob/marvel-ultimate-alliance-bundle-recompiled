@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "aspect_ratio.h"
+#include "graphics_backend.h"
 
 namespace mua {
 
@@ -96,13 +97,17 @@ inline bool OffersQuality(Upscaler upscaler, UpscaleQuality quality) {
 inline constexpr int kBackBufferWidthAlignment = 16;
 inline constexpr int kBackBufferHeightAlignment = 8;
 
-// FSR 1 (SDK patch 0127) runs in the Direct3D 12 presenter and DLSS (0161) in its command processor; the Vulkan
-// presenter only has bilinear.
-#ifdef _WIN32
-inline constexpr bool kUpscalerAvailable = true;
-#else
-inline constexpr bool kUpscalerAvailable = false;
-#endif
+// FSR 1 runs in the presenter of either backend (SDK patches 0127 and 0178); DLSS and FSR 3.1 in the Direct3D 12 GPU
+// plugin only.
+constexpr UpscalerMask BackendUpscalers(GraphicsBackend backend) {
+  return backend == GraphicsBackend::kDirect3D12 ? kAllUpscalers : kFsr1Upscalers;
+}
+
+inline constexpr UpscalerMask kBackendUpscalers = BackendUpscalers(kGraphicsBackend);
+
+constexpr bool UpscalerOnBackend(Upscaler upscaler) {
+  return (kBackendUpscalers & UpscalerBit(upscaler)) != 0;
+}
 
 inline const UpscalerInfo& UpscalerInfoFor(Upscaler upscaler) {
   for (const UpscalerInfo& info : kUpscalers) {
@@ -117,7 +122,7 @@ inline const UpscalerInfo& UpscalerInfoFor(Upscaler upscaler) {
 inline Upscaler ParseUpscaler(std::string_view value, UpscalerMask offered) {
   for (const UpscalerInfo& info : kUpscalers) {
     if (value == info.key) {
-      return kUpscalerAvailable && (offered & UpscalerBit(info.upscaler)) ? info.upscaler : Upscaler::kOff;
+      return (offered & kBackendUpscalers & UpscalerBit(info.upscaler)) ? info.upscaler : Upscaler::kOff;
     }
   }
   return Upscaler::kOff;

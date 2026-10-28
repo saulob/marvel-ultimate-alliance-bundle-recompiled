@@ -1,0 +1,27 @@
+The Vulkan half of 0090: the 3D-as-2D wrapper of a resolution-scaled volume texture was created at the
+guest size but loaded with scaled extents, so the copy into it exceeded the image.
+
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index 1e7d6c6..c0169da 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -2052,6 +2052,19 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
+     image_create_info.format = wrapper_format;
+     image_create_info.extent.width = key().GetWidth();
+     image_create_info.extent.height = key().GetHeight();
++    if (key().scaled_resolve) {
++      // Loaded with the same key, so with resolution-scaled extents: it must be as large as the
++      // scaled 3D texture's slice, or the copy into it exceeds the image.
++      image_create_info.extent.width *= vulkan_texture_cache.draw_resolution_scale_x();
++      image_create_info.extent.height *= vulkan_texture_cache.draw_resolution_scale_y();
++      uint32_t max_dimension = vulkan_texture_cache.command_processor_.GetVulkanDevice()
++                                   ->properties()
++                                   .maxImageDimension2D;
++      if (image_create_info.extent.width > max_dimension ||
++          image_create_info.extent.height > max_dimension) {
++        return VK_NULL_HANDLE;
++      }
++    }
+     image_create_info.extent.depth = 1;
+     image_create_info.mipLevels = 1;
+     image_create_info.arrayLayers = 1;

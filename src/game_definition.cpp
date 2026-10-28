@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <format>
 #include <optional>
+#include <system_error>
 
 namespace mua {
 namespace {
@@ -25,7 +27,7 @@ constexpr std::array kGames = {
         .legacy_folder = "",
         .runtime_supported = true,
         .pages = kPlayablePages,
-        .executable = "marvel_ultimate_alliance_mua1.exe",
+        .program = "marvel_ultimate_alliance_mua1",
         .data_folder = "mua1",
         .frame_policy = kMua1FramePolicy,
         .upscalers = kAllUpscalers,
@@ -42,7 +44,7 @@ constexpr std::array kGames = {
         .legacy_folder = "extracted",
         .runtime_supported = true,
         .pages = kPlayablePages,
-        .executable = "marvel_ultimate_alliance_mua1_gold.exe",
+        .program = "marvel_ultimate_alliance_mua1_gold",
         .data_folder = "mua1_gold",
         .frame_policy = kMua1FramePolicy,
         .upscalers = kAllUpscalers,
@@ -60,7 +62,7 @@ constexpr std::array kGames = {
         .legacy_folder = "",
         .runtime_supported = true,
         .pages = kPlayablePages,
-        .executable = "marvel_ultimate_alliance_mua2.exe",
+        .program = "marvel_ultimate_alliance_mua2",
         .data_folder = "mua2",
         .frame_policy = kMua2FramePolicy,
         .upscalers = kAllUpscalers,
@@ -111,6 +113,31 @@ std::filesystem::path GameUserDataRoot(const GameDefinition& game, const std::fi
 
 std::filesystem::path GameCacheRoot(const GameDefinition& game, const std::filesystem::path& cache_root) {
   return cache_root / std::string(game.data_folder);
+}
+
+std::string ProgramFileName(std::string_view program, ProgramPlatform platform) {
+  std::string name(program);
+  if (platform == ProgramPlatform::kWindows && !name.empty()) {
+    name += ".exe";
+  }
+  return name;
+}
+
+std::filesystem::path GameProgramPath(const GameDefinition& game, const std::filesystem::path& program_folder,
+                                      ProgramPlatform platform) {
+  return program_folder / ProgramFileName(game.program, platform);
+}
+
+std::string LauncherRuntimeBlocker(const GameDefinition& game, const std::filesystem::path& program_folder,
+                                   ProgramPlatform platform) {
+  if (game.program.empty()) {
+    return std::format("{} has no runtime yet.", game.display_name);
+  }
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(GameProgramPath(game, program_folder, platform), ec)) {
+    return {};
+  }
+  return std::format("The {} runtime is not part of this build.", game.display_name);
 }
 
 void SetActiveGame(GameId id) {

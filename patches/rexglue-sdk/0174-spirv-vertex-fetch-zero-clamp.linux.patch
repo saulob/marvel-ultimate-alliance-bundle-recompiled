@@ -1,0 +1,35 @@
+The SPIR-V half of 0117: a size-0 fetch constant is disabled on Xenos and reads zero, but the translator
+loaded the words at its base address, live guest memory for an absent stream admitted by
+gpu_allow_invalid_fetch_constants.
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 91fb8d4..f805377 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -156,6 +156,26 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+       words, builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, fetch_constant_word_1,
+                                    builder_->makeUintConstant(0b11)));
+ 
++  // A size-0 fetch constant is disabled on Xenos and reads zero; its address is 0 for an absent
++  // stream admitted by gpu_allow_invalid_fetch_constants, which would read live guest memory.
++  spv::Id fetch_disabled = builder_->createBinOp(
++      spv::OpIEqual, type_bool_,
++      builder_->createBinOp(
++          spv::OpBitwiseAnd, type_uint_,
++          builder_->createBinOp(spv::OpShiftRightLogical, type_uint_, fetch_constant_word_1,
++                                builder_->makeUintConstant(2)),
++          builder_->makeUintConstant((uint32_t(1) << 24) - 1)),
++      const_uint_0_);
++  spv::Id words_type = type_uint_vectors_[word_count - 1];
++  spv::Id words_zero = const_uint_0_;
++  if (word_count > 1) {
++    fetch_disabled =
++        builder_->smearScalar(spv::NoPrecision, fetch_disabled, type_bool_vectors_[word_count - 1]);
++    id_vector_temp_.assign(word_count, const_uint_0_);
++    words_zero = builder_->makeCompositeConstant(words_type, id_vector_temp_);
++  }
++  words = builder_->createTriOp(spv::OpSelect, words_type, fetch_disabled, words_zero, words);
++
+   spv::Id result = spv::NoResult;
+ 
+   // Convert the format.

@@ -81,11 +81,11 @@ void TestGames() {
   for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(game->upscalers == mua::kAllUpscalers);
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr3) ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
     CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kDlss) ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr1) ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
   }
   // MUA 2's scene is 1040x624 beside its 1280x720 framebuffer; the others' scene is the video mode's.
   CHECK(Mua2().scene_size.width == 1040 && Mua2().scene_size.height == 624);
@@ -305,7 +305,8 @@ void TestApp() {
   CHECK(Has(settings, "AMD FSR 3.1: {}: {} requested | scene {} -> output {} | scene profile {} |"));
   CHECK(Has(settings, "NVIDIA DLSS: {}: {} requested | scene at NVIDIA's size -> output {} | scene profile {};"));
   // The upscaler of a game comes from its own list.
-  CHECK(Has(settings, "return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers) : Upscaler::kOff;"));
+  CHECK(Has(settings,
+            "return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers & RuntimeUpscalers()) : Upscaler::kOff;"));
   // The temporal output is the game's scene at the Render resolution: MUA 2's 1040x624 times the scale.
   CHECK(Has(settings, "return SceneCanvas(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)), game.scene_size);"));
   CHECK(Count(settings, "TemporalOutputSize(game)") == 2);
@@ -318,8 +319,8 @@ void TestLauncher() {
   CHECK(Has(launcher, "UpscalerMask offered = Selected().game->upscalers;"));
   CHECK(Has(launcher, "if ((offered & UpscalerBit(Upscaler::kFsr3)) && !Fsr3().available) {"));
   CHECK(Has(launcher, "if ((offered & UpscalerBit(Upscaler::kDlss)) && !Dlss().available) {"));
-  CHECK(Has(launcher, "ui.Choice(\"Upscaling\", UpscalingHelp(Selected().game->upscalers), \"mua_upscaler\", "
-                      "kUpscalerOff,\n                UpscalerOptions(offered));"));
+  CHECK(Has(launcher, "ui.Choice(\"Upscaling\", UpscalingHelp(Selected().game->upscalers & kBackendUpscalers), "
+                      "\"mua_upscaler\",\n                kUpscalerOff, UpscalerOptions(offered));"));
   // No game is named where the choices are made.
   const size_t begin = launcher.find("UpscalerMask offered = Selected().game->upscalers;");
   const size_t end = launcher.find("ui.Choice(\"Upscaling\"", begin);
@@ -350,8 +351,8 @@ void TestIsolation() {
   for (const char* key : {"\"mua_upscaler\"", "\"mua_upscale_quality\"", "\"mua_fsr3_sharpness\""}) {
     CHECK(Has(scoped, key));
   }
-  CHECK(Mua1().executable != Gold().executable && Gold().executable != Mua2().executable &&
-        Mua1().executable != Mua2().executable);
+  CHECK(Mua1().program != Gold().program && Gold().program != Mua2().program &&
+        Mua1().program != Mua2().program);
   CHECK(Mua1().data_folder != Gold().data_folder && Gold().data_folder != Mua2().data_folder);
 }
 

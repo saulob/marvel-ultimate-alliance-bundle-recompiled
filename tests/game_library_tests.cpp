@@ -117,10 +117,10 @@ void TestDefinitions() {
           game->HasPage(mua::LauncherPage::kGameplay) && game->HasPage(mua::LauncherPage::kAchievements) &&
           game->HasPage(mua::LauncherPage::kControls));
   }
-  CHECK(Gold().executable == "marvel_ultimate_alliance_mua1_gold.exe" &&
-        Mua1().executable == "marvel_ultimate_alliance_mua1.exe" &&
-        Mua2().executable == "marvel_ultimate_alliance_mua2.exe");
-  CHECK(Mua2().executable != Mua1().executable && Mua2().executable != Gold().executable);
+  CHECK(Gold().program == "marvel_ultimate_alliance_mua1_gold" &&
+        Mua1().program == "marvel_ultimate_alliance_mua1" &&
+        Mua2().program == "marvel_ultimate_alliance_mua2");
+  CHECK(Mua2().program != Mua1().program && Mua2().program != Gold().program);
   CHECK(mua::ProfileOf(Mua2()).id == "mua2-x360" && mua::ProfileOf(Mua2()).title_id == 0x4156082F);
 }
 
@@ -142,13 +142,13 @@ void TestUpscalers() {
   }
   for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kDlss) ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr3) ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
   }
   for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
-          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr1) ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
     CHECK(mua::ParseUpscaler("nis", game->upscalers) == mua::Upscaler::kOff);
     CHECK(mua::ParseUpscaler("cas", game->upscalers) == mua::Upscaler::kOff);
   }
@@ -172,8 +172,8 @@ void TestSceneProfiles() {
     CHECK((game.upscalers & temporal) == 0 || (game.upscalers & temporal) == temporal);
   }
   // Each game runs in its own program, so no scene, history or upscaler context outlives a change of game.
-  CHECK(Mua1().executable != Gold().executable && Gold().executable != Mua2().executable &&
-        Mua1().executable != Mua2().executable);
+  CHECK(Mua1().program != Gold().program && Gold().program != Mua2().program &&
+        Mua1().program != Mua2().program);
 }
 
 void TestSaveRoots() {

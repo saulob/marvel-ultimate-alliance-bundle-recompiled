@@ -76,6 +76,20 @@ APP_ID="$(sed -nE 's/^[[:space:]]*constexpr char kApplicationId\[\] = "([^"]+)";
 [ -f "$ROOT/packaging/linux/$APP_ID.desktop" ] || fail "packaging/linux/$APP_ID.desktop is missing: the desktop file is named after kApplicationId"
 NAME="MarvelUltimateAlliance-v$VERSION-x86_64"
 
+sorted_lines() { printf '%s\n' "$@" | LC_ALL=C sort; }
+# The game programs AppRun can start, from its `case "${MUA_APPIMAGE_PROGRAM:-}"` pattern.
+apprun_programs() {  # apprun
+  sed -nE 's/^[[:space:]]*(marvel_ultimate_alliance_[a-z0-9_ |]+)\)[[:space:]]*$/\1/p' "$1" | tr -d '\r' | tr '|' '\n' |
+    tr -d ' ' | sed '/^$/d' | LC_ALL=C sort
+}
+# The launcher looks for each game's program under the name src/game_definition.cpp gives it.
+DEFINED_PROGRAMS="$(sed -nE 's/^[[:space:]]*\.program = "([^"]+)",.*/\1/p' "$ROOT/src/game_definition.cpp" | tr -d '\r' |
+  LC_ALL=C sort)"
+[ "$DEFINED_PROGRAMS" = "$(sorted_lines "${GAME_PROGRAMS[@]}")" ] ||
+  fail "GAME_PROGRAMS (${GAME_PROGRAMS[*]}) is not the list of programs src/game_definition.cpp names: $(echo $DEFINED_PROGRAMS)"
+[ "$DEFINED_PROGRAMS" = "$(apprun_programs "$ROOT/packaging/linux/AppRun")" ] ||
+  fail "packaging/linux/AppRun does not start exactly the programs src/game_definition.cpp names: $(echo $DEFINED_PROGRAMS)"
+
 EXPECTED=".DirIcon
 AppRun
 $APP_NAME.png
@@ -133,8 +147,12 @@ scan_appdir() {  # appdir label [extra_paths...]
   [ "$actual" = "$EXPECTED" ] || { problem "unexpected AppDir contents:"; diff <(echo "$EXPECTED") <(echo "$actual") >&2 || true; }
   grep -qxF "StartupWMClass=$APP_ID" "$appdir/$APP_ID.desktop" || problem "StartupWMClass in $APP_ID.desktop is not $APP_ID"
   grep -qxF "Exec=$BIN_NAME" "$appdir/$APP_ID.desktop" || problem "Exec in $APP_ID.desktop is not $BIN_NAME"
+  [ "$(apprun_programs "$appdir/AppRun")" = "$DEFINED_PROGRAMS" ] ||
+    problem "AppRun does not start exactly ${GAME_PROGRAMS[*]}"
   for program in "${GAME_PROGRAMS[@]}"; do
-    grep -qF "$program" "$appdir/AppRun" || problem "AppRun does not start $program"
+    # The launcher's own name for the program, ending where the string does: a Windows name would go on with .exe.
+    LC_ALL=C grep -qaP "$program\x00" "$appdir/usr/bin/$BIN_NAME" ||
+      problem "$BIN_NAME does not look for $program, the name it is packaged under"
   done
   for program in "${PROGRAMS[@]}"; do
     grep -qaF "$APP_ID" "$appdir/usr/bin/$program" || problem "$program does not contain the application id $APP_ID"

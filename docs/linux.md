@@ -10,11 +10,11 @@ Alliance, Gold Edition and Marvel Ultimate Alliance 2).
 PCs or Steam Deck hardware. Steam Deck is expected to work through the AppImage, as a native Linux program and not through
 Proton. Reports are welcome.
 
-Every launcher setting works on Linux, apart from two that exist on Windows only. **Graphics card** selects a Direct3D 12
-adapter. On Linux the runtime prefers the dedicated GPU, and the usual selection variables (`DRI_PRIME`,
-`MESA_VK_DEVICE_SELECT`, `VK_LOADER_DEVICE_SELECT`, `__NV_PRIME_RENDER_OFFLOAD`) take precedence when they are set.
-**Upscaling** (AMD FSR 1) runs in the Direct3D 12 presenter, so on Linux the game always draws at the chosen Render
-resolution.
+Every launcher setting works on Linux. **Graphics card** lists the Vulkan devices, the dedicated GPU first unless one of
+the usual selection variables (`DRI_PRIME`, `MESA_VK_DEVICE_SELECT`, `VK_LOADER_DEVICE_SELECT`,
+`__NV_PRIME_RENDER_OFFLOAD`) is set. **Upscaling** offers AMD FSR 1; AMD FSR 3.1 and NVIDIA DLSS run in the Direct3D 12
+GPU plugin and are Windows only. **Multisampling** is shown only when the GPU cannot run the fragment shader interlock
+render path, as on Windows without rasterizer-ordered views.
 
 ## Requirements
 
@@ -52,7 +52,7 @@ real Steam Deck hardware is still limited, so rendering, audio, controllers and 
 3. Add it to Steam with **Games > Add a Non-Steam Game to My Library**, then play it from **Game Mode**.
 
 If Steam starts it in an environment where FUSE is unavailable, the AppImage unpacks itself and runs anyway (see below).
-Upscaling and the Graphics card selector are Windows only on the Deck too.
+AMD FSR 3.1 and NVIDIA DLSS are Windows only on the Deck too.
 
 ### If the AppImage does not start
 

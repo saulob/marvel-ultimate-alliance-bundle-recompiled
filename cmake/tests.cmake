@@ -100,7 +100,7 @@ mua_add_test(skip_intro_notice_tests headless SOURCES src/game_definition.cpp sr
 mua_add_test(achievements_overlay_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 mua_add_test(log_path_tests headless SOURCES src/log_path.cpp)
 mua_add_test(diagnostics_tests headless SOURCES src/diagnostics.cpp)
-mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12)
+mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12 ${CMAKE_DL_LIBS})
 mua_add_test(crash_report_tests headless SOURCES src/crash_report.cpp LIBS shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(user_data_tests headless SOURCES src/user_data.cpp)
 mua_add_test(port_version_tests headless SOURCES src/port_version.cpp
@@ -190,5 +190,5 @@ mua_add_test(settings_tests runtime
             src/game_profile.cpp src/graphics_adapters.cpp src/input_summary.cpp src/log_filter.cpp
             src/active_log.cpp src/log_path.cpp src/platform.cpp src/port_version.cpp src/session_log.cpp src/system_info.cpp
             src/xex_identity.cpp
-    LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization
+    LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization ${CMAKE_DL_LIBS}
     DEFINES ${MUA_TEST_BUILD_DEFINES})

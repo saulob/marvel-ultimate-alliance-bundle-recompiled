@@ -1029,6 +1029,14 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
              "resolution_scale", "1", RenderResolutionOptions(SelectedAspectRatio()));
     if (UpscalingApplies()) {
       UpscalerMask offered = Selected().game->upscalers;
+      std::string fsr1_unavailable;
+      if ((offered & UpscalerBit(Upscaler::kFsr1)) && !(RuntimeUpscalers() & UpscalerBit(Upscaler::kFsr1))) {
+        offered &= ~UpscalerBit(Upscaler::kFsr1);
+        fsr1_unavailable = "Unavailable: this build's graphics runtime has no AMD FSR 1.";
+        if (settings_.Get("mua_upscaler") == kUpscalerFsr1) {
+          settings_.Set("mua_upscaler", kUpscalerOff);
+        }
+      }
       std::string fsr3_unavailable;
       if ((offered & UpscalerBit(Upscaler::kFsr3)) && !Fsr3().available) {
         offered &= ~UpscalerBit(Upscaler::kFsr3);
@@ -1045,8 +1053,11 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
           settings_.Set("mua_upscaler", kUpscalerOff);
         }
       }
-      ui.Choice("Upscaling", UpscalingHelp(Selected().game->upscalers), "mua_upscaler", kUpscalerOff,
-                UpscalerOptions(offered));
+      ui.Choice("Upscaling", UpscalingHelp(Selected().game->upscalers & kBackendUpscalers), "mua_upscaler",
+                kUpscalerOff, UpscalerOptions(offered));
+      if (!fsr1_unavailable.empty()) {
+        ui.Info("AMD FSR 1", fsr1_unavailable.c_str());
+      }
       if (!fsr3_unavailable.empty()) {
         ui.Info("AMD FSR 3.1", fsr3_unavailable.c_str());
       }
@@ -1108,7 +1119,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     }
   }
 
-  bool UpscalingApplies() const { return kUpscalerAvailable && Selected().game != nullptr; }
+  bool UpscalingApplies() const { return Selected().game != nullptr; }
 
   // NVIDIA's check runs once per graphics card choice, and only for a game that offers DLSS.
   const DlssSupport& Dlss() {
@@ -1134,7 +1145,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       fsr3_adapter_ = adapter;
       std::error_code error;
       fsr3_support_ = Fsr3SupportFor(
-          kUpscalerAvailable,
+          kGraphicsBackend == GraphicsBackend::kDirect3D12,
           std::filesystem::is_regular_file(rex::filesystem::GetExecutableFolder() / kFidelityFxLibraryFile, error),
           MultisamplingApplies());
       REXLOG_INFO("Launcher: AMD FSR 3.1 {}",
@@ -1152,8 +1163,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
       host_render_targets_checked_ = true;
       host_render_targets_adapter_ = adapter;
       host_render_targets_ = HostRenderTargetsUsed(
-          rex::cvar::GetFlagByName("render_target_path_d3d12"),
-          RasterizerOrderedViewsSupported(ResolveGraphicsAdapter(adapter, graphics_adapters_).value_or(-1)));
+          rex::cvar::GetFlagByName(kBackendSettings.render_target_path),
+          PixelShaderEdramSupported(ResolveGraphicsAdapter(adapter, graphics_adapters_).value_or(-1)));
     }
     return host_render_targets_;
   }

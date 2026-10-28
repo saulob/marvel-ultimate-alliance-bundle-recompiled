@@ -22,17 +22,18 @@ inline uint32_t HostMsaaSamples(uint32_t guest_samples, bool native_2x_msaa, boo
   return guest_samples;
 }
 
-// Whether the Direct3D 12 EDRAM lives in host render targets, the only path where the Multisampling choice matters.
-// With rasterizer-ordered views the EDRAM is emulated in pixel shaders at a forced sample count, and ReXGlue leaves
-// native_2x_msaa unused. "rov" needs hardware support; ReXGlue falls back to host render targets without it.
-inline bool HostRenderTargetsUsed(std::string_view render_target_path, bool rov_supported) {
-  if (render_target_path == "rov") {
-    return !rov_supported;
+// Whether the EDRAM lives in host render targets, the only path where the Multisampling choice matters. With
+// rasterizer-ordered views (Direct3D 12 "rov") or fragment shader interlock (Vulkan "fsi") the EDRAM is emulated in
+// pixel shaders at a forced sample count, and ReXGlue leaves native_2x_msaa unused. Both need hardware support;
+// ReXGlue falls back to host render targets without it.
+inline bool HostRenderTargetsUsed(std::string_view render_target_path, bool pixel_shader_edram_supported) {
+  if (render_target_path == "rov" || render_target_path == "fsi") {
+    return !pixel_shader_edram_supported;
   }
   return true;
 }
 
-// native_2x_msaa only reaches host render targets, so it is left alone under ROV.
+// native_2x_msaa only reaches host render targets, so it is left alone under ROV or FSI.
 inline std::optional<bool> Native2xMsaaToApply(bool host_render_targets, bool compatibility) {
   if (!host_render_targets) {
     return std::nullopt;
@@ -40,18 +41,18 @@ inline std::optional<bool> Native2xMsaaToApply(bool host_render_targets, bool co
   return Native2xMsaaFor(compatibility);
 }
 
-// The Multisampling value in the launcher's startup log; under ROV the player has no choice.
-inline std::string MsaaLauncherText(bool host_render_targets, bool compatibility) {
+// The Multisampling value in the launcher's startup log; under ROV or FSI the player has no choice.
+inline std::string MsaaLauncherText(bool host_render_targets, bool compatibility, std::string_view pixel_shader_edram) {
   if (!host_render_targets) {
-    return "ROV (fixed)";
+    return std::string(pixel_shader_edram) + " (fixed)";
   }
   return compatibility ? "4x MSAA (Compatibility)" : "2x MSAA";
 }
 
 // What the renderer does with the game's 2x MSAA render targets.
-inline std::string MsaaRuntimeText(bool host_render_targets, bool compatibility) {
+inline std::string MsaaRuntimeText(bool host_render_targets, bool compatibility, std::string_view pixel_shader_edram) {
   if (!host_render_targets) {
-    return "2x as 4x (ROV, fixed)";
+    return "2x as 4x (" + std::string(pixel_shader_edram) + ", fixed)";
   }
   return compatibility ? "2x as 4x (host render targets, compatibility)" : "2x native (host render targets)";
 }
