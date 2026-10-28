@@ -63,7 +63,10 @@ constexpr std::array kGames = {
         .executable = "marvel_ultimate_alliance_mua2.exe",
         .data_folder = "mua2",
         .frame_policy = kMua2FramePolicy,
-        .upscalers = kFsr1Upscalers,
+        .upscalers = kAllUpscalers,
+        // Its scene is one 1040x624 surface that fits the EDRAM at 2x MSAA, beside the 1280x720 composite.
+        .scene_profile = "mua2",
+        .scene_size = {1040, 624},
     },
 };
 

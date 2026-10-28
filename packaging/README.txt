@@ -83,10 +83,10 @@ Launcher options, per game:
 - Display: Windowed or Borderless Fullscreen, window size, monitor, aspect
   ratio (16:9, 16:10, 21:9, 32:9, 4:3, 5:4) and VSync.
 - Graphics: graphics card, render resolution (up to 4x), AMD FSR 1
-  upscaling (and AMD FSR 3.1 for Marvel Ultimate Alliance, on any graphics
-  card), anti-aliasing and texture filtering. HD Text (sharper text and
-  controller icons) is available for Marvel Ultimate Alliance and Gold
-  Edition.
+  upscaling (and, in all three games, AMD FSR 3.1 on any graphics card and
+  NVIDIA DLSS on GeForce RTX), anti-aliasing and texture filtering. HD
+  Text (sharper text and controller icons) is available for Marvel
+  Ultimate Alliance and Gold Edition.
 - Gameplay: skip intro, frame rate (30 original, 60 default, up to 240 or
   Unlimited), what the window title and the corner counter show, and player
   names.

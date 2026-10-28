@@ -40,6 +40,8 @@ struct GameDefinition {
   // How the GPU plugin finds the 3D scene for NVIDIA DLSS and AMD FSR 3.1 (d3d12_scene_profile); a game without one
   // offers neither.
   std::string_view scene_profile;
+  // The guest size of its 3D scene when that isn't the video mode's, which its own composite scales the scene to.
+  WindowSize scene_size = {};
 
   bool HasPage(LauncherPage page) const { return (pages & PageBit(page)) != 0; }
 };

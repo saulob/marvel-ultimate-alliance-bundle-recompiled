@@ -195,6 +195,11 @@ inline int SnapSceneWidth(int width, int canvas_width, int max_width) {
   return snapped;
 }
 
+// The canvas a game draws its 3D scene in: its own scene size, or the video mode's when it has none.
+inline WindowSize SceneCanvas(AspectRatio aspect, WindowSize scene_size) {
+  return scene_size.width > 0 ? scene_size : VideoModeSize(aspect);
+}
+
 // The 3D scene FSR 3.1 draws for an output size: AMD's render size of the quality
 // (ffxFsr3UpscalerGetRenderResolutionFromQualityMode), with the GPU plugin's width snap.
 inline WindowSize Fsr3SceneSize(WindowSize output, int canvas_width, UpscaleQuality quality) {

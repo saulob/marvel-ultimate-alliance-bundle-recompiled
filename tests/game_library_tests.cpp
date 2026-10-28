@@ -136,14 +136,11 @@ void TestFramePolicies() {
 }
 
 void TestUpscalers() {
-  std::printf("FSR 3.1 and DLSS belong to MUA 1 and Gold Edition; MUA 2 keeps Off and FSR 1; NIS and CAS are gone\n");
-  CHECK(Mua1().upscalers == mua::kAllUpscalers);
-  CHECK(Gold().upscalers == mua::kAllUpscalers);
-  CHECK(Mua2().upscalers == mua::kFsr1Upscalers);
-  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, Mua2().upscalers) == mua::Upscaler::kOff);
-  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, Mua2().upscalers) == mua::Upscaler::kOff);
-  CHECK((Mua2().upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
-  for (const mua::GameDefinition* game : {&Mua1(), &Gold()}) {
+  std::printf("every game offers Off, FSR 1, FSR 3.1 and DLSS; NIS and CAS are gone\n");
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
+    CHECK(game->upscalers == mua::kAllUpscalers);
+  }
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) ==
           (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) ==
@@ -158,12 +155,17 @@ void TestUpscalers() {
 }
 
 void TestSceneProfiles() {
-  std::printf("DLSS and FSR 3.1 only for a game with a scene profile: MUA 1's and Gold Edition's own\n");
+  std::printf("DLSS and FSR 3.1 only for a game with a scene profile: each game's own\n");
   CHECK(Mua1().scene_profile == "mua1");
   CHECK(Gold().scene_profile == "mua1-gold");
+  CHECK(Mua2().scene_profile == "mua2");
   // A profile is named after its game.
-  CHECK(Mua1().scene_profile == Mua1().key && Gold().scene_profile == Gold().key);
-  CHECK(Mua2().scene_profile.empty());
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
+    CHECK(game->scene_profile == game->key);
+  }
+  // Only MUA 2's scene has a size of its own; the others' is the video mode's.
+  CHECK(Mua2().scene_size.width == 1040 && Mua2().scene_size.height == 624);
+  CHECK(Mua1().scene_size.width == 0 && Gold().scene_size.width == 0);
   const mua::UpscalerMask temporal = mua::UpscalerBit(mua::Upscaler::kFsr3) | mua::UpscalerBit(mua::Upscaler::kDlss);
   for (const mua::GameDefinition& game : mua::AllGames()) {
     CHECK(((game.upscalers & temporal) == temporal) == !game.scene_profile.empty());

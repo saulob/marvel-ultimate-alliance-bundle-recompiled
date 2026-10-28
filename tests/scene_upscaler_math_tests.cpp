@@ -6,9 +6,10 @@
 // and the DLSS depth (0163): the ROV's D24S8 and D24FS8 read back with the renderer's own conversion, which resolve it
 // is taken from, and its composition from both tiles at the scene's scale. AMD FSR 3.1 (0165): AMD's render sizes,
 // jitter phases and offsets, the camera planes recovered from the game's matrices and read back through FSR's own depth
-// conversion, and the motion vectors reprojected the way FSR's shaders do. Scene profiles (0166, 0167): MUA1's keeps
+// conversion, and the motion vectors reprojected the way FSR's shaders do. Scene profiles (0166 to 0168): MUA1's keeps
 // 0161's scene surface rule, Gold Edition's adds its Direct3D's 4x MSAA draws over the scene's memory to the scene's
-// pass, and MUA2 has none.
+// pass, and MUA2's pins its 1040x624 scene surface, modelled on its gameplay frame in log 268; 0169 draws MUA2's
+// shadow pass at 1x and keeps the same surface after the scene apart.
 // Run: mua_scene_upscaler_math_tests
 
 #include <algorithm>
@@ -17,6 +18,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
+#include <map>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -1111,19 +1114,26 @@ void TestFsr3SceneAlpha() {
 }
 
 void TestSceneProfiles() {
-  std::printf("scene profiles: mua1 keeps 0161's scene rule, mua1-gold finds the same surface, MUA 2 has none\n");
+  std::printf("scene profiles: mua1 keeps 0161's scene rule, mua1-gold finds the same surface, mua2 its own\n");
   using Format = rex::graphics::xenos::ColorRenderTargetFormat;
   using Msaa = rex::graphics::xenos::MsaaSamples;
   const scene::SceneProfile* mua1 = scene::FindSceneProfile("mua1");
   const scene::SceneProfile* gold = scene::FindSceneProfile("mua1-gold");
-  CHECK(mua1 != nullptr && gold != nullptr && mua1 != gold && scene::kSceneProfiles.size() == 2);
-  CHECK(!scene::FindSceneProfile("") && !scene::FindSceneProfile("mua2") && !scene::FindSceneProfile("MUA1") &&
-        !scene::FindSceneProfile("gold"));
-  if (!mua1 || !gold) {
+  const scene::SceneProfile* mua2 = scene::FindSceneProfile("mua2");
+  CHECK(mua1 != nullptr && gold != nullptr && mua2 != nullptr && mua1 != gold && gold != mua2 &&
+        scene::kSceneProfiles.size() == 3);
+  CHECK(!scene::FindSceneProfile("") && !scene::FindSceneProfile("MUA1") && !scene::FindSceneProfile("gold") &&
+        !scene::FindSceneProfile("mua2-x360"));
+  if (!mua1 || !gold || !mua2) {
     return;
   }
   // Only mua1-gold takes its Direct3D's 4x MSAA draws into the scene's pass.
-  CHECK(!mua1->scene_memory_4x_draws && gold->scene_memory_4x_draws);
+  CHECK(!mua1->scene_memory_4x_draws && gold->scene_memory_4x_draws && !mua2->scene_memory_4x_draws);
+  // Everything 0168 adds stays off for both, so their scene, pre-scene targets, depth and viewport are 0167's.
+  for (const scene::SceneProfile* profile : {mua1, gold}) {
+    CHECK(!profile->pinned_surface && profile->reduce_pre_scene_targets && !profile->depth_at_each_resolve &&
+          !profile->depth_partitions && !profile->camera_required && !profile->native_pre_scene_key);
+  }
   for (const scene::SceneProfile* profile : {mua1, gold}) {
     CHECK(profile->min_draws == 20 && profile->min_msaa_samples_log2 == mua1->min_msaa_samples_log2 &&
           profile->color_formats == mua1->color_formats);
@@ -1145,7 +1155,7 @@ void TestSceneProfiles() {
   const auto profile_of = [](mua::GameId id) { return scene::FindSceneProfile(mua::Game(id).scene_profile); };
   CHECK(profile_of(mua::GameId::kMua1) == mua1);
   CHECK(profile_of(mua::GameId::kMua1Gold) == gold);
-  CHECK(profile_of(mua::GameId::kMua2) == nullptr);
+  CHECK(profile_of(mua::GameId::kMua2) == mua2);
 }
 
 using Targets = scene::PreSceneTargets;
@@ -1249,38 +1259,102 @@ struct ModelResolve {
 // SceneUpscaler's scene pass bookkeeping (BeginDraw, BeforeResolve, AfterResolve, FinishScene, BeforeSwap) for the
 // scene at kSceneKey: a scene resolve takes its planes and leaves the pass pending; a draw that is neither a scene
 // draw nor, before the frame's scene is done, one of the profile's draws over its memory finishes it; a second
-// finished pass in a frame turns the upscaler off.
+// finished pass in a frame turns the upscaler off. Other draws and resolves go through its PreSceneTargets
+// (NoteOtherDraw, NoteSampledByScene, NoteSampledAfterScene, BeforeResolve), with reads naming the resolve
+// destinations a draw samples.
 struct ScenePassModel {
   const scene::SceneProfile& profile;
+  uint32_t scene_key = kSceneKey;
+  uint32_t color_base = kSceneColorBase;
+  uint32_t depth_base = kSceneDepthBase;
   bool pending = false;
   uint32_t finished = 0;
   bool turned_off = false;
+  // Drawn smaller and jittered.
+  uint32_t scene_draws = 0;
   scene::ScenePlanes planes;
   std::vector<ModelResolve> resolves;
+  std::vector<uint32_t> depth_taken;
   std::vector<std::vector<ModelResolve>> passes;
+  // d3d12_dlss_pre_scene_native and AllowsNativePreScene; for profiles without a native surface, whether the
+  // pre-scene scale is below the output's.
+  bool native_allowed = false;
+  bool pre_scene_scale_reduced = true;
+  Targets targets;
+  bool scene_drawn = false;
+  bool pre_scene_frame = false;
+  std::map<uint32_t, uint32_t> other_resolves;
+  // A frame's other draws by surface and base, drawn smaller or at the output scale, and its stretched resolves; the
+  // last swapped frame's in last_*.
+  std::map<std::pair<uint32_t, uint32_t>, uint32_t> reduced, full, last_reduced, last_full;
+  std::vector<uint32_t> stretched, last_stretched;
 
-  void Draw(const ModelDraw& draw, uint32_t count = 1) {
+  // IsSceneDraw's and BeforeResolve's surface checks.
+  bool IsSceneSurface(uint32_t key) const {
+    return Targets::SamplesLog2(key) == Targets::SamplesLog2(scene_key) &&
+           scene::IsScenePitch(profile, Targets::Pitch(key));
+  }
+  void Draw(const ModelDraw& draw, uint32_t count = 1, std::initializer_list<uint32_t> reads = {}) {
     const bool writes_color = draw.color_base != kNoBase;
     const uint32_t base = writes_color ? draw.color_base : draw.depth_base;
     for (uint32_t i = 0; i < count; ++i) {
-      if (Targets::SamplesLog2(draw.key) == Targets::SamplesLog2(kSceneKey) &&
-          base == (writes_color ? kSceneColorBase : kSceneDepthBase)) {
+      if (IsSceneSurface(draw.key) && base == (writes_color ? color_base : depth_base)) {
         planes.NoteSceneDraw(draw.depth_base != kNoBase);
-      } else if (!finished &&
-                 scene::IsSceneMemoryDraw(profile, kSceneKey, draw.key, base, kSceneColorBase, kSceneDepthBase)) {
-        planes.Clear((writes_color ? scene::ScenePlanesAt(draw.color_base, kSceneColorBase, kSceneDepthBase) : 0) |
-                     (draw.depth_base != kNoBase
-                          ? scene::ScenePlanesAt(draw.depth_base, kSceneColorBase, kSceneDepthBase)
-                          : 0));
-      } else if (pending) {
-        Finish();
+        ++scene_draws;
+        scene_drawn = true;
+        if (targets.AwaitsSceneSampling()) {
+          for (const uint32_t read : reads) {
+            if (const auto resolve = other_resolves.find(read); resolve != other_resolves.end()) {
+              targets.NoteSampledByScene(resolve->second);
+            }
+          }
+        }
+      } else if (!finished && scene::IsSceneMemoryDraw(profile, scene_key, draw.key, base, color_base, depth_base)) {
+        planes.Clear((writes_color ? scene::ScenePlanesAt(draw.color_base, color_base, depth_base) : 0) |
+                     (draw.depth_base != kNoBase ? scene::ScenePlanesAt(draw.depth_base, color_base, depth_base)
+                                                 : 0));
+      } else {
+        if (pending) {
+          Finish();
+        }
+        NoteOtherDraw(draw.key, base, reads);
       }
     }
   }
-  void Resolve(const scene::ResolveRect& rect, uint32_t dest, bool clears) {
-    resolves.push_back({rect, dest, planes.Take(false)});
+  uint32_t PreSceneKey(uint32_t key) const {
+    return scene::PreSceneKeyFor(profile, Targets::Pitch(key), Targets::SamplesLog2(key), scene_drawn);
+  }
+  void NoteOtherDraw(uint32_t surface, uint32_t base, std::initializer_list<uint32_t> reads) {
+    const uint32_t key = PreSceneKey(surface);
+    targets.NoteDraw(key, scene_drawn);
+    if (scene_drawn) {
+      for (const uint32_t read : reads) {
+        if (const auto resolve = other_resolves.find(read); resolve != other_resolves.end()) {
+          targets.NoteSampledAfterScene(resolve->second);
+        }
+      }
+    }
+    const bool smaller = pre_scene_frame && scene::IsPreSceneReduced(profile, targets, key);
+    ++(smaller ? reduced : full)[{surface, base}];
+  }
+  // A resolve of another surface is no scene resolve.
+  void Resolve(const scene::ResolveRect& rect, uint32_t dest, bool clears, uint32_t key = 0) {
+    if (!IsSceneSurface(key ? key : scene_key)) {
+      const uint32_t other_key = PreSceneKey(key);
+      if (pre_scene_frame && scene::IsPreSceneReduced(profile, targets, other_key)) {
+        stretched.push_back(dest);
+      }
+      other_resolves[dest] = other_key;
+      return;
+    }
+    other_resolves.erase(dest);
+    resolves.push_back({rect, dest, planes.Take(false, profile.depth_at_each_resolve)});
     pending = true;
     planes.AfterResolve(clears, clears);
+  }
+  void ResolveDepth() {
+    depth_taken.push_back(planes.Take(true, profile.depth_at_each_resolve));
+    pending = true;
   }
   void Finish() {
     pending = false;
@@ -1288,6 +1362,13 @@ struct ScenePassModel {
       return;
     }
     turned_off |= finished > 0;
+    if (profile.pinned_surface) {
+      std::vector<scene::ResolveRect> rects;
+      for (const ModelResolve& resolve : resolves) {
+        rects.push_back(resolve.rect);
+      }
+      turned_off |= !scene::PinnedOutputResolve(*profile.pinned_surface, rects);
+    }
     ++finished;
     passes.push_back(std::exchange(resolves, {}));
   }
@@ -1297,6 +1378,12 @@ struct ScenePassModel {
     }
     finished = 0;
     planes.EndFrame();
+    targets.EndFrame(scene_drawn, scene_key, native_allowed);
+    pre_scene_frame = profile.native_pre_scene_key ? native_allowed && scene_drawn : pre_scene_scale_reduced;
+    scene_drawn = false;
+    last_reduced = std::exchange(reduced, {});
+    last_full = std::exchange(full, {});
+    last_stretched = std::exchange(stretched, {});
   }
 };
 
@@ -1539,7 +1626,535 @@ void TestScenePasses() {
   }
 }
 
+// MUA2's scene in log 268: color base 0 and D24FS8 depth base 1034, 2x MSAA, pitch 1040 (13 tiles), 1040x624. Its
+// 1280x720 framebuffer is pitch 880 (11 tiles), resolved left (0..864) and right (864..1280 at window offset -864).
+const uint32_t kMua2SceneKey = Targets::Key(1040, 1);
+const scene::ResolveRect kMua2Scene = scene::ResolveRectFor(0, 0, 13, 0, 1, 0, 0, 1040 / 8, 624 / 8, 0, 0);
+const scene::ResolveRect kMua2FinalLeft = scene::ResolveRectFor(0, 0, 11, 0, 1, 0, 0, 864 / 8, 720 / 8, 0, 0);
+const scene::ResolveRect kMua2FinalRight = scene::ResolveRectFor(0, 0, 11, 0, 1, 0, 0, 416 / 8, 720 / 8, -864, 0);
+// The scene's textures in log 268: the copy draw 763 reads (r7), and the one the bloom chain reads (r8).
+constexpr uint32_t kMua2SceneCopy = 0x0A000000, kMua2SceneFinal = 0x0A100000;
+const ModelDraw kMua2Composite{Targets::Key(880, 1), 0, 1058};
+const ModelDraw kMua2SceneDepthDraw{kMua2SceneKey, kNoBase, 1034};
+const ModelDraw kMua2SceneColorDraw{kMua2SceneKey, 0, kNoBase};
+
+ScenePassModel Mua2Model(const scene::SceneProfile& profile) {
+  ScenePassModel model{profile};
+  model.scene_key = kMua2SceneKey;
+  model.color_base = 0;
+  model.depth_base = 1034;
+  return model;
+}
+
+// The shadow maps' textures in log 268 (depth bases 1216 and 1632), and their filtered copies the scene samples.
+constexpr uint32_t kMua2ShadowDepth[2] = {0x0B000000, 0x0B100000};
+constexpr uint32_t kMua2ShadowFiltered[2] = {0x0C000000, 0x0C100000};
+constexpr uint32_t kMua2Bloom = 0x0D000000, kMua2Lookup = 0x0D100000;
+
+struct Mua2Frame {
+  // Shadow casters that also write color at base 0, such as alpha-tested ones in heavier gameplay than log 268's.
+  uint32_t color_shadow_casters = 0;
+  bool shadow_sampled_after_scene = false;
+};
+
+// Log 268's gameplay frame (draws d0 to d808, resolves r0 to r17), in order.
+void Mua2GameplayFrame(ScenePassModel& model, const Mua2Frame& frame = {}) {
+  const scene::ResolveRect any{};
+  model.Draw({Targets::Key(880, 1), kNoBase, 1058}, 24);
+  model.Draw(kMua2Composite);
+  model.Draw({Targets::Key(440, 2), 0, 1058});
+  // The shadow maps (depth bases 1216 and 1632, pitch 1040 1x), each cleared by a 4x quad first.
+  for (int i = 0; i < 2; ++i) {
+    const uint32_t shadow = i ? 1632 : 1216;
+    model.Draw({Targets::Key(1040, 0), kNoBase, shadow});
+    model.Draw({Targets::Key(520, 2), kNoBase, shadow});
+    model.Draw({Targets::Key(1040, 0), kNoBase, shadow}, 60);
+    if (i) {
+      model.Draw({Targets::Key(1040, 0), 0, shadow}, frame.color_shadow_casters);
+    }
+    model.Resolve(any, kMua2ShadowDepth[i], false, Targets::Key(1040, 0));
+  }
+  // Their filtered copies (k_16_16, pitch 1040 1x at color base 0), two passes each.
+  for (int i = 0; i < 2; ++i) {
+    model.Draw({Targets::Key(1040, 0), 0, kNoBase}, 1, {kMua2ShadowDepth[i]});
+    model.Resolve(any, kMua2ShadowFiltered[i], false, Targets::Key(1040, 0));
+    model.Draw({Targets::Key(1040, 0), 0, kNoBase}, 1, {kMua2ShadowFiltered[i]});
+    model.Resolve(any, kMua2ShadowFiltered[i], false, Targets::Key(1040, 0));
+  }
+  model.Draw(kMua2Composite);
+  model.Draw({Targets::Key(440, 2), 0, 1058});
+  // 4x quads over the scene's memory, before the scene.
+  model.Draw({Targets::Key(520, 2), 0, 1034});
+  model.Draw({Targets::Key(520, 2), kNoBase, 1034});
+  model.Draw(kMua2SceneDepthDraw, 260);
+  model.ResolveDepth();
+  // The sky's depth, below the scene's range.
+  model.Draw(kMua2SceneDepthDraw, 3);
+  model.Draw(kMua2SceneColorDraw, 265, {kMua2ShadowFiltered[0], kMua2ShadowFiltered[1]});
+  model.Draw(kMua2SceneColorDraw, 5);
+  model.Resolve(kMua2Scene, kMua2SceneCopy, false);
+  // Draw 763, a 3D draw of the scene that reads r7.
+  model.Draw(kMua2SceneColorDraw);
+  model.Resolve(kMua2Scene, kMua2SceneFinal, true);
+  // The bloom chain: pitch 320 1x, then pitch 160 at 2x MSAA and color base 0, like the scene.
+  for (int i = 0; i < 2; ++i) {
+    model.Draw({Targets::Key(320, 0), 0, kNoBase});
+    model.Resolve(any, 0x0E000000, true, Targets::Key(320, 0));
+  }
+  for (int i = 0; i < 4; ++i) {
+    model.Draw({Targets::Key(160, 1), 0, kNoBase});
+    model.Resolve(any, kMua2Bloom, true, Targets::Key(160, 1));
+  }
+  // The 1024x32 texture, then the composite, HUD and menus into the framebuffer.
+  model.Draw({Targets::Key(1040, 0), 0, kNoBase});
+  model.Resolve(any, kMua2Lookup, true, Targets::Key(1040, 0));
+  model.Draw({Targets::Key(440, 2), 0, 1058});
+  if (frame.shadow_sampled_after_scene) {
+    model.Draw(kMua2Composite, 1, {kMua2ShadowFiltered[0]});
+  }
+  model.Draw(kMua2Composite, 36, {kMua2Lookup, kMua2Bloom});
+  model.Resolve(kMua2FinalLeft, 0x0E100000, true, Targets::Key(880, 1));
+  model.Resolve(kMua2FinalRight, 0x0E200000, true, Targets::Key(880, 1));
+  model.Swap();
+}
+
+void TestMua2Profile() {
+  std::printf("mua2: the pinned 1040x624 scene surface and its own output domain, beside the 1280x720 framebuffer\n");
+  using Format = rex::graphics::xenos::ColorRenderTargetFormat;
+  using Msaa = rex::graphics::xenos::MsaaSamples;
+  using Depth = rex::graphics::xenos::DepthRenderTargetFormat;
+  const scene::SceneProfile& mua2 = *scene::FindSceneProfile("mua2");
+  const scene::SceneProfile& mua1 = *scene::FindSceneProfile("mua1");
+  const scene::SceneProfile& gold = *scene::FindSceneProfile("mua1-gold");
+  CHECK(mua2.pinned_surface.has_value());
+  if (!mua2.pinned_surface) {
+    return;
+  }
+  const scene::PinnedSceneSurface& pinned = *mua2.pinned_surface;
+  CHECK(pinned.color_base == 0 && pinned.depth_base == 1034 && pinned.depth_format == uint32_t(Depth::kD24FS8) &&
+        pinned.pitch == 1040 && pinned.width == 1040 && pinned.height == 624);
+  CHECK(scene::IsSceneSurfaceCandidate(mua2, uint32_t(Msaa::k2X), uint32_t(Format::k_8_8_8_8)));
+  CHECK(!scene::IsSceneSurfaceCandidate(mua2, uint32_t(Msaa::k2X), uint32_t(Format::k_8_8_8_8_GAMMA)));
+  CHECK(!scene::IsSceneSurfaceCandidate(mua2, uint32_t(Msaa::k1X), uint32_t(Format::k_8_8_8_8)));
+  CHECK(!mua2.reduce_pre_scene_targets && mua2.depth_at_each_resolve && mua2.depth_partitions &&
+        mua2.camera_required && scene::kCameraMissingFrames == 600 &&
+        mua2.native_pre_scene_key == Targets::Key(1040, 0));
+
+  // Only the scene pair is the scene: not the composite (pitch 880, depth 1058), its 4x quads, the shadow maps
+  // (1216, 1632), the bloom chain (pitch 320 and 160) or the same bases with D24S8.
+  CHECK(scene::IsPinnedSceneSurface(mua2, 1040, 0, 1034, uint32_t(Depth::kD24FS8)));
+  CHECK(!scene::IsPinnedSceneSurface(mua2, 880, 0, 1058, uint32_t(Depth::kD24FS8)));
+  CHECK(!scene::IsPinnedSceneSurface(mua2, 880, 0, 1034, uint32_t(Depth::kD24FS8)));
+  CHECK(!scene::IsPinnedSceneSurface(mua2, 1040, 0, 1216, uint32_t(Depth::kD24S8)));
+  CHECK(!scene::IsPinnedSceneSurface(mua2, 1040, 0, 1632, uint32_t(Depth::kD24S8)));
+  CHECK(!scene::IsPinnedSceneSurface(mua2, 1040, 0, 1034, uint32_t(Depth::kD24S8)));
+  CHECK(!scene::IsPinnedSceneSurface(mua2, 1040, 4, 1034, uint32_t(Depth::kD24FS8)));
+  CHECK(scene::IsScenePitch(mua2, 1040));
+  for (const uint32_t pitch : {880u, 440u, 520u, 320u, 160u}) {
+    CHECK(!scene::IsScenePitch(mua2, pitch));
+  }
+  // mua1 and mua1-gold pin nothing.
+  for (const scene::SceneProfile* profile : {&mua1, &gold}) {
+    CHECK(scene::IsScenePitch(*profile, 1280) && scene::IsScenePitch(*profile, 800) &&
+          scene::IsPinnedSceneSurface(*profile, 800, 0, 1128, uint32_t(Depth::kD24S8)));
+  }
+
+  // The scene's own domain at 3x: output 3120x1872, beside the 3840x2160 framebuffer the HUD and menus draw into.
+  CHECK(pinned.width * 3 == 3120 && pinned.height * 3 == 1872);
+  CHECK(1280 * 3 == 3840 && 720 * 3 == 2160 && pinned.width != 1280 && pinned.height != 720);
+  // FSR 3.1 Performance from that output: AMD's 2x, and a width whose EDRAM tile edges land on whole render pixels.
+  const uint32_t render_width = scene::SnapRenderWidth(scene::Fsr3RenderSize(3120, 3), pinned.width, 0, 3120);
+  CHECK(scene::Fsr3RenderSize(3120, 3) == 1560 && scene::Fsr3RenderSize(1872, 3) == 936 && render_width == 1560);
+  CHECK(80 * render_width % pinned.width == 0);
+  // The scene's resolves capture the render-size scene from the EDRAM origin into the whole input.
+  const scene::CaptureRegion region = scene::CaptureRegionFor(kMua2Scene, 1.5, 1.5, 1560, 936);
+  CHECK(region.source_x == 0 && region.source_y == 0 && region.dest_x == 0 && region.dest_y == 0 &&
+        region.width == 1560 && region.height == 936);
+
+  // The scene's viewport (depth 1 to 0.1) over the sky's (0.05 to 0), whichever is drawn first.
+  CHECK(scene::IsWiderDepthRange(-0.9f, -0.05f) && !scene::IsWiderDepthRange(-0.05f, -0.9f) &&
+        !scene::IsWiderDepthRange(-0.9f, -0.9f));
+  for (const std::vector<float>& order : {std::vector<float>{-0.9f, -0.05f, -0.05f}, {-0.05f, -0.9f, -0.05f}}) {
+    float known = 0.0f;
+    bool known_set = false;
+    for (const float z_scale : order) {
+      if (!known_set || scene::IsWiderDepthRange(z_scale, known)) {
+        known = z_scale;
+        known_set = true;
+      }
+    }
+    CHECK(known == -0.9f);
+  }
+}
+
+void TestMua2ScenePass() {
+  std::printf("mua2: log 268's frame is one pass of 2 resolves with the output in the last, and nothing else is its\n");
+  const scene::SceneProfile& mua2 = *scene::FindSceneProfile("mua2");
+  const uint32_t both = scene::ScenePlanes::kColor | scene::ScenePlanes::kDepth;
+  CHECK(kMua2Scene.screen_x == 0 && kMua2Scene.screen_y == 0 && kMua2Scene.width == 1040 &&
+        kMua2Scene.height == 624);
+  CHECK(kMua2FinalRight.edram_x == 0 && kMua2FinalRight.screen_x == 864 && kMua2FinalRight.width == 416);
+
+  ScenePassModel model = Mua2Model(mua2);
+  Mua2GameplayFrame(model);
+  CHECK(!model.turned_off && model.passes.size() == 1);
+  if (model.passes.size() == 1) {
+    const std::vector<ModelResolve>& pass = model.passes[0];
+    CHECK(pass.size() == 2);
+    // r7, which draw 763 reads, keeps the scene's input stretched; r8, which the bloom chain reads, gets the output.
+    CHECK((WrittenDests(pass) == std::vector<uint32_t>{kMua2SceneFinal}));
+    std::vector<scene::ResolveRect> rects;
+    for (const ModelResolve& resolve : pass) {
+      rects.push_back(resolve.rect);
+    }
+    CHECK(scene::PinnedOutputResolve(*mua2.pinned_surface, rects) == std::optional<size_t>(1));
+    // Color and depth at each: r8's are the final scene's, after draw 763 and with the sky's depth.
+    CHECK((Taken(pass) == std::vector<uint32_t>{both, both}));
+  }
+  // r6, the depth resolve before the sky, takes depth for its own copy only.
+  CHECK((model.depth_taken == std::vector<uint32_t>{scene::ScenePlanes::kDepth}));
+  // Drawn smaller and jittered: the pre-pass, the sky and the scene's 271 color draws, 534 as in the log, and none of
+  // the shadow maps, bloom, 1024x32 texture, composite, HUD or menus.
+  CHECK(model.scene_draws == 534);
+
+  // Without the pin (mua1's rule) the composite and the bloom chain, 2x MSAA at color base 0, count as the scene and
+  // split it into a second pass; depth would come once, from r6, without the sky.
+  ScenePassModel unpinned = Mua2Model(*scene::FindSceneProfile("mua1"));
+  Mua2GameplayFrame(unpinned);
+  CHECK(unpinned.turned_off && unpinned.passes.size() >= 2 && unpinned.scene_draws > 534);
+  CHECK(!unpinned.passes.empty() && unpinned.passes[0].size() == 2 &&
+        unpinned.passes[0][0].taken == scene::ScenePlanes::kColor);
+
+  // The whole scene resolved once is a pass of 1 into that resolve.
+  ScenePassModel single = Mua2Model(mua2);
+  single.Draw(kMua2SceneColorDraw, 300);
+  single.Resolve(kMua2Scene, 1, true);
+  single.Draw({Targets::Key(320, 0), 0, kNoBase});
+  CHECK(!single.turned_off && single.passes.size() == 1 && (WrittenDests(single.passes[0]) == std::vector<uint32_t>{1}));
+  // A last resolve that isn't the whole scene turns it off, as does a scene resolved in two passes.
+  ScenePassModel partial = Mua2Model(mua2);
+  partial.Draw(kMua2SceneColorDraw, 300);
+  partial.Resolve(kMua2Scene, 1, false);
+  partial.Resolve(scene::ResolveRectFor(0, 0, 13, 0, 1, 0, 0, 520 / 8, 624 / 8, 0, 0), 2, true);
+  partial.Draw({Targets::Key(320, 0), 0, kNoBase});
+  CHECK(partial.turned_off);
+  ScenePassModel twice = Mua2Model(mua2);
+  for (int i = 0; i < 2; ++i) {
+    twice.Draw(kMua2SceneColorDraw, 100);
+    twice.Resolve(kMua2Scene, 1, true);
+    twice.Draw({Targets::Key(320, 0), 0, kNoBase});
+  }
+  CHECK(twice.turned_off);
+  // PinnedOutputResolve itself: the last one, the whole surface, every other covered.
+  const scene::PinnedSceneSurface& pinned = *mua2.pinned_surface;
+  const scene::ResolveRect left_half = scene::ResolveRectFor(0, 0, 13, 0, 1, 0, 0, 520 / 8, 624 / 8, 0, 0);
+  CHECK(!scene::PinnedOutputResolve(pinned, {}));
+  CHECK(!scene::PinnedOutputResolve(pinned, {kMua2Scene, left_half}));
+  CHECK(scene::PinnedOutputResolve(pinned, {left_half, kMua2Scene}) == std::optional<size_t>(1));
+  CHECK(!scene::PinnedOutputResolve(pinned, {kMua2FinalLeft}));
+}
+
+// An object-to-clip matrix from log 268's columns c0 to c3.
+scene::Matrix FromColumns(const std::array<std::array<double, 4>, 4>& columns) {
+  scene::Matrix matrix;
+  for (size_t column = 0; column < 4; ++column) {
+    for (size_t row = 0; row < 4; ++row) {
+      matrix[row * 4 + column] = columns[column][row];
+    }
+  }
+  return matrix;
+}
+
+void TestMua2Camera() {
+  std::printf("mua2: the scene's camera is near 32, infinite far, 37.992 degrees, depth 1 near, over the others\n");
+  // Draw 230 (the scene), draw 490 (the sky, without the camera's translation) and draw 758 (particles in view space).
+  const scene::Matrix scene_matrix = FromColumns({{{0.186757, -0.453768, 0.988814, 0.981089},
+                                                   {-1.62328, -0.0522057, 0.113762, 0.112873},
+                                                   {-8.8292e-10, 2.86873, 0.158478, 0.15724},
+                                                   {588.044, -1997.97, 1377.49, 1398.72}}});
+  const scene::Matrix sky_matrix = FromColumns({{{0.186757, -0.453768, 0.988814, 0.981089},
+                                                 {-1.62328, -0.0522057, 0.113762, 0.112873},
+                                                 {-8.8292e-10, 2.86873, 0.158478, 0.15724},
+                                                 {0.0, 0.0, -32.252, 0.0}}});
+  const scene::Matrix particle_matrix =
+      FromColumns({{{1.63399, 0, 0, 0}, {0, 2.90487, 0, 0}, {0, 0, -1.00787, -1}, {0, 0, -32.252, 0}}});
+  const double degrees = 57.29577951308232;
+  // The scene's viewport z (scale -0.9, offset 1) with depth 1 near (zfunc 6, kGreaterEqual).
+  const auto scene_projection = [](const scene::Matrix& matrix) {
+    return scene::CameraProjectionFor(matrix, -0.9, 1.0, true);
+  };
+  std::vector<scene::CameraProjection> projections;
+  for (const scene::Matrix* matrix : {&scene_matrix, &sky_matrix, &particle_matrix}) {
+    const std::optional<scene::CameraProjection> projection = scene_projection(*matrix);
+    CHECK(projection.has_value());
+    if (projection) {
+      CHECK(std::abs(projection->near_depth - 32.0) < 0.05 && std::isinf(projection->far_depth));
+      CHECK(std::abs(projection->fov_y * degrees - 37.992) < 0.01);
+      projections.push_back(*projection);
+    }
+  }
+  // The sky through its own viewport (0.05 to 0) is the log's 1.612/4096 group.
+  const std::optional<scene::CameraProjection> sky_own = scene::CameraProjectionFor(sky_matrix, -0.05, 0.05, true);
+  CHECK(sky_own && std::abs(sky_own->near_depth - 1.612) < 0.01 && std::abs(sky_own->far_depth - 4096.0) < 2.0);
+  // The log's other groups, from passes before the scene with normal depth.
+  const scene::CameraProjection shadow_a{64.0, 362.564, 131.224 / degrees};
+  const scene::CameraProjection shadow_b{64.0, 607.08, 119.0 / degrees};
+  if (projections.size() == 3 && sky_own) {
+    std::vector<scene::CameraProjection> frame;
+    for (int i = 0; i < 6; ++i) {
+      frame.insert(frame.end(), projections.begin(), projections.end());
+    }
+    frame.insert(frame.end(), {shadow_a, shadow_a, shadow_b, shadow_b, *sky_own});
+    const std::optional<scene::CameraProjection> consensus = scene::ConsensusCameraProjection(frame);
+    CHECK(consensus && std::abs(consensus->near_depth - 32.0) < 0.05 && std::isinf(consensus->far_depth) &&
+          std::abs(consensus->fov_y * degrees - 37.992) < 0.01);
+  }
+}
+
+void TestMua2CameraMotion() {
+  std::printf("mua2: camera motion vectors in render pixels, current to previous, without jitter, depth 1 near\n");
+  const std::array<float, 6> viewport = {520.0f, 520.0f, -312.0f, 312.0f, -0.9f, 1.0f};
+  const std::array<float, 2> render_scale = {1560.0f / 1040.0f, 936.0f / 624.0f};
+  // Its projection: clip w is the view depth and z / w = 1.00787 - 32.252 / depth, so the buffer holds 1 at 32.
+  const scene::Matrix projection = {1.63399, 0, 0, 0, 0, 2.90487, 0, 0, 0, 0, 1.00787, -32.252, 0, 0, 1, 0};
+  // The camera moves 4 units to the right and turns slightly between the frames.
+  const scene::Matrix view_previous = scene::Multiply(RotationY(0.00), Translation(0.0, -20.0, 300.0));
+  const scene::Matrix view_current = scene::Multiply(RotationY(0.01), Translation(-4.0, -20.0, 300.0));
+  std::vector<std::pair<scene::Matrix, scene::Matrix>> pairs;
+  for (int i = 0; i < 12; ++i) {
+    const scene::Matrix world = scene::Multiply(Translation(i * 15.0 - 80.0, 0.0, i * 20.0), RotationY(i * 0.3));
+    pairs.emplace_back(scene::Multiply(projection, scene::Multiply(view_current, world)),
+                       scene::Multiply(projection, scene::Multiply(view_previous, world)));
+  }
+  uint32_t matched = 0, agreeing = 0;
+  const std::optional<scene::Matrix> reprojection = scene::EstimateCameraReprojection(pairs, matched, agreeing);
+  CHECK(reprojection && matched == 12 && agreeing == 12);
+  if (!reprojection) {
+    return;
+  }
+  const scene::Matrix current = scene::Multiply(projection, view_current);
+  const scene::Matrix previous = scene::Multiply(projection, view_previous);
+  scene::Matrix clip_to_world;
+  CHECK(scene::Invert(current, clip_to_world));
+  double worst = 0.0, largest = 0.0;
+  for (const std::array<float, 2>& jitter : std::array<std::array<float, 2>, 2>{{{0.0f, 0.0f}, {0.4f, -0.3f}}}) {
+    for (uint32_t y = 11; y < 936; y += 97) {
+      for (uint32_t x = 9; x < 1560; x += 131) {
+        for (const float depth : {0.15f, 0.5f, 0.95f}) {
+          const double center_x = x + 0.5 - jitter[0], center_y = y + 0.5 - jitter[1];
+          const double clip[4] = {(center_x / render_scale[0] - viewport[1]) / viewport[0],
+                                  (center_y / render_scale[1] - viewport[3]) / viewport[2],
+                                  (depth - viewport[5]) / viewport[4], 1.0};
+          std::array<double, 4> world = {};
+          for (size_t r = 0; r < 4; ++r) {
+            for (size_t c = 0; c < 4; ++c) {
+              world[r] += clip_to_world[r * 4 + c] * clip[c];
+            }
+          }
+          const std::array<double, 3> point = {world[0] / world[3], world[1] / world[3], world[2] / world[3]};
+          const std::array<double, 3> before = Project(previous, point, viewport, render_scale);
+          const std::array<float, 2> motion =
+              scene::CameraMotion(*reprojection, viewport, render_scale, jitter, x, y, depth);
+          worst = std::max({worst, std::abs(motion[0] - (before[0] - center_x)),
+                            std::abs(motion[1] - (before[1] - center_y))});
+          largest = std::max({largest, std::abs(before[0] - center_x), std::abs(before[1] - center_y)});
+        }
+      }
+    }
+  }
+  CHECK(largest > 1.0 && worst < 1.0e-2);
+  // Previous minus current: the camera moved right, so a near surface was further right in the previous frame.
+  const scene::Matrix translated = scene::Multiply(projection, Translation(-4.0, -20.0, 300.0));
+  scene::Matrix translated_inverse;
+  CHECK(scene::Invert(translated, translated_inverse));
+  const scene::Matrix shift_only = scene::Multiply(previous, translated_inverse);
+  CHECK(scene::CameraMotion(shift_only, viewport, render_scale, {0.0f, 0.0f}, 780, 468, 0.9f)[0] > 1.0f);
+  // The sky's depth (0.05 to 0) lies past the infinite far plane (1 - 0.9 * 1.00787), where it would move against the
+  // camera's translation; MotionDepthRange takes it as infinitely far, so it moves with the camera's turn only.
+  const std::optional<scene::CameraProjection> camera = scene::CameraProjectionFor(current, -0.9, 1.0, true);
+  CHECK(camera && std::abs(camera->infinity_depth - (1.0 - 0.9 * 1.00787)) < 1.0e-6);
+  const std::array<float, 2> range = scene::MotionDepthRange(camera, true);
+  CHECK(std::abs(range[0] - (1.0 - 0.9 * 1.00787)) < 1.0e-6 && range[1] == FLT_MAX);
+  const std::array<float, 2> at_infinity =
+      scene::CameraMotion(*reprojection, viewport, render_scale, {}, 780, 100, range[0]);
+  const std::array<float, 2> sky =
+      scene::CameraMotion(*reprojection, viewport, render_scale, {}, 780, 100, 0.03f, range);
+  const std::array<float, 2> sky_unclamped =
+      scene::CameraMotion(*reprojection, viewport, render_scale, {}, 780, 100, 0.03f);
+  CHECK(std::abs(at_infinity[0]) > 5.0f && sky == at_infinity);
+  CHECK(std::abs(sky_unclamped[0] - at_infinity[0]) > 1.0f);
+  // The scene's own depths are untouched.
+  for (const float depth : {0.1f, 0.5f, 1.0f}) {
+    CHECK(scene::CameraMotion(*reprojection, viewport, render_scale, {}, 780, 468, depth, range) ==
+          scene::CameraMotion(*reprojection, viewport, render_scale, {}, 780, 468, depth));
+  }
+  // No camera, or the default of the other profiles: nothing is clamped; with normal depth the far side is.
+  CHECK((scene::MotionDepthRange(std::nullopt, true) == std::array<float, 2>{-FLT_MAX, FLT_MAX}));
+  CHECK((scene::MotionDepthRange(camera, false) == std::array<float, 2>{-FLT_MAX, range[0]}));
+}
+
+void TestMua2SceneAlpha() {
+  std::printf("mua2: FSR 3.1's output keeps the scene's own alpha, unjittered and clamped to the render size\n");
+  // 3x Performance: render 1560x936, output 3120x1872.
+  const std::array<float, 2> source_scale = {1560.0f / 3120.0f, 936.0f / 1872.0f};
+  const std::array<float, 4> source_clamp = {0.0f, 0.0f, 1560.0f, 936.0f};
+  const std::array<float, 2> center = scene::SceneAlphaSourcePosition(1560, 936, source_scale, {0.0f, 0.0f}, source_clamp);
+  CHECK(center[0] == 780.25f && center[1] == 468.25f);
+  const std::array<float, 2> jittered =
+      scene::SceneAlphaSourcePosition(1560, 936, source_scale, {0.3f, -0.2f}, source_clamp);
+  CHECK(std::abs(jittered[0] - 780.55f) < 1.0e-4f && std::abs(jittered[1] - 468.05f) < 1.0e-4f);
+  const std::array<float, 2> corner = scene::SceneAlphaSourcePosition(0, 0, source_scale, {-0.4f, -0.4f}, source_clamp);
+  CHECK(corner[0] == 0.5f && corner[1] == 0.5f);
+  const std::array<float, 2> far_corner =
+      scene::SceneAlphaSourcePosition(3119, 1871, source_scale, {0.4f, 0.4f}, source_clamp);
+  CHECK(far_corner[0] == 1559.5f && far_corner[1] == 935.5f);
+}
+
 }  // namespace
+
+void TestMua2ShadowPass() {
+  std::printf("mua2: the shadow pass (pitch 1040 1x before the scene) at 1x in every mode; the rest keeps its scale\n");
+  const scene::SceneProfile& mua2 = *scene::FindSceneProfile("mua2");
+  const scene::SceneProfile& mua1 = *scene::FindSceneProfile("mua1");
+  const scene::SceneProfile& gold = *scene::FindSceneProfile("mua1-gold");
+  const uint32_t shadow = Targets::Key(1040, 0);
+  using Draws = std::map<std::pair<uint32_t, uint32_t>, uint32_t>;
+
+  // The same pitch and sample count after the scene is another surface for mua2 only.
+  const uint32_t after = scene::PreSceneKeyFor(mua2, 1040, 0, true);
+  CHECK(scene::PreSceneKeyFor(mua2, 1040, 0, false) == shadow && after != shadow);
+  CHECK(Targets::Pitch(after) == 1040 && Targets::SamplesLog2(after) == 0 && Targets::SamplesLog2(shadow) == 0);
+  for (const scene::SceneProfile* profile : {&mua1, &gold}) {
+    for (const bool after_scene : {false, true}) {
+      CHECK(scene::PreSceneKeyFor(*profile, 1040, 0, after_scene) == shadow &&
+            scene::PreSceneKeyFor(*profile, 560, 0, after_scene) == Targets::Key(560, 0));
+    }
+  }
+  // mua2's goes to 1x in every mode above 1x; mua1's and Gold's only in Performance with a pre-scene scale between 1x
+  // and the output's.
+  CHECK(scene::AllowsNativePreScene(mua2, false, {3, 3}, {3, 3}) &&
+        scene::AllowsNativePreScene(mua2, true, {3, 3}, {3, 3}) &&
+        scene::AllowsNativePreScene(mua2, false, {2, 2}, {2, 2}) &&
+        !scene::AllowsNativePreScene(mua2, true, {1, 1}, {1, 1}));
+  for (const scene::SceneProfile* profile : {&mua1, &gold}) {
+    CHECK(scene::AllowsNativePreScene(*profile, true, {2, 2}, {3, 3}) &&
+          scene::AllowsNativePreScene(*profile, true, {2, 2}, {4, 4}));
+    CHECK(!scene::AllowsNativePreScene(*profile, false, {2, 2}, {3, 3}) &&
+          !scene::AllowsNativePreScene(*profile, true, {3, 3}, {3, 3}) &&
+          !scene::AllowsNativePreScene(*profile, true, {1, 1}, {2, 2}));
+  }
+  // mua1's and Gold's surfaces reduce exactly as PreSceneTargets reduces them.
+  {
+    Targets targets;
+    for (int frame = 0; frame < 8; ++frame) {
+      targets.NoteDraw(Targets::Key(560, 0), false);
+      targets.NoteSampledByScene(Targets::Key(560, 0));
+      targets.NoteDraw(Targets::Key(640, 0), false);
+      targets.EndFrame(true, Targets::Key(800, 1), true);
+      for (const uint32_t key : {Targets::Key(560, 0), Targets::Key(640, 0), Targets::Key(800, 1)}) {
+        CHECK(scene::IsPreSceneReduced(mua1, targets, key) == targets.IsReduced(key) &&
+              scene::IsPreSceneReduced(gold, targets, key) == targets.IsReduced(key));
+      }
+    }
+  }
+
+  for (const uint32_t casters : {0u, 120u}) {
+    const Mua2Frame frame{.color_shadow_casters = casters};
+    ScenePassModel model = Mua2Model(mua2);
+    model.native_allowed = true;
+    // Drawn before the scene in three frames, then sampled by it in three: proven only an input of the scene.
+    for (int i = 0; i < 6; ++i) {
+      Mua2GameplayFrame(model, frame);
+      CHECK(model.last_reduced.empty() && model.last_stretched.empty());
+      CHECK(model.targets.IsNative(shadow) == (i == 5));
+    }
+    Mua2GameplayFrame(model, frame);
+    // The shadow maps' depth (1216, 1632), the casters' color at base 0 and the filtered copies at base 0, at 1x.
+    CHECK((model.last_reduced == Draws{{{shadow, 1216}, 61}, {{shadow, 1632}, 61}, {{shadow, 0}, 4 + casters}}));
+    // Their six resolves stretched to the textures' full size; none of the scene's, bloom's, the 1024x32 texture's
+    // or the framebuffer's.
+    CHECK((model.last_stretched == std::vector<uint32_t>{kMua2ShadowDepth[0], kMua2ShadowDepth[1],
+                                                         kMua2ShadowFiltered[0], kMua2ShadowFiltered[0],
+                                                         kMua2ShadowFiltered[1], kMua2ShadowFiltered[1]}));
+    // Base 0 after the scene keeps the output scale: the 1024x32 texture (pitch 1040 1x, like the shadow pass), the
+    // bloom chain (pitch 160 2x and 320 1x) and the framebuffer (pitch 880 2x and its 4x quads). So do the 4x quads
+    // clearing the shadow maps, which cover the 1x ones.
+    CHECK(model.last_full.at({shadow, 0}) == 1 && model.last_full.at({Targets::Key(160, 1), 0}) == 4 &&
+          model.last_full.at({Targets::Key(320, 0), 0}) == 2 && model.last_full.at({Targets::Key(880, 1), 0}) == 38 &&
+          model.last_full.at({Targets::Key(440, 2), 0}) == 3);
+    CHECK(model.last_full.at({Targets::Key(520, 2), 1216}) == 1 &&
+          model.last_full.at({Targets::Key(520, 2), 1632}) == 1);
+    CHECK(!model.last_full.contains({shadow, 1216}) && !model.last_full.contains({shadow, 1632}));
+    // The scene keeps its pass: 534 draws a frame at the scene's input scale, the output in r8.
+    CHECK(!model.turned_off && model.scene_draws == 534 * 7 && model.passes.size() == 7);
+    CHECK(!model.passes.empty() && (WrittenDests(model.passes.back()) == std::vector<uint32_t>{kMua2SceneFinal}));
+    for (const auto& [draw, count] : model.last_reduced) {
+      CHECK(draw.first != kMua2SceneKey);
+    }
+  }
+
+  // Taken as one surface, the 1024x32 texture after the scene would keep the shadow pass at the output scale.
+  {
+    scene::SceneProfile unsplit = mua2;
+    unsplit.native_pre_scene_key = 0;
+    ScenePassModel model = Mua2Model(unsplit);
+    model.native_allowed = true;
+    model.pre_scene_scale_reduced = false;
+    for (int i = 0; i < 8; ++i) {
+      Mua2GameplayFrame(model);
+    }
+    CHECK(!model.targets.IsReduced(shadow) && !model.targets.IsNative(shadow) && model.last_reduced.empty());
+  }
+
+  // A shadow texture sampled after the scene: back to the output scale for the session.
+  {
+    ScenePassModel model = Mua2Model(mua2);
+    model.native_allowed = true;
+    for (int i = 0; i < 7; ++i) {
+      Mua2GameplayFrame(model);
+    }
+    CHECK(model.targets.IsNative(shadow) && !model.last_reduced.empty());
+    Mua2GameplayFrame(model, {.shadow_sampled_after_scene = true});
+    for (int i = 0; i < 6; ++i) {
+      Mua2GameplayFrame(model);
+      CHECK(!model.targets.IsNative(shadow) && model.last_reduced.empty() && model.last_stretched.empty());
+    }
+  }
+
+  // A frame without the scene, such as a menu, was decided at the previous swap; the next one draws everything at the
+  // output scale, and 1x returns after the next scene.
+  {
+    ScenePassModel model = Mua2Model(mua2);
+    model.native_allowed = true;
+    for (int i = 0; i < 7; ++i) {
+      Mua2GameplayFrame(model);
+    }
+    const auto menu_frame = [&] {
+      model.Draw({shadow, 0, kNoBase});
+      model.Resolve({}, 0x0F000000, true, shadow);
+      model.Draw(kMua2Composite, 20, {0x0F000000});
+      model.Swap();
+    };
+    menu_frame();
+    CHECK((model.last_reduced == Draws{{{shadow, 0}, 1}}));
+    menu_frame();
+    CHECK(model.last_reduced.empty() && model.last_stretched.empty());
+    Mua2GameplayFrame(model);
+    CHECK(model.last_reduced.empty());
+    Mua2GameplayFrame(model);
+    CHECK(!model.last_reduced.empty() && model.targets.IsNative(shadow));
+  }
+
+  // d3d12_dlss_pre_scene_native off, or Render resolution 1x: nothing changes scale.
+  {
+    ScenePassModel model = Mua2Model(mua2);
+    for (int i = 0; i < 10; ++i) {
+      Mua2GameplayFrame(model);
+      CHECK(model.last_reduced.empty() && model.last_stretched.empty());
+    }
+    CHECK(!model.targets.IsNative(shadow));
+  }
+}
 
 int main() {
   TestResolveRects();
@@ -1567,6 +2182,12 @@ int main() {
   TestScenePlanesClear();
   TestGoldScenePasses();
   TestScenePasses();
+  TestMua2Profile();
+  TestMua2ScenePass();
+  TestMua2Camera();
+  TestMua2CameraMotion();
+  TestMua2SceneAlpha();
+  TestMua2ShadowPass();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

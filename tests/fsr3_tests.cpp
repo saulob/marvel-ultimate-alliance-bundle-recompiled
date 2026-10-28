@@ -246,15 +246,12 @@ void TestApp() {
 }
 
 void TestGames() {
-  std::printf("Marvel Ultimate Alliance and its Gold Edition offer FSR 3.1, MUA 2 doesn't\n");
-  for (const mua::GameId id : {mua::GameId::kMua1, mua::GameId::kMua1Gold}) {
+  std::printf("all three games offer FSR 3.1\n");
+  for (const mua::GameId id : {mua::GameId::kMua1, mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
     CHECK((mua::Game(id).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) != 0);
     CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, mua::Game(id).upscalers) ==
           (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
   }
-  CHECK((mua::Game(mua::GameId::kMua2).upscalers & mua::UpscalerBit(mua::Upscaler::kFsr3)) == 0);
-  // A saved fsr3 in MUA 2's settings is Off, so it never sets d3d12_fsr3_mode.
-  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, mua::Game(mua::GameId::kMua2).upscalers) == mua::Upscaler::kOff);
 }
 
 void TestSource(const std::string& patch) {

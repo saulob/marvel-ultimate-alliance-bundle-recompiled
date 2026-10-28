@@ -1,4 +1,4 @@
-# NVIDIA DLSS Super Resolution (MUA1 and Gold Edition)
+# NVIDIA DLSS Super Resolution
 
 Status: **fifth version, verified.** At Render resolution 3x with Performance (1920x1080 to 3840x2160) the picture
 is correct, the depth is valid and gameplay runs at 58.5 to 73.7 FPS. The picture was correct at every mode tried
@@ -12,12 +12,13 @@ targets only the scene samples at the game's own 1x (0164).
 AMD FSR 3.1 ([fsr3.md](fsr3.md)) is a second backend of the same scene upscaler, with the same scene, depth, motion
 vectors, jitter, pre-scene targets and write-back.
 
-MUA1 and Gold Edition on Windows offer NVIDIA DLSS in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1,
-NVIDIA DLSS), on a GeForce RTX card that uses the rasterizer-ordered view (ROV) render path. DLSS upscales the 3D scene
-only, from the scene's own color and depth, camera motion vectors and a jitter the port adds; the HUD and menus keep
-drawing at the Render resolution. Gold Edition uses its own scene profile, `mua1-gold` (0167, see
-[fsr3.md](fsr3.md#games)), and is verified at 3x Performance. MUA2 does not offer it yet. Nothing about DLSS runs
-unless it is selected.
+All three games on Windows offer NVIDIA DLSS in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1, NVIDIA
+DLSS), on a GeForce RTX card that uses the rasterizer-ordered view (ROV) render path. DLSS upscales the 3D scene only,
+from the scene's own color and depth, camera motion vectors and a jitter the port adds; the HUD and menus keep drawing
+at the Render resolution. Gold Edition uses its own scene profile, `mua1-gold` (0167), and is verified at 3x
+Performance. MUA2 uses `mua2` (0168), whose scene has its own 1040x624 domain beside the 1280x720 framebuffer, and
+is verified at 3x Performance, with its shadow pass at 1x (0169) (see [fsr3.md](fsr3.md#games)).
+Nothing about DLSS runs unless it is selected.
 
 ## Pieces
 
@@ -32,7 +33,8 @@ unless it is selected.
 | Pre-scene targets | `patches/rexglue-sdk/0162-d3d12-dlss-pre-scene-target-scale.windows.patch` | Draws the surfaces drawn only before the scene at the scene's whole scale, `scene_edram_stretch` for their resolves, `Resolve`'s `copy_source`, the scale log lines and the GPU targets line's effective scales. |
 | Depth capture | `patches/rexglue-sdk/0163-d3d12-dlss-depth-capture.windows.patch` | Takes the DLSS depth once between depth clears, at the first resolve after draws wrote it (`scene::ScenePlanes`). |
 | Native pre-scene targets | `patches/rexglue-sdk/0164-d3d12-dlss-native-pre-scene-targets.windows.patch` | In Performance and Ultra Performance, draws the pre-scene targets the scene's draws sample at 1x, with the game's own depth bias. |
-| Scene profiles | `patches/rexglue-sdk/0166-d3d12-scene-upscaler-profiles.windows.patch`, `0167-d3d12-scene-upscaler-gold-profile.windows.patch` | `d3d12_scene_profile`: the game's rule for finding its scene surface (`mua1`, and `mua1-gold`, which also takes Gold Edition's 4x draws over the scene's memory into the scene's pass); none leaves DLSS and FSR 3.1 off. |
+| MUA2 shadow pass | `patches/rexglue-sdk/0169-d3d12-scene-upscaler-mua2-shadow-pass.windows.patch` | Draws MUA2's shadow pass (pitch 1040 1x, before the scene) at 1x in every mode, apart from the same surface after the scene; the GPU targets line lists a target once per scale, with its share of host pixels. |
+| Scene profiles | `patches/rexglue-sdk/0166-d3d12-scene-upscaler-profiles.windows.patch`, `0167-d3d12-scene-upscaler-gold-profile.windows.patch`, `0168-d3d12-scene-upscaler-mua2-profile.windows.patch` | `d3d12_scene_profile`: the game's rule for finding its scene surface (`mua1`; `mua1-gold`, which also takes Gold Edition's 4x draws over the scene's memory into the scene's pass; and `mua2`, which pins MUA2's scene surface and its own size); none leaves DLSS and FSR 3.1 off. |
 | App | `src/settings.cpp` (`ApplyDlss`) | When DLSS is the Upscaling choice, sets `d3d12_dlss_mode` from the Upscaling quality, `d3d12_scene_profile` from the game, and points `d3d12_dlss_bridge` and `d3d12_dlss_data_path` (`<game cache>\ngx`) at the bridge beside the program. Any other choice sets `d3d12_dlss_mode=off`. |
 | Launcher | `src/launcher.cpp`, `src/dlss_support.cpp` | Offers DLSS only when the effective card is NVIDIA, NVIDIA's requirements check (through the bridge) accepts it, and the card runs the ROV path. Otherwise an "NVIDIA DLSS: Unavailable: ..." row says why, and a saved DLSS choice becomes Off. |
 
@@ -50,6 +52,12 @@ least the scene's detail:
 | 3x, Performance | 3840x2160 (3x) | 1920x1080 (1.5x) | 1x for those only the scene samples, 2x for the others |
 | 2x, Performance | 2560x1440 (2x) | 1280x720 (1x) | 1x |
 | 2x, Quality; any DLAA; Original | the Render resolution | | the Render resolution (no smaller whole scale keeps the scene's detail) |
+
+That table is MUA1's and Gold Edition's, whose scene is the 1280x720 canvas. MUA2's scene is 1040x624, so its output
+is 1040x624 times the Render resolution (3120x1872 at 3x, which NVIDIA sizes the scene for) and the game's composite
+scales it into the 1280x720 framebuffer at the Render resolution (3840x2160), where the HUD and menus draw. Its shadow
+pass (0169) draws at 1x in every mode; its other targets stay at the Render resolution (see
+[fsr3.md](fsr3.md#games)).
 
 MUA1's GPU targets in log 249 (4x, Performance) and what 0162 does with them. The roles of the two pre-scene surfaces
 are read from their formats, sizes and draw order, not from their shaders:
@@ -179,7 +187,7 @@ next frame:
 
 ## Logs
 
-- `NVIDIA DLSS: <game>: <mode> requested | scene at NVIDIA's size -> output ... | scene profile <mua1 or mua1-gold>`
+- `NVIDIA DLSS: <game>: <mode> requested | scene at NVIDIA's size -> output ... | scene profile <mua1, mua1-gold or mua2>`
   (app) and the `Upscaling:` line.
 - `DLSS: scene surface found (scene profile <profile>): ...`.
 - `DLSS: Super Resolution <mode> | scene profile <profile> | output ... | NVIDIA recommends ... | scene input ... |
@@ -192,8 +200,11 @@ next frame:
 - `DLSS: active | scene color ... | depth ... | motion ... | output ... written to N of M color resolve(s), K depth
   resolve(s) stretched`, once.
 - Every 600 frames: frames with a camera matrix found and with it moving, history resets, and static draws agreeing.
+- MUA2: `DLSS: pitch 1040 1x MSAA before the scene (shadow maps and their filtered copies) at 1x - ...`, once the
+  checks pass, or `... back at 3x for the session - sampled after the scene`.
 - Every 10 seconds, `GPU targets`: each target's guest size and its host size at the scale its draws used, for example
-  `512x512 guest -> 1024x1024 host at 2x`; with the `Performance` line's FPS and GPU wait.
+  `512x512 guest -> 1024x1024 host at 2x`, once per scale, with its share of the guest and of the host pixels; with the
+  `Performance` line's FPS and GPU wait.
 
 What a correct run at 4x Performance shows:
 

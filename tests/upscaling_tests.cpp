@@ -343,6 +343,26 @@ void TestFsr3SceneSizes() {
   }
 }
 
+void TestSceneCanvas() {
+  std::printf("a game's own scene size: MUA 2's 1040x624 scene domain beside its 1280x720 framebuffer\n");
+  // Without one, the scene is the video mode's canvas, as for MUA 1 and Gold Edition at every aspect ratio.
+  for (const AspectRatioInfo& aspect : kAspectRatios) {
+    CHECK(Equal(SceneCanvas(aspect.aspect, {}), VideoModeSize(aspect.aspect)));
+  }
+  const WindowSize mua2 = SceneCanvas(AspectRatio::k16x9, {1040, 624});
+  CHECK(Equal(mua2, {1040, 624}));
+  // At 3x the scene's output is 3120x1872 and the framebuffer, HUD and menus 3840x2160.
+  const WindowSize output = {mua2.width * 3, mua2.height * 3};
+  CHECK(Equal(output, {3120, 1872}) && Equal(RenderSize(AspectRatio::k16x9, 3), {3840, 2160}));
+  // FSR 3.1's modes size the scene from that output, its width snapped to the 1040-wide scene's tile edges.
+  const WindowSize expected[] = {{3120, 1872}, {2080, 1248}, {1833, 1101}, {1560, 936}, {1040, 624}};
+  for (size_t i = 0; i < std::size(kUpscaleQualities); ++i) {
+    const WindowSize scene = Fsr3SceneSize(output, mua2.width, kUpscaleQualities[i].quality);
+    CHECK(Equal(scene, expected[i]));
+    CHECK(scene.width * 80 % mua2.width == 0);
+  }
+}
+
 void TestFsr3Sharpness() {
   std::printf("AMD FSR 3.1's sharpness: 0 to 100, 80 by default\n");
   CHECK(kDefaultFsr3Sharpness == 80);
@@ -382,6 +402,7 @@ int main() {
   TestFsr3Choice();
   TestFsr3Modes();
   TestFsr3SceneSizes();
+  TestSceneCanvas();
   TestFsr3Sharpness();
   TestFsr3Support();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);

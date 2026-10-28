@@ -592,16 +592,20 @@ void TestTemporalUpscalersPerGame(const Scratch& scratch) {
   reopened.SelectGame(mua::GameId::kMua1Gold);
   CHECK(reopened.Get("mua_fsr3_sharpness") == "60");
 
-  // A MUA 2 file naming FSR 3.1 or DLSS still loads; the game takes it as Off.
-  for (const char* temporal : {"fsr3", "dlss"}) {
+  // A MUA 2 file naming FSR 3.1 or DLSS, saved before MUA 2 had a scene profile, is now that upscaler, and the other
+  // games keep their own choices.
+  for (const auto& [temporal, parsed] : {std::pair{"fsr3", fsr3}, std::pair{"dlss", dlss}}) {
     std::ofstream(root / "mua2" / "game_settings.toml", std::ios::trunc)
         << "mua_upscaler = \"" << temporal << "\"\nmua_upscale_quality = \"performance\"\n";
     mua::GameSettings older;
     older.Capture(scratch.player, scratch.shipped);
     older.SelectGame(mua::GameId::kMua2);
     CHECK(older.Get("mua_upscaler") == temporal);
-    CHECK(mua::ParseUpscaler(older.Get("mua_upscaler"), mua::Game(mua::GameId::kMua2).upscalers) ==
-          mua::Upscaler::kOff);
+    CHECK(mua::ParseUpscaler(older.Get("mua_upscaler"), mua::Game(mua::GameId::kMua2).upscalers) == parsed);
+    older.SelectGame(mua::GameId::kMua1);
+    CHECK(older.Get("mua_upscaler") == "dlss");
+    older.SelectGame(mua::GameId::kMua1Gold);
+    CHECK(older.Get("mua_upscaler") == "fsr3");
   }
 
   rex::cvar::SetFlagByName("mua_upscaler", "off");

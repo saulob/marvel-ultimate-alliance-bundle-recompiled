@@ -278,26 +278,32 @@ std::vector<trg::Option> UpscaleQualityOptions(AspectRatio aspect, int render_sc
 }
 
 // NVIDIA's runtime picks the exact scene size of each mode.
-std::vector<trg::Option> DlssQualityOptions(AspectRatio aspect, int render_scale) {
+std::vector<trg::Option> DlssQualityOptions(AspectRatio aspect, int render_scale, WindowSize scene_size) {
   std::vector<trg::Option> options;
+  const WindowSize canvas = SceneCanvas(aspect, scene_size);
+  const int scale = render_scale < 1 ? 1 : render_scale;
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
     if (!OffersQuality(Upscaler::kDlss, info.quality)) {
       continue;
     }
-    const RenderSizes sizes = RenderSizesFor(aspect, render_scale, Upscaler::kFsr1, info.quality);
+    const WindowSize reduced = UpscaledBackBuffer(canvas, Upscaler::kFsr1, info.quality);
     std::string label = std::string(QualityLabel(Upscaler::kDlss, info.quality)) + " \xE2\x80\x94 3D scene ";
-    label += info.quality == UpscaleQuality::kNative ? SizeText(sizes.native) : "about " + SizeText(sizes.internal);
+    label += info.quality == UpscaleQuality::kNative
+                 ? SizeText({canvas.width * scale, canvas.height * scale})
+                 : "about " + SizeText({reduced.width * scale, reduced.height * scale});
     options.push_back({info.key, label});
   }
   return options;
 }
 
 // AMD's ratios give the exact scene size of each mode; the HUD and menus stay at the Render resolution.
-std::vector<trg::Option> Fsr3QualityOptions(AspectRatio aspect, int render_scale) {
+std::vector<trg::Option> Fsr3QualityOptions(AspectRatio aspect, int render_scale, WindowSize scene_size) {
   std::vector<trg::Option> options;
-  const WindowSize output = RenderSize(aspect, ClampRenderScale(render_scale));
+  const WindowSize canvas = SceneCanvas(aspect, scene_size);
+  const int scale = ClampRenderScale(render_scale);
+  const WindowSize output = {canvas.width * scale, canvas.height * scale};
   for (const UpscaleQualityInfo& info : kUpscaleQualities) {
-    const WindowSize scene = Fsr3SceneSize(output, CanvasWidth(aspect), info.quality);
+    const WindowSize scene = Fsr3SceneSize(output, canvas.width, info.quality);
     options.push_back({info.key, std::string(info.label) + " \xE2\x80\x94 3D scene " + SizeText(scene)});
   }
   return options;
@@ -1059,7 +1065,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
                  "resolution from motion and depth. Native keeps the full size and uses FSR 3.1 only to smooth edges. "
                  "Works on NVIDIA, AMD and Intel graphics; the HUD and menus always draw at the Render resolution.",
                  "mua_upscale_quality", "native",
-                 Fsr3QualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
+                 Fsr3QualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1),
+                                    Selected().game->scene_size));
         ui.SliderInt("Sharpness", "AMD FSR 3.1's own sharpening of the rebuilt 3D scene. 0 turns it off.",
                      "mua_fsr3_sharpness", kDefaultFsr3Sharpness, 0, 100);
       } else if (info.scene_only) {
@@ -1068,7 +1075,8 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
                  "resolution. DLAA keeps the full size and uses DLSS only to smooth edges. The HUD and menus always "
                  "draw at the Render resolution.",
                  "mua_upscale_quality", "native",
-                 DlssQualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1)));
+                 DlssQualityOptions(SelectedAspectRatio(), settings_.GetInt("resolution_scale", 1),
+                                    Selected().game->scene_size));
       } else if (info.lowers_resolution) {
         const std::string help = std::string("How far below the Render resolution the game draws before ") + info.name +
                                  " scales it to the window. Lower is faster and softer, including the menus and HUD.";

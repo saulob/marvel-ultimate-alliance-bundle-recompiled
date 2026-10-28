@@ -606,9 +606,15 @@ void ApplySceneProfile(const GameDefinition& game) {
   }
 }
 
-WindowSize TemporalOutputSize() {
-  return RenderSize(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)),
-                    std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str())));
+WindowSize TemporalOutputCanvas(const GameDefinition& game) {
+  return SceneCanvas(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)), game.scene_size);
+}
+
+// The 3D scene at the Render resolution, which DLSS and FSR 3.1 rebuild.
+WindowSize TemporalOutputSize(const GameDefinition& game) {
+  const WindowSize canvas = TemporalOutputCanvas(game);
+  const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
+  return {canvas.width * scale, canvas.height * scale};
 }
 
 }  // namespace
@@ -672,7 +678,7 @@ void ApplyDlss(const std::filesystem::path& cache_root) {
   rex::cvar::SetFlagByName("d3d12_dlss_mode", mode);
   REXLOG_INFO("NVIDIA DLSS: {}: {} requested | scene at NVIDIA's size -> output {} | scene profile {}; NVIDIA's "
               "runtime starts with the first 3D scene",
-              game.display_name, mode, SizeText(TemporalOutputSize()), game.scene_profile);
+              game.display_name, mode, SizeText(TemporalOutputSize(game)), game.scene_profile);
 }
 
 void ApplyFsr3() {
@@ -704,9 +710,8 @@ void ApplyFsr3() {
   rex::cvar::SetFlagByName("d3d12_fsr3_library", Utf8(library));
   rex::cvar::SetFlagByName("d3d12_fsr3_sharpness", std::to_string(sharpness));
   rex::cvar::SetFlagByName("d3d12_fsr3_mode", Fsr3ModeFor(quality));
-  const WindowSize output = TemporalOutputSize();
-  const WindowSize scene =
-      Fsr3SceneSize(output, CanvasWidth(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio))), quality);
+  const WindowSize output = TemporalOutputSize(game);
+  const WindowSize scene = Fsr3SceneSize(output, TemporalOutputCanvas(game).width, quality);
   REXLOG_INFO("AMD FSR 3.1: {}: {} requested | scene {} -> output {} | scene profile {} | sharpness {} (FidelityFX "
               "SDK {}, {}); it starts with the first 3D scene",
               game.display_name, Fsr3ModeFor(quality), SizeText(scene), SizeText(output), game.scene_profile,
@@ -726,7 +731,8 @@ void LogUpscaling() {
                             : upscaler == Upscaler::kFsr3  ? "the 3D scene at AMD's size (FSR 3.1: AMD FSR 3.1 line)"
                             : on                           ? SizeText(sizes.internal)
                                                            : "none";
-  const std::string output = info.scene_only ? "the 3D scene at " + SizeText(sizes.native)
+  // A temporal upscaler is only ever active for a game.
+  const std::string output = info.scene_only ? "the 3D scene at " + SizeText(TemporalOutputSize(*ActiveGame()))
                              : on            ? "presenter output (Presenter line)"
                                              : "none";
   REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | Upscaler input: {} | Upscaler output: {} | "

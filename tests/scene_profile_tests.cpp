@@ -1,9 +1,11 @@
 // NVIDIA DLSS and AMD FSR 3.1 per game: patches/rexglue-sdk/0166 runs the scene upscaler only for a game whose renderer
 // has a scene profile (d3d12_scene_profile), and MUA 1's profile keeps 0161's scene rule. 0167 gives Gold Edition its
-// own, which also takes its Direct3D's 4x MSAA draws over the scene's memory into the scene's pass. Both games offer
-// both upscalers; MUA 2 has no profile yet and keeps Off and FSR 1. The app passes the profile only with DLSS or
-// FSR 3.1 chosen, the launcher's choices follow each game's own list, each game keeps its own settings and runs in its
-// own program, and the three games share one copy of each upscaler runtime.
+// own, which also takes its Direct3D's 4x MSAA draws over the scene's memory into the scene's pass, and 0168 gives MUA 2
+// its own, which pins its 1040x624 scene surface; 0169 draws MUA 2's shadow pass at 1x. All three games offer both
+// upscalers. The app passes the profile only
+// with DLSS or FSR 3.1 chosen and sizes MUA 2's scene from its own size, the launcher's choices follow each game's own
+// list, each game keeps its own settings and runs in its own program, and the three games share one copy of each
+// upscaler runtime.
 // Run: mua_scene_profile_tests
 
 #include <cstdio>
@@ -53,6 +55,8 @@ const std::string kRoot = std::string(MUA_SRC_DIR) + "/../";
 const std::string kPatches = kRoot + "patches/rexglue-sdk/";
 constexpr char kProfilePatch[] = "0166-d3d12-scene-upscaler-profiles.windows.patch";
 constexpr char kGoldPatch[] = "0167-d3d12-scene-upscaler-gold-profile.windows.patch";
+constexpr char kMua2Patch[] = "0168-d3d12-scene-upscaler-mua2-profile.windows.patch";
+constexpr char kShadowPassPatch[] = "0169-d3d12-scene-upscaler-mua2-shadow-pass.windows.patch";
 constexpr char kScenePatch[] = "0161-d3d12-dlss-scene-upscaler.windows.patch";
 
 // The lines of a patch with the given prefix ('+' added, '-' removed), without the file headers.
@@ -72,17 +76,82 @@ const mua::GameDefinition& Gold() { return mua::Game(mua::GameId::kMua1Gold); }
 const mua::GameDefinition& Mua2() { return mua::Game(mua::GameId::kMua2); }
 
 void TestGames() {
-  std::printf("MUA 1 and Gold Edition have their own scene profiles and offer FSR 3.1 and DLSS; MUA 2 has neither\n");
-  CHECK(Mua1().scene_profile == "mua1" && Gold().scene_profile == "mua1-gold" && Mua2().scene_profile.empty());
-  for (const mua::GameDefinition* game : {&Mua1(), &Gold()}) {
+  std::printf("each game has its own scene profile and offers FSR 3.1 and DLSS\n");
+  CHECK(Mua1().scene_profile == "mua1" && Gold().scene_profile == "mua1-gold" && Mua2().scene_profile == "mua2");
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
     CHECK(game->upscalers == mua::kAllUpscalers);
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+    CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
+          (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
   }
-  CHECK(Mua2().upscalers == mua::kFsr1Upscalers);
-  // A saved temporal choice in MUA 2's settings is Off, so its program never sets a d3d12_* upscaler mode.
-  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, Mua2().upscalers) == mua::Upscaler::kOff);
-  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, Mua2().upscalers) == mua::Upscaler::kOff);
-  CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, Mua2().upscalers) ==
-        (mua::kUpscalerAvailable ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
+  // MUA 2's scene is 1040x624 beside its 1280x720 framebuffer; the others' scene is the video mode's.
+  CHECK(Mua2().scene_size.width == 1040 && Mua2().scene_size.height == 624);
+  CHECK(Mua1().scene_size.width == 0 && Mua1().scene_size.height == 0 && Gold().scene_size.width == 0 &&
+        Gold().scene_size.height == 0);
+}
+
+void TestMua2Patch() {
+  std::printf("0168: mua2 pins MUA 2's scene; mua1, mua1-gold, the backends and the write-back are unchanged\n");
+  const std::string patch = ReadFile(kPatches + kMua2Patch);
+  CHECK(!patch.empty());
+  const std::string added = Lines(patch, '+');
+  const std::string removed = Lines(patch, '-');
+  CHECK(Count(patch, "diff --git ") == 5);
+  for (const char* path : {"include/rex/graphics/d3d12/scene_layout.h", "include/rex/graphics/d3d12/scene_upscaler.h",
+                           "src/graphics/d3d12/scene_upscaler.cpp", "src/graphics/shaders/scene_motion.cs.hlsl",
+                           "src/graphics/shaders/bytecode/d3d12_5_1/scene_motion_cs.h"}) {
+    CHECK(Has(patch, std::string("diff --git a/") + path + " b/" + path + "\n"));
+  }
+  // The proven surface, scene size and behaviors, for mua2 alone.
+  CHECK(Has(added, "    SceneProfile{.key = \"mua2\",\n"));
+  CHECK(Has(added, ".pinned_surface = PinnedSceneSurface{0, 1034, kDepthFormatD24FS8, 1040, 1040, 624},"));
+  for (const char* field : {".reduce_pre_scene_targets = false,", ".depth_at_each_resolve = true,",
+                            ".depth_partitions = true,", ".camera_required = true}"}) {
+    CHECK(Count(added, field) == 1);
+  }
+  // mua1 and mua1-gold keep their values, written out by name.
+  CHECK(Has(removed, "SceneProfile{\"mua1\", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20, false},"));
+  CHECK(Has(removed, "SceneProfile{\"mua1-gold\", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20, true},"));
+  CHECK(Has(added, "    SceneProfile{.key = \"mua1\",\n"
+                   "                 .min_msaa_samples_log2 = kMsaa2xLog2,\n"
+                   "                 .color_formats = {kColorFormat8888, kColorFormat8888Gamma},\n"
+                   "                 .min_draws = 20},\n"));
+  CHECK(Has(added, "                 .min_draws = 20,\n                 .scene_memory_4x_draws = true},\n"));
+  // Every new field defaults to what 0161 to 0167 did.
+  for (const char* field :
+       {"  std::optional<PinnedSceneSurface> pinned_surface = std::nullopt;", "  bool reduce_pre_scene_targets = true;",
+        "  bool depth_at_each_resolve = false;", "  bool depth_partitions = false;", "  bool camera_required = false;"}) {
+    CHECK(Has(added, field));
+  }
+  // Only the pinned pitch is the scene's, for draws and resolves; the scene's own size sizes the output.
+  CHECK(Has(added, "if (surface_info.msaa_samples != surface_->msaa || !scene::IsScenePitch(*profile_, "
+                   "surface_info.surface_pitch)) {"));
+  CHECK(Has(added, "      !scene::IsScenePitch(*profile_, surface_info.surface_pitch)) {"));
+  CHECK(Has(added, "  guest_width_ = profile_->pinned_surface ? profile_->pinned_surface->width : video_width;"));
+  CHECK(Has(added, "  const uint32_t planes = planes_.Take(depth, profile_->depth_at_each_resolve);"));
+  CHECK(Has(added, "  const bool pre_scene_scale = REXCVAR_GET(d3d12_dlss_pre_scene_scale) && "
+                   "profile_->reduce_pre_scene_targets;"));
+  // The safety checks turn the upscaler off for the session through the existing structure mismatch.
+  CHECK(Has(added, "pass_matches = scene::PinnedOutputResolve(*pinned, rects).has_value();"));
+  CHECK(Has(added, "not its whole {}x{} surface"));
+  CHECK(Has(added, "no camera projection in the scene's draws for {} frames"));
+  CHECK(Has(added, "  const bool upscaled = !UpscalerFailed() && !scenes_finished_this_frame_ && pass_matches;"));
+  // Camera motion clamps depth only for depth partitions; the others read it unbounded, as before.
+  CHECK(Has(added, "  float2 depth_range;\n"));
+  CHECK(Has(added, "(clamp(depth[id.xy], depth_range.x, depth_range.y) - viewport_scale_offset_z.y) /"));
+  CHECK(Has(added, "      profile_->depth_partitions ? scene::MotionDepthRange(camera_projection_, depth_inverted_)\n"
+                   "                                 : std::array<float, 2>{-FLT_MAX, FLT_MAX};"));
+  CHECK(Has(patch, "+//   float2 depth_range;                // Offset:  112 Size:     8\n"));
+  // The write-back, FSR 3.1's alpha, jitter, the stretched copies and both backends' calls are 0161 to 0167's.
+  for (const char* kept : {"kOutputSceneAlpha", "CoveredByLater", "EncodeStaging(", "CopyStagingTo(", "EvaluateDlss(",
+                           "JitterForFrame", "StretchPreSceneResolve", "fsr3_->", "feature_."}) {
+    CHECK(!Has(removed, kept));
+  }
+  CHECK(Has(added, "mua2 (Marvel Ultimate Alliance 2); empty leaves both \"\n"));
+  CHECK(!Has(patch, "DEBUG_SAULO") && !Has(patch, "Frame Generation") && !Has(patch, "frame generation"));
 }
 
 void TestPatch() {
@@ -181,6 +250,37 @@ void TestGoldPatch() {
   CHECK(!Has(patch, "DEBUG_SAULO") && !Has(patch, "Frame Generation") && !Has(patch, "frame generation"));
 }
 
+void TestMua2ShadowPassPatch() {
+  std::printf("0169: mua2's shadow pass at 1x; its surface after the scene, mua1 and mua1-gold keep their scales\n");
+  const std::string patch = ReadFile(kPatches + kShadowPassPatch);
+  CHECK(!patch.empty());
+  const std::string added = Lines(patch, '+');
+  const std::string removed = Lines(patch, '-');
+  CHECK(Count(patch, "diff --git ") == 4);
+  for (const char* path : {"include/rex/graphics/d3d12/scene_layout.h", "include/rex/graphics/d3d12/scene_upscaler.h",
+                           "src/graphics/d3d12/scene_upscaler.cpp", "src/graphics/d3d12/command_processor.cpp"}) {
+    CHECK(Has(patch, std::string("diff --git a/") + path + " b/" + path + "\n"));
+  }
+  // One named surface for mua2, unset for the others.
+  CHECK(Count(added, ".native_pre_scene_key = PreSceneTargets::Key(1040, 0),") == 1);
+  CHECK(Has(added, "  uint32_t native_pre_scene_key = 0;"));
+  CHECK(Has(added, "  static constexpr uint32_t kAfterScene = 1u << 20;"));
+  CHECK(Has(added, "  return profile.native_pre_scene_key && after_scene ? key | PreSceneTargets::kAfterScene : key;"));
+  CHECK(Has(added, "    return key == profile.native_pre_scene_key && targets.IsNative(key);"));
+  CHECK(Has(added, "  return targets.IsReduced(key);"));
+  // Draws and resolves both take it; frames after one without the scene keep the full scale.
+  CHECK(Count(added, "scene::IsPreSceneReduced(*profile_, pre_scene_targets_, key)") == 2);
+  CHECK(Has(added, "profile_->native_pre_scene_key ? pre_scene_native_ && scene_drawn_"));
+  // The cvar still switches it off, and the scene, its write-back and both backends are untouched.
+  CHECK(Has(added, "  pre_scene_native_ = REXCVAR_GET(d3d12_dlss_pre_scene_native) &&"));
+  for (const char* kept : {"kOutputSceneAlpha", "CoveredByLater", "EncodeStaging(", "CopyStagingTo(", "EvaluateDlss(",
+                           "EvaluateFsr3(", "JitterForFrame", "IsSceneDraw(", "pinned_surface", "FinishScene("}) {
+    CHECK(!Has(removed, kept) && !Has(added, kept));
+  }
+  CHECK(Has(added, "% of host pixels"));
+  CHECK(!Has(patch, "DEBUG_SAULO") && !Has(patch, "Frame Generation") && !Has(patch, "frame generation"));
+}
+
 void TestApp() {
   std::printf("the app names the game's scene profile only with DLSS or FSR 3.1 chosen, and logs the game\n");
   const std::string settings = ReadFile(kRoot + "src/settings.cpp");
@@ -206,6 +306,10 @@ void TestApp() {
   CHECK(Has(settings, "NVIDIA DLSS: {}: {} requested | scene at NVIDIA's size -> output {} | scene profile {};"));
   // The upscaler of a game comes from its own list.
   CHECK(Has(settings, "return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers) : Upscaler::kOff;"));
+  // The temporal output is the game's scene at the Render resolution: MUA 2's 1040x624 times the scale.
+  CHECK(Has(settings, "return SceneCanvas(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)), game.scene_size);"));
+  CHECK(Count(settings, "TemporalOutputSize(game)") == 2);
+  CHECK(Has(settings, "Fsr3SceneSize(output, TemporalOutputCanvas(game).width, quality);"));
 }
 
 void TestLauncher() {
@@ -221,6 +325,11 @@ void TestLauncher() {
   const size_t end = launcher.find("ui.Choice(\"Upscaling\"", begin);
   CHECK(begin != std::string::npos && end != std::string::npos);
   CHECK(!Has(launcher.substr(begin, end - begin), "GameId"));
+  // The quality rows size the scene from the game's own scene size.
+  for (const char* rows : {"Fsr3QualityOptions(", "DlssQualityOptions("}) {
+    CHECK(Has(launcher, std::string(rows) + "SelectedAspectRatio(), settings_.GetInt(\"resolution_scale\", 1),\n"
+                                            "                                    Selected().game->scene_size));"));
+  }
   // FSR 1 stays for every game, and Ultra Performance stays FSR 3.1's own.
   for (const mua::GameDefinition& game : mua::AllGames()) {
     CHECK((game.upscalers & mua::UpscalerBit(mua::Upscaler::kOff)) != 0);
@@ -267,6 +376,8 @@ int main() {
   TestGames();
   TestPatch();
   TestGoldPatch();
+  TestMua2Patch();
+  TestMua2ShadowPassPatch();
   TestApp();
   TestLauncher();
   TestIsolation();

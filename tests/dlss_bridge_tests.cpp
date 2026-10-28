@@ -250,8 +250,9 @@ void TestApp() {
 void TestGames() {
   CHECK((mua::Game(mua::GameId::kMua1).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) != 0);
   CHECK((mua::Game(mua::GameId::kMua1Gold).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) != 0);
-  CHECK((mua::Game(mua::GameId::kMua2).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) == 0);
-  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, mua::Game(mua::GameId::kMua2).upscalers) == mua::Upscaler::kOff);
+  CHECK((mua::Game(mua::GameId::kMua2).upscalers & mua::UpscalerBit(mua::Upscaler::kDlss)) != 0);
+  CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, mua::Game(mua::GameId::kMua2).upscalers) ==
+        (mua::kUpscalerAvailable ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
 }
 
 void TestSdkSource() {

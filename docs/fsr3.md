@@ -1,14 +1,15 @@
-# AMD FSR 3.1 Super Resolution (MUA1 and Gold Edition)
+# AMD FSR 3.1 Super Resolution
 
-Status: **verified in MUA1 and Gold Edition.** At Render resolution 3x with Performance (1920x1080 to 3840x2160) on an
-RTX 4070 the picture is correct in both, at 66 to 71 FPS in MUA1's heavy gameplay and above 80 FPS in lighter sections;
-Gold Edition, through its own scene profile (see [Games](#games)), stays playable and stable with FSR 3.1 and DLSS.
+Status: **verified in all three games.** At Render resolution
+3x with Performance (1920x1080 to 3840x2160) on an RTX 4070 the picture is correct in MUA1 and Gold Edition, at 66 to
+71 FPS in MUA1's heavy gameplay and above 80 FPS in lighter sections; Gold Edition, through its own scene profile (see
+[Games](#games)), stays playable and stable with FSR 3.1 and DLSS. MUA2's picture is correct with both, with its
+shadow pass at 1x.
 
-MUA1 and Gold Edition on Windows offer AMD FSR 3.1 in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1,
-NVIDIA DLSS). It runs on any Direct3D 12 graphics card that uses the rasterizer-ordered view (ROV) render path (NVIDIA,
-AMD and Intel), with nothing to install: AMD's signed `amd_fidelityfx_dx12.dll` ships beside the programs. It is
-temporal upscaling only, with no frame generation. MUA2 does not offer it yet, and nothing about it runs unless it is
-selected.
+All three games on Windows offer AMD FSR 3.1 in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1, NVIDIA
+DLSS). It runs on any Direct3D 12 graphics card that uses the rasterizer-ordered view (ROV) render path (NVIDIA, AMD
+and Intel), with nothing to install: AMD's signed `amd_fidelityfx_dx12.dll` ships beside the programs. It is temporal
+upscaling only, with no frame generation, and nothing about it runs unless it is selected.
 
 FSR 3.1 is a second backend of the DLSS scene upscaler ([dlss.md](dlss.md)). It uses the same scene surface, scene-only
 color, depth (0163), camera motion vectors, jitter, scale domains, pre-scene targets (0162, 0164) and write-back to the
@@ -20,9 +21,9 @@ scene's resolves. Only the runtime it calls is different.
 |---|---|---|
 | Marvel Ultimate Alliance | `mua1` | Offered; verified |
 | Gold Edition | `mua1-gold` | Offered; verified |
-| Marvel Ultimate Alliance 2 | none | Not offered (Off and AMD FSR 1) |
+| Marvel Ultimate Alliance 2 | `mua2` | Offered; verified |
 
-`d3d12_scene_profile` (patches 0166 and 0167) says how the game's renderer draws its 3D scene. The app sets it from the
+`d3d12_scene_profile` (patches 0166 to 0169) says how the game's renderer draws its 3D scene. The app sets it from the
 game being run, only with FSR 3.1 or DLSS chosen; without one the GPU plugin leaves both off before loading anything.
 The profile holds the rule that finds the scene surface (`kSceneProfiles` in `scene_layout.h`): `mua1` is 0161's rule
 unchanged, 2x multisampling or more, `k_8_8_8_8` or `k_8_8_8_8_GAMMA`, and at least 20 depth-tested draws in a frame.
@@ -42,11 +43,35 @@ the texture the glow and composite read, clearing color and depth. Of those 4 sc
 covers its first, so the output goes into the 2 later ones (`written to 2 of 4`); depth comes from each tile's first.
 The title screen resolves each tile once (`2 of 2`).
 
-MUA2 has no profile yet. It is a later Alchemy renderer with its own pass chain (`SceneDepth`, `hdrScene`, quarter-size
-`SceneScaled` and `SceneBright` blur and bloom passes, `DigitalGradingLUT`, `Composite`, all created `r8g8b8a8`, and
-variance shadow maps), and its scene's multisampling, passes, resolves and depth need a frame capture
-(`REX_DEV_FRAME_LOG`). 28 of the 85 vertex shaders in its `loosefiles.pak` have the direct position transform, so the
-camera recovery has something to read there.
+MUA2 is a later Alchemy renderer with a scene of its own size. It draws the scene into one surface that fits the EDRAM
+at 2x multisampling: color at EDRAM base 0 (`k_8_8_8_8`), D24FS8 depth at base 1034 with 1 at the near plane, pitch
+1040, 1040x624 guest pixels. Its 1280x720 framebuffer is a separate pitch 880 surface that also starts at color base 0,
+into which its own composite scales the post-processed scene, in two resolves (screen 0..864 and 864..1280).
+`mua2` (0168) pins the scene surface: only draws and resolves at pitch 1040 are the scene's, so the composite, HUD and
+menus never are. The upscaler's output is the scene's own domain, 1040x624 times the Render resolution (3120x1872 at
+3x), beside the 3840x2160 framebuffer, and DLSS's and FSR 3.1's modes size the scene from it.
+
+Each gameplay frame draws a depth pre-pass, resolves the depth (read by particles and post-processing), draws the sky
+into the depth range below the scene's and the rest of the scene, then resolves the whole scene twice: first without
+clears, into a copy one more 3D draw of the scene samples, then, clearing color and depth, into the texture the bloom
+chain reads. The output goes into that last resolve (`written to 1 of 2`), which `mua2` requires to be the whole
+scene; the copy before it keeps the scene's input, stretched. Depth is taken at each resolve, so the upscaler gets the
+scene's final depth, sky included, and the scene's viewport is the one with the widest depth range, not the sky's. The
+camera is the scene's consensus projection, near 32 with an infinite far plane and depth 1 near, 0 far. The upscaler
+turns off for the session if
+the last resolve isn't the whole scene, the scene is resolved in two passes or its draws hold no camera projection for
+600 frames. The sky's depth, below the scene's range, lies past its infinite far plane; the motion vectors take such
+depths as infinitely far (`scene_motion`'s depth range, unbounded for the other games), so the sky moves with the
+camera's turn only.
+
+Before the scene, MUA2 draws two shadow maps into pitch 1040 1x surfaces (depth bases 1216 and 1632, 512x512 tiles
+with the lights' projections), resolves them to 1024x1024 and 1024x512 textures, and filters each into a `k_16_16`
+copy at color base 0 that the scene's draws sample. `mua2` (0169) draws that whole pass at 1x, the game's own size, in
+every mode, once the shadow textures are seen sampled only by the scene, and stretches their resolves to the textures'
+full size. The same pitch after the scene, a 1024x32 texture the composite reads, is kept apart and stays at the Render
+resolution, as do the 4x quads clearing the shadow maps and the scene, the bloom chain, the composite, HUD and menus.
+A shadow texture sampled after the scene puts the pass back at the Render resolution for the session, and a frame after
+one without the scene draws it at the Render resolution.
 
 ## Version
 
@@ -63,7 +88,7 @@ FidelityFX source or shaders are compiled here. The log names the upscaler versi
 | Headers | `patches/rexglue-sdk/0165` (`thirdparty/fidelityfx-api/`) | `ffx_api.h`, `ffx_api_types.h`, `ffx_upscale.h` and `dx12/ffx_api_dx12.h` of that release, unmodified, with AMD's MIT license. `mua_fsr3_tests` checks their SHA-256 against AMD's files. |
 | Runtime | 0165, `Fsr3Upscaler` | Loads the DLL (never unloaded), lists the upscaler versions for the device, queries AMD's render size and jitter phase count, and creates the context and records each upscale on the command list. |
 | Scene upscaler | 0165, `SceneUpscaler` | The backend choice: `d3d12_fsr3_mode` when `d3d12_dlss_mode` is off. DLSS's code is moved, not changed; the shared log lines carry the backend's name. |
-| Scene profiles | 0166, 0167, `scene_layout.h` | `d3d12_scene_profile`: the game's rule for finding its scene surface and, for `mua1-gold`, its D3D library's 4x draws over it; none leaves FSR 3.1 and DLSS off. |
+| Scene profiles | 0166, 0167, 0168, 0169, `scene_layout.h` | `d3d12_scene_profile`: the game's rule for finding its scene surface and, for `mua1-gold`, its D3D library's 4x draws over it, and for `mua2`, its pinned scene surface and size and its shadow pass at 1x; none leaves FSR 3.1 and DLSS off. |
 | App | `src/settings.cpp` (`ApplyFsr3`), `src/upscaling.h`, `src/fsr3_support.h`, `src/game_definition.cpp` | With FSR 3.1 chosen, sets `d3d12_fsr3_mode`, `d3d12_fsr3_sharpness`, `d3d12_fsr3_library` (the DLL beside the program) and `d3d12_scene_profile` (the game's `scene_profile`). Any other choice sets `d3d12_fsr3_mode=off`. |
 | Launcher | `src/launcher.cpp` | Offers AMD FSR 3.1 when the DLL is beside the program and the card runs the ROV path. Otherwise an "AMD FSR 3.1: Unavailable: ..." row says why, and a saved FSR 3.1 choice becomes Off. Shows the five modes with their exact scene sizes, and Sharpness. |
 | Release | `tools/package-release.ps1`, `src/update_bundle.h`, `packaging/licenses/THIRD-PARTY-LICENSES.txt` | The DLL is a release file, the updater installs it, and AMD's license ships with it. |
@@ -183,7 +208,7 @@ to DLSS or FSR 1:
   previous, without jitter | depth R32F 0 to 1 | color RGBA8 SDR, no auto exposure, pre-exposure 1 | output alpha the
   scene's own | sharpness 80`.
 - `FSR 3.1: off, no scene profile for this game ...` when the game has none (FSR 3.1 never starts).
-- `FSR 3.1: scale domains | ...` and the targets drawn before the scene, as with DLSS.
+- `FSR 3.1: scale domains | ...` and the targets drawn before the scene, as with DLSS; for MUA2, its shadow pass at 1x.
 - `FSR 3.1: upscaler context created | FidelityFX upscaler ... | max render ... -> output ... | depth 0 near, 1 far`.
 - `FSR 3.1: camera from the game's projection | near ... | far ... | vertical field of view ... degrees | depth ...`,
   once.
