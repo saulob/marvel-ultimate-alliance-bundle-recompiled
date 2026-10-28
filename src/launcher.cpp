@@ -735,7 +735,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
          [this](trg::Ui& ui) { PageGraphics(ui); }, {}, PageShown(LauncherPage::kGraphics)},
         {"Gameplay", "What the window shows while you play.", [this](trg::Ui& ui) { PageGameplay(ui); }, {},
          PageShown(LauncherPage::kGameplay)},
-        {"Cheats", "Optional gameplay modifiers for the Gold Edition.",
+        {"Cheats", "Optional gameplay modifiers for this game.",
          [](trg::Ui& ui) { PageCheats(ui); }, {}, PageShown(LauncherPage::kCheats)},
         {"Achievements", "Your achievements on this PC.", [this](trg::Ui& ui) { PageAchievements(ui); }, {},
          PageShown(LauncherPage::kAchievements)},

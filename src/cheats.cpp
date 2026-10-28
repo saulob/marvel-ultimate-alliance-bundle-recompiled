@@ -14,31 +14,88 @@
 
 #include "settings.h"
 
-#if defined(MUA_RUNTIME_MUA1_GOLD)
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)
+
+#if defined(MUA_RUNTIME_MUA1)
+#define MUA_CHEAT_SET_HEALTH sub_82146990
+#define MUA_CHEAT_SET_HEALTH_ORIGINAL __imp__sub_82146990
+#define MUA_CHEAT_GUEST_SET_HEALTH 0x82146990u
+#define MUA_CHEAT_SET_ENERGY sub_82138070
+#define MUA_CHEAT_SET_ENERGY_ORIGINAL __imp__sub_82138070
+#define MUA_CHEAT_GUEST_SET_ENERGY 0x82138070u
+#define MUA_CHEAT_RECALCULATE sub_82138748
+#define MUA_CHEAT_RECALCULATE_ORIGINAL __imp__sub_82138748
+#define MUA_CHEAT_GUEST_RECALCULATE 0x82138748u
+#define MUA_CHEAT_PARTY_TICK sub_8219F118
+#define MUA_CHEAT_PARTY_TICK_ORIGINAL __imp__sub_8219F118
+#define MUA_CHEAT_GUEST_PARTY_TICK 0x8219F118u
+#define MUA_CHEAT_SET_MONEY sub_821BF660
+#define MUA_CHEAT_SET_MONEY_ORIGINAL __imp__sub_821BF660
+#define MUA_CHEAT_GUEST_SET_MONEY 0x821BF660u
+#define MUA_CHEAT_PARTY_ACTOR_VTABLE 0x82004AA4u
+#define MUA_CHEAT_PARTY_STATS_VTABLE 0x82006C68u
+#define MUA_CHEAT_HERO_STATS_VTABLE 0x82007F04u
+#define MUA_CHEAT_ACTOR_STATS 848u
+#define MUA_CHEAT_MONEY_ARRAY_OFFSET 0x8410u
+#else
+#define MUA_CHEAT_SET_HEALTH sub_82157100
+#define MUA_CHEAT_SET_HEALTH_ORIGINAL __imp__sub_82157100
+#define MUA_CHEAT_GUEST_SET_HEALTH 0x82157100u
+#define MUA_CHEAT_SET_ENERGY sub_82148690
+#define MUA_CHEAT_SET_ENERGY_ORIGINAL __imp__sub_82148690
+#define MUA_CHEAT_GUEST_SET_ENERGY 0x82148690u
+#define MUA_CHEAT_RECALCULATE sub_82148C78
+#define MUA_CHEAT_RECALCULATE_ORIGINAL __imp__sub_82148C78
+#define MUA_CHEAT_GUEST_RECALCULATE 0x82148C78u
+#define MUA_CHEAT_PARTY_TICK sub_821AFD70
+#define MUA_CHEAT_PARTY_TICK_ORIGINAL __imp__sub_821AFD70
+#define MUA_CHEAT_GUEST_PARTY_TICK 0x821AFD70u
+#define MUA_CHEAT_SET_MONEY sub_821D0528
+#define MUA_CHEAT_SET_MONEY_ORIGINAL __imp__sub_821D0528
+#define MUA_CHEAT_GUEST_SET_MONEY 0x821D0528u
+#define MUA_CHEAT_PARTY_ACTOR_VTABLE 0x82004ADCu
+#define MUA_CHEAT_PARTY_STATS_VTABLE 0x82006C60u
+#define MUA_CHEAT_HERO_STATS_VTABLE 0x82007EFCu
+#define MUA_CHEAT_ACTOR_STATS 856u
+#define MUA_CHEAT_MONEY_ARRAY_OFFSET 0x88D0u
+#endif
 
 #define DEBUG_SAULO(...) REXLOG_INFO("DEBUG_SAULO " __VA_ARGS__)
 
-REX_EXTERN(sub_82157100);
-REX_EXTERN(sub_82148690);
-REX_EXTERN(sub_82148C78);
-REX_EXTERN(sub_821AFD70);
+REX_EXTERN(MUA_CHEAT_SET_HEALTH);
+REX_EXTERN(MUA_CHEAT_SET_HEALTH_ORIGINAL);
+REX_EXTERN(MUA_CHEAT_SET_ENERGY);
+REX_EXTERN(MUA_CHEAT_SET_ENERGY_ORIGINAL);
+REX_EXTERN(MUA_CHEAT_RECALCULATE);
+REX_EXTERN(MUA_CHEAT_RECALCULATE_ORIGINAL);
+REX_EXTERN(MUA_CHEAT_PARTY_TICK);
+REX_EXTERN(MUA_CHEAT_PARTY_TICK_ORIGINAL);
+REX_EXTERN(MUA_CHEAT_SET_MONEY);
+REX_EXTERN(MUA_CHEAT_SET_MONEY_ORIGINAL);
 
 namespace {
 
 namespace cheats = mua::cheats;
 
+constexpr bool kGoldRuntime =
+#if defined(MUA_RUNTIME_MUA1_GOLD)
+    true;
+#else
+    false;
+#endif
+
 constexpr uint32_t kHealth = 0x264;
 constexpr uint32_t kHealthMax = 0x26C;
 constexpr uint32_t kEnergy = 0x270;
 constexpr uint32_t kEnergyMax = 0x288;
-constexpr uint32_t kActorStats = 856;
+constexpr uint32_t kActorStats = MUA_CHEAT_ACTOR_STATS;
 constexpr uint32_t kStatsHero = 288;
 
-constexpr uint32_t kPartyActorVtable = 0x82004ADC;
-constexpr uint32_t kPartyStatsVtable = 0x82006C60;
-constexpr uint32_t kHeroStatsVtable = 0x82007EFC;
+constexpr uint32_t kPartyActorVtable = MUA_CHEAT_PARTY_ACTOR_VTABLE;
+constexpr uint32_t kPartyStatsVtable = MUA_CHEAT_PARTY_STATS_VTABLE;
+constexpr uint32_t kHeroStatsVtable = MUA_CHEAT_HERO_STATS_VTABLE;
 
-constexpr uint32_t kMoneyArrayOffset = 0x88D0;
+constexpr uint32_t kMoneyArrayOffset = MUA_CHEAT_MONEY_ARRAY_OFFSET;
 constexpr uint32_t kPlayerSlots = 4;
 
 // The game kills/switches party members with a large negative SetHealth value rather than ordinary damage.
@@ -275,7 +332,8 @@ const char* SavedName(bool value) { return value ? "on" : "off"; }
 void LogFinalSummary();
 
 void LogSummary() {
-  DEBUG_SAULO("CHEAT SUMMARY frames={} accepted_heroes={} rejected_nonheroes={} health_blocks={} "              "health_lifecycle_passes={} health_refills={} energy_blocks={} energy_refills={} "
+  DEBUG_SAULO("CHEAT SUMMARY frames={} accepted_heroes={} rejected_nonheroes={} health_blocks={} "
+              "health_lifecycle_passes={} health_refills={} energy_blocks={} energy_refills={} "
               "stale_actor_drops={}",
       g_frame, g_counters.accepted_heroes, g_counters.rejected_nonheroes, g_counters.health_blocks,
       g_counters.health_lifecycle_passes, g_counters.health_refills, g_counters.energy_blocks,
@@ -304,19 +362,24 @@ void LogInit() {
   const std::string_view game_key = game ? game->key : std::string_view("none");
   const bool health_saved = SavedValue(cheats::Cheat::Health);
   const bool energy_saved = SavedValue(cheats::Cheat::Energy);
-  DEBUG_SAULO("CHEATS INIT runtime={} compile_gold=1 health_cvar={} energy_cvar={} "
+  DEBUG_SAULO("CHEATS INIT runtime={} compile_gold={} health_cvar={} energy_cvar={} "
               "health_override={} energy_override={} health_effective={} energy_effective={} "
-              "party_actor_vtable=0x{:08X} stats_vtable=0x{:08X} hero_stats_vtable=0x{:08X}",
-      game_key, SavedName(health_saved), SavedName(energy_saved),
+              "party_actor_vtable=0x{:08X} stats_vtable=0x{:08X} hero_stats_vtable=0x{:08X} "
+              "actor_stats=0x{:03X} money_array=0x{:04X}",
+      game_key, int(kGoldRuntime), SavedName(health_saved), SavedName(energy_saved),
       OverrideName(g_session.Override(cheats::Cheat::Health)),
       OverrideName(g_session.Override(cheats::Cheat::Energy)),
       g_session.Effective(cheats::Cheat::Health, health_saved),
       g_session.Effective(cheats::Cheat::Energy, energy_saved), kPartyActorVtable, kPartyStatsVtable,
-      kHeroStatsVtable);
-  DEBUG_SAULO("CHEATS HOOKS health_set=0x82157100 host=0x{:016X} energy_set=0x82148690 host=0x{:016X} "
-              "recalculate=0x82148C78 host=0x{:016X} party_tick=0x821AFD70 host=0x{:016X}",
-      reinterpret_cast<uintptr_t>(&sub_82157100), reinterpret_cast<uintptr_t>(&sub_82148690),
-      reinterpret_cast<uintptr_t>(&sub_82148C78), reinterpret_cast<uintptr_t>(&sub_821AFD70));
+      kHeroStatsVtable, kActorStats, kMoneyArrayOffset);
+  DEBUG_SAULO("CHEATS HOOKS health_set=0x{:08X} host=0x{:016X} energy_set=0x{:08X} host=0x{:016X} "
+              "recalculate=0x{:08X} host=0x{:016X} party_tick=0x{:08X} host=0x{:016X} "
+              "set_money=0x{:08X} host=0x{:016X}",
+      MUA_CHEAT_GUEST_SET_HEALTH, reinterpret_cast<uintptr_t>(&MUA_CHEAT_SET_HEALTH),
+      MUA_CHEAT_GUEST_SET_ENERGY, reinterpret_cast<uintptr_t>(&MUA_CHEAT_SET_ENERGY),
+      MUA_CHEAT_GUEST_RECALCULATE, reinterpret_cast<uintptr_t>(&MUA_CHEAT_RECALCULATE),
+      MUA_CHEAT_GUEST_PARTY_TICK, reinterpret_cast<uintptr_t>(&MUA_CHEAT_PARTY_TICK),
+      MUA_CHEAT_GUEST_SET_MONEY, reinterpret_cast<uintptr_t>(&MUA_CHEAT_SET_MONEY));
   if (g_session.Effective(cheats::Cheat::Health, health_saved)) {
     g_health_refill_pending.store(true, std::memory_order_relaxed);
   }
@@ -377,8 +440,7 @@ void CycleMultiplierForSession() { g_session.CycleMultiplier(SavedMultiplier());
 }  // namespace mua::cheats
 
 // CActorHero::SetHealth(float). Writes the current value at +0x264 and clamps to +0x26C.
-REX_EXTERN(__imp__sub_82157100);
-REX_HOOK_RAW(sub_82157100) {
+REX_HOOK_RAW(MUA_CHEAT_SET_HEALTH) {
   const uint32_t actor = ctx.r3.u32;
   const float requested = static_cast<float>(ctx.f1.f64);
   const HeroInfo info = InspectHero(base, actor);
@@ -406,12 +468,11 @@ REX_HOOK_RAW(sub_82157100) {
       }
     }
   }
-  __imp__sub_82157100(ctx, base);
+  MUA_CHEAT_SET_HEALTH_ORIGINAL(ctx, base);
 }
 
 // CActorHero::SetEnergy(float). Writes the current value at +0x270 and clamps to +0x288.
-REX_EXTERN(__imp__sub_82148690);
-REX_HOOK_RAW(sub_82148690) {
+REX_HOOK_RAW(MUA_CHEAT_SET_ENERGY) {
   const uint32_t actor = ctx.r3.u32;
   const float requested = static_cast<float>(ctx.f1.f64);
   const HeroInfo info = InspectHero(base, actor);
@@ -435,30 +496,27 @@ REX_HOOK_RAW(sub_82148690) {
           actor, previous, requested, max, max, ctx.lr);
     }
   }
-  __imp__sub_82148690(ctx, base);
+  MUA_CHEAT_SET_ENERGY_ORIGINAL(ctx, base);
 }
 
 // Recalculates max health/energy from the character stats; also registers party heroes at spawn.
-REX_EXTERN(__imp__sub_82148C78);
-REX_HOOK_RAW(sub_82148C78) {
+REX_HOOK_RAW(MUA_CHEAT_RECALCULATE) {
   if (IsPartyHero(base, ctx.r3.u32)) {
     RememberHero(base, ctx.r3.u32);
   }
-  __imp__sub_82148C78(ctx, base);
+  MUA_CHEAT_RECALCULATE_ORIGINAL(ctx, base);
 }
 
 // The party tick called from the world update. Refill once when a cheat is switched on.
-REX_EXTERN(__imp__sub_821AFD70);
-REX_HOOK_RAW(sub_821AFD70) {
+REX_HOOK_RAW(MUA_CHEAT_PARTY_TICK) {
   TickFrame();
-  __imp__sub_821AFD70(ctx, base);
+  MUA_CHEAT_PARTY_TICK_ORIGINAL(ctx, base);
   RefillPending(base);
 }
 
-// CInventorySystem::SetMoney(player, value). The 100,000 Gold Coins cheat reads the per-player balance and adds
+// CInventorySystem::SetMoney(player, value). The built-in 100,000 coin cheat reads the per-player balance and adds
 // 100000 through this setter, so every award arrives here as a positive balance delta.
-REX_EXTERN(__imp__sub_821D0528);
-REX_HOOK_RAW(sub_821D0528) {
+REX_HOOK_RAW(MUA_CHEAT_SET_MONEY) {
   const cheats::CoinMultiplier multiplier = cheats::Multiplier();
   const uint32_t player = ctx.r4.u32;
   if (static_cast<uint32_t>(multiplier) > 1 && ctx.r3.u32 != 0 && player < kPlayerSlots) {
@@ -473,7 +531,7 @@ REX_HOOK_RAW(sub_821D0528) {
                        : uint32_t(total);
     }
   }
-  __imp__sub_821D0528(ctx, base);
+  MUA_CHEAT_SET_MONEY_ORIGINAL(ctx, base);
 }
 
 #else
@@ -490,4 +548,4 @@ void CycleMultiplierForSession() {}
 
 }  // namespace mua::cheats
 
-#endif  // MUA_RUNTIME_MUA1_GOLD
+#endif  // MUA_RUNTIME_MUA1 || MUA_RUNTIME_MUA1_GOLD

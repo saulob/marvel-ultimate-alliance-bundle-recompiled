@@ -15,7 +15,7 @@ constexpr PageMask kPlayablePages = kInstallPages | PageBit(LauncherPage::kDispl
                                     PageBit(LauncherPage::kGraphics) | PageBit(LauncherPage::kGameplay) |
                                     PageBit(LauncherPage::kAchievements) | PageBit(LauncherPage::kControls);
 
-constexpr PageMask kGoldPages = kPlayablePages | PageBit(LauncherPage::kCheats);
+constexpr PageMask kCheatPages = kPlayablePages | PageBit(LauncherPage::kCheats);
 
 constexpr std::array kGames = {
     GameDefinition{
@@ -28,7 +28,7 @@ constexpr std::array kGames = {
         .profile_id = "mua-x360",
         .legacy_folder = "",
         .runtime_supported = true,
-        .pages = kPlayablePages,
+        .pages = kCheatPages,
         .program = "marvel_ultimate_alliance_mua1",
         .data_folder = "mua1",
         .frame_policy = kMua1FramePolicy,
@@ -45,7 +45,7 @@ constexpr std::array kGames = {
         .profile_id = "mua-gold-x360",
         .legacy_folder = "extracted",
         .runtime_supported = true,
-        .pages = kGoldPages,
+        .pages = kCheatPages,
         .program = "marvel_ultimate_alliance_mua1_gold",
         .data_folder = "mua1_gold",
         .frame_policy = kMua1FramePolicy,

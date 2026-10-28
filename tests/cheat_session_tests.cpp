@@ -147,9 +147,9 @@ void TestLauncherPage() {
   CHECK(Has(definition, "kPlay, kDisplay, kGraphics, kGameplay, kCheats, kAchievements, kControls, kAbout"));
 
   const std::string games = ReadSource("game_definition.cpp");
-  CHECK(Has(games, "kGoldPages = kPlayablePages | PageBit(LauncherPage::kCheats)"));
-  CHECK(Count(games, ".pages = kGoldPages") == 1);
-  CHECK(Count(games, ".pages = kPlayablePages") == 2);
+  CHECK(Has(games, "kCheatPages = kPlayablePages | PageBit(LauncherPage::kCheats)"));
+  CHECK(Count(games, ".pages = kCheatPages") == 2);
+  CHECK(Count(games, ".pages = kPlayablePages") == 1);
 
   const std::string launcher = ReadSource("launcher.cpp");
   const size_t gameplay = launcher.find("{\"Gameplay\"");
@@ -165,6 +165,8 @@ void TestLauncherPage() {
   CHECK(Has(launcher, "\"mua_cheat_energy\""));
   CHECK(Has(launcher, "\"mua_cheat_coin_multiplier\""));
   CHECK(Has(launcher, "{{\"0\", \"Off\"}, {\"2\", \"2x\"}, {\"5\", \"5x\"}, {\"10\", \"10x\"}}"));
+  CHECK(!Has(launcher, "Movement Speed"));
+  CHECK(!Has(ReadSource("cheat_menu.cpp"), "Movement Speed"));
 }
 
 void TestSettingsFlow() {
@@ -180,6 +182,16 @@ void TestSettingsFlow() {
   CHECK(Has(header, "REXCVAR_DECLARE(bool, mua_cheat_health)"));
   CHECK(Has(header, "REXCVAR_DECLARE(bool, mua_cheat_energy)"));
   CHECK(Has(header, "REXCVAR_DECLARE(int32_t, mua_cheat_coin_multiplier)"));
+
+  // Game-scoped keys are stored per executable, so MUA1 and Gold Edition keep their own cheat settings.
+  const size_t scoped = settings.find("kGameScopedKeys[]");
+  const size_t scoped_end = settings.find("};", scoped);
+  CHECK(scoped != std::string::npos);
+  CHECK(scoped_end != std::string::npos);
+  const std::string scoped_block = settings.substr(scoped, scoped_end - scoped);
+  CHECK(Has(scoped_block, "\"mua_cheat_health\""));
+  CHECK(Has(scoped_block, "\"mua_cheat_energy\""));
+  CHECK(Has(scoped_block, "\"mua_cheat_coin_multiplier\""));
 }
 
 void TestRuntimeSources() {
@@ -203,9 +215,7 @@ void TestRuntimeSources() {
   CHECK(!Has(cheats_source, "sub_821B19B0"));
   CHECK(!Has(cheats_source, "sub_821A8778"));
   CHECK(!Has(cheats_source, "sub_821BAE40"));
-  CHECK(Has(cheats_source, "kPartyActorVtable = 0x82004ADC"));
-  CHECK(Has(cheats_source, "kPartyStatsVtable = 0x82006C60"));
-  CHECK(Has(cheats_source, "kHeroStatsVtable = 0x82007EFC"));
+  CHECK(Has(cheats_source, "#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)"));
   CHECK(Has(cheats_source, "kLifecycleHealthSentinel"));
   CHECK(Has(cheats_source, "ScaleAward"));
   CHECK(Has(cheats_source, "kMoneyArrayOffset"));
@@ -213,6 +223,7 @@ void TestRuntimeSources() {
   CHECK(Has(cheats_source, "MUA_RUNTIME_MUA1_GOLD"));
   CHECK(Has(cheats_source, "DEBUG_SAULO"));
   CHECK(Has(cheats_source, "CHEATS INIT"));
+  CHECK(Has(cheats_source, "CHEATS HOOKS"));
   CHECK(Has(cheats_source, "CHEAT STATE"));
   CHECK(Has(cheats_source, "HERO ACCEPTED"));
   CHECK(Has(cheats_source, "HERO REJECTED"));
@@ -223,6 +234,48 @@ void TestRuntimeSources() {
   CHECK(Has(cheats_source, "ENERGY REFILL"));
   CHECK(Has(cheats_source, "CHEAT SUMMARY"));
   CHECK(Has(cheats_source, "FINAL CHEAT SUMMARY"));
+}
+
+// Each executable is compiled with one guest map, so its hooks and structure offsets must be selected at compile
+// time. A copy of one game's addresses in the other game's block would silently write the wrong fields.
+void TestGameIsolation() {
+  const std::string source = ReadSource("cheats.cpp");
+
+  CHECK(Count(source, "#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)") == 1);
+  CHECK(Has(source, "#elif defined(MUA_RUNTIME_MUA1)") == false);
+
+  struct Pair {
+    const char* mua1;
+    const char* gold;
+  };
+  const Pair defaults[] = {
+      {"#define MUA_CHEAT_SET_HEALTH sub_82146990", "#define MUA_CHEAT_SET_HEALTH sub_82157100"},
+      {"#define MUA_CHEAT_SET_ENERGY sub_82138070", "#define MUA_CHEAT_SET_ENERGY sub_82148690"},
+      {"#define MUA_CHEAT_RECALCULATE sub_82138748", "#define MUA_CHEAT_RECALCULATE sub_82148C78"},
+      {"#define MUA_CHEAT_PARTY_TICK sub_8219F118", "#define MUA_CHEAT_PARTY_TICK sub_821AFD70"},
+      {"#define MUA_CHEAT_SET_MONEY sub_821BF660", "#define MUA_CHEAT_SET_MONEY sub_821D0528"},
+      {"#define MUA_CHEAT_PARTY_ACTOR_VTABLE 0x82004AA4u",
+       "#define MUA_CHEAT_PARTY_ACTOR_VTABLE 0x82004ADCu"},
+      {"#define MUA_CHEAT_PARTY_STATS_VTABLE 0x82006C68u",
+       "#define MUA_CHEAT_PARTY_STATS_VTABLE 0x82006C60u"},
+      {"#define MUA_CHEAT_HERO_STATS_VTABLE 0x82007F04u",
+       "#define MUA_CHEAT_HERO_STATS_VTABLE 0x82007EFCu"},
+      {"#define MUA_CHEAT_ACTOR_STATS 848u", "#define MUA_CHEAT_ACTOR_STATS 856u"},
+      {"#define MUA_CHEAT_MONEY_ARRAY_OFFSET 0x8410u", "#define MUA_CHEAT_MONEY_ARRAY_OFFSET 0x88D0u"},
+  };
+  for (const Pair& pair : defaults) {
+    CHECK(Count(source, pair.mua1) == 1);
+    CHECK(Count(source, pair.gold) == 1);
+  }
+
+  // Both executables must define the same macro set, and the shared body must select one of the two.
+  for (const char* name : {"MUA_CHEAT_SET_HEALTH ", "MUA_CHEAT_SET_ENERGY ", "MUA_CHEAT_RECALCULATE ",
+                           "MUA_CHEAT_PARTY_TICK ", "MUA_CHEAT_SET_MONEY "}) {
+    const std::string define = std::string("#define ") + name;
+    CHECK(Count(source, define.c_str()) == 2);
+  }
+  CHECK(Count(source, "#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)") == 1);
+  CHECK(Has(source, "#endif  // MUA_RUNTIME_MUA1 || MUA_RUNTIME_MUA1_GOLD"));
 }
 
 }  // namespace
@@ -236,6 +289,7 @@ int main() {
   TestLauncherPage();
   TestSettingsFlow();
   TestRuntimeSources();
+  TestGameIsolation();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

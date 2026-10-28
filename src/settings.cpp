@@ -99,11 +99,11 @@ REXCVAR_DEFINE_BOOL(mua_launcher_maximized, false, "Marvel Ultimate Alliance",
 REXCVAR_DEFINE_BOOL(mua_launcher_fullscreen, false, "Marvel Ultimate Alliance",
                     "Launcher was left in its own F11 fullscreen, written by the launcher");
 REXCVAR_DEFINE_BOOL(mua_cheat_health, false, "Marvel Ultimate Alliance",
-                    "Infinite health for every party hero (Gold Edition)");
+                    "Infinite health for every party hero");
 REXCVAR_DEFINE_BOOL(mua_cheat_energy, false, "Marvel Ultimate Alliance",
-                    "Infinite energy for every party hero (Gold Edition)");
+                    "Infinite energy for every party hero");
 REXCVAR_DEFINE_INT32(mua_cheat_coin_multiplier, 0, "Marvel Ultimate Alliance",
-                     "Coin awards multiplier: 0 (off), 2, 5 or 10 (Gold Edition)")
+                     "Coin awards multiplier: 0 (off), 2, 5 or 10")
     .range(0, 10);
 
 namespace mua {
