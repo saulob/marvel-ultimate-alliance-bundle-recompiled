@@ -316,14 +316,14 @@ void TestPackagedPrograms() {
 }
 
 void TestPlayablePages() {
-  std::printf("every game offers the shared pages and only the MUA1 titles offer Cheats\n");
+  std::printf("every game offers the shared pages and the MUA titles offer Cheats\n");
   for (const GameDefinition& game : AllGames()) {
     for (const LauncherPage page : {LauncherPage::kPlay, LauncherPage::kDisplay, LauncherPage::kGraphics,
                                     LauncherPage::kGameplay, LauncherPage::kAchievements, LauncherPage::kControls,
                                     LauncherPage::kAbout}) {
       CHECK(game.HasPage(page));
     }
-    const bool mua1_family = game.id == GameId::kMua1 || game.id == GameId::kMua1Gold;
+    const bool mua1_family = game.id == GameId::kMua1 || game.id == GameId::kMua1Gold || game.id == GameId::kMua2;
     CHECK(game.HasPage(LauncherPage::kCheats) == mua1_family);
   }
   CHECK(LauncherPage::kGameplay < LauncherPage::kCheats);

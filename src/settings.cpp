@@ -105,6 +105,9 @@ REXCVAR_DEFINE_BOOL(mua_cheat_energy, false, "Marvel Ultimate Alliance",
 REXCVAR_DEFINE_INT32(mua_cheat_coin_multiplier, 0, "Marvel Ultimate Alliance",
                      "Coin awards multiplier: 0 (off), 2, 5 or 10")
     .range(0, 10);
+REXCVAR_DEFINE_INT32(mua_turbo_attack, 0, "Marvel Ultimate Alliance",
+                     "Repeats the basic attack while the attack button stays held: 0 (off), 1 (on)")
+    .range(0, 4);
 
 namespace mua {
 namespace {
@@ -140,6 +143,7 @@ std::vector<std::string> GameSettingKeys() {
       "mua_cheat_health",
       "mua_cheat_energy",
       "mua_cheat_coin_multiplier",
+      "mua_turbo_attack",
   };
   for (const KeyboardAction& action : kKeyboardActions) {
     keys.emplace_back(action.key);
@@ -152,9 +156,10 @@ std::vector<std::string> GameSettingKeys() {
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
-constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro",  "mua_frame_rate",      "mua_aspect_ratio",
-                                                 "mua_upscaler",    "mua_upscale_quality", "mua_fsr3_sharpness",
-                                                 "mua_cheat_health", "mua_cheat_energy",  "mua_cheat_coin_multiplier"};
+constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro",   "mua_frame_rate",      "mua_aspect_ratio",
+                                                 "mua_upscaler",     "mua_upscale_quality", "mua_fsr3_sharpness",
+                                                 "mua_cheat_health", "mua_cheat_energy",    "mua_cheat_coin_multiplier",
+                                                 "mua_turbo_attack"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);

@@ -736,7 +736,7 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
         {"Gameplay", "What the window shows while you play.", [this](trg::Ui& ui) { PageGameplay(ui); }, {},
          PageShown(LauncherPage::kGameplay)},
         {"Cheats", "Optional gameplay modifiers for this game.",
-         [](trg::Ui& ui) { PageCheats(ui); }, {}, PageShown(LauncherPage::kCheats)},
+         [this](trg::Ui& ui) { PageCheats(ui); }, {}, PageShown(LauncherPage::kCheats)},
         {"Achievements", "Your achievements on this PC.", [this](trg::Ui& ui) { PageAchievements(ui); }, {},
          PageShown(LauncherPage::kAchievements)},
         {"Controls", "Controller and keyboard.", [](trg::Ui& ui) { PageControls(ui); }, {},
@@ -1171,15 +1171,23 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     return host_render_targets_;
   }
 
-  static void PageCheats(trg::Ui& ui) {
+  void PageCheats(trg::Ui& ui) {
+    const GameId game = Selected().game->id;
     ui.Help("Press F10 while playing to open the Cheats menu. Changes made there apply only to the current session.");
     ui.Spacer(12);
+    ui.Heading("PLAYER");
     ui.Toggle("Infinite Health", "All four party heroes stay at their own maximum health", "mua_cheat_health", false,
               "Off", "On");
     ui.Toggle("Infinite Energy", "All four party heroes stay at their own maximum energy", "mua_cheat_energy", false,
               "Off", "On");
-    ui.Choice("Coin Multiplier", "Multiply the coins the game awards", "mua_cheat_coin_multiplier", "0",
-              {{"0", "Off"}, {"2", "2x"}, {"5", "5x"}, {"10", "10x"}}, 4);
+    if (game != GameId::kMua2) {
+      ui.Heading("ITEMS");
+      ui.Choice("Coin Multiplier", "Multiply the coins the game awards", "mua_cheat_coin_multiplier", "0",
+                {{"0", "Off"}, {"2", "2x"}, {"5", "5x"}, {"10", "10x"}}, 4);
+    }
+    ui.Heading("COMBAT");
+    ui.Choice("Turbo Attack", "Repeats the basic attack while the attack button stays held", "mua_turbo_attack", "0",
+              {{"0", "Off"}, {"1", "On"}}, 2);
   }
 
   void PageAchievements(trg::Ui& ui) {

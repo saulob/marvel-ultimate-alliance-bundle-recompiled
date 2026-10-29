@@ -10,6 +10,7 @@
 #include <rex/ui/window.h>
 
 #include "cheats.h"
+#include "frame_counter.h"
 #include "launcher.h"
 #include "modal_dialog.h"
 
@@ -21,12 +22,22 @@ namespace {
 // Above the ImGui drawer (64), so F10 is consumed before the drawer or the game see it.
 constexpr size_t kInputZOrder = 1000;
 
-const ImVec4 kAccent(0.36f, 0.88f, 0.44f, 1.0f);
 const ImVec4 kPanel(0.04f, 0.08f, 0.07f, 0.92f);
-const ImVec4 kRowFocus(0.09f, 0.36f, 0.22f, 0.95f);
 const ImVec4 kDim(0.62f, 0.68f, 0.66f, 1.0f);
 
-enum class RowKind { Health, Energy, CoinMultiplier };
+// The menu follows the running game's overlay accent, the same one the frame counter's border uses.
+ImVec4 AccentColor() {
+  const uint32_t rgb = FrameCounterAccent(ActiveGame());
+  return ImVec4(((rgb >> 16) & 0xFF) / 255.0f, ((rgb >> 8) & 0xFF) / 255.0f, (rgb & 0xFF) / 255.0f, 1.0f);
+}
+
+// The selected row keeps the accent but dark enough to read white text on.
+ImVec4 RowFocusColor() {
+  const ImVec4 accent = AccentColor();
+  return ImVec4(accent.x * 0.35f, accent.y * 0.35f, accent.z * 0.35f, 0.95f);
+}
+
+enum class RowKind { Health, Energy, CoinMultiplier, TurboAttack };
 
 struct Row {
   RowKind kind;
@@ -36,7 +47,10 @@ struct Row {
 constexpr Row kRows[] = {
     {RowKind::Health, "PLAYER", "Infinite Health"},
     {RowKind::Energy, nullptr, "Infinite Energy"},
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)
     {RowKind::CoinMultiplier, "ITEMS", "Coin Multiplier"},
+#endif
+    {RowKind::TurboAttack, "COMBAT", "Turbo Attack"},
 };
 
 void Activate(RowKind kind) {
@@ -49,6 +63,9 @@ void Activate(RowKind kind) {
       break;
     case RowKind::CoinMultiplier:
       cheats::CycleMultiplierForSession();
+      break;
+    case RowKind::TurboAttack:
+      cheats::ToggleTurboForSession();
       break;
   }
 }
@@ -71,6 +88,8 @@ const char* ValueText(RowKind kind) {
           return "10x";
       }
       break;
+    case RowKind::TurboAttack:
+      return cheats::Turbo() ? "On" : "Off";
   }
   return "Off";
 }
@@ -83,6 +102,8 @@ bool ValueIsOn(RowKind kind) {
       return cheats::Enabled(cheats::Cheat::Energy);
     case RowKind::CoinMultiplier:
       return cheats::Multiplier() != cheats::CoinMultiplier::Off;
+    case RowKind::TurboAttack:
+      return cheats::Turbo();
   }
   return false;
 }
@@ -110,10 +131,13 @@ class CheatMenuDialog final : public ModalDialog {
       focused_ = true;
       ImGui::SetNextWindowFocus();
     }
+    const ImVec4 accent = AccentColor();
+    const ImVec4 row_focus = RowFocusColor();
     ImGui::PushStyleColor(ImGuiCol_WindowBg, kPanel);
-    ImGui::PushStyleColor(ImGuiCol_Border, kAccent);
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, kRowFocus);
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, kRowFocus);
+    ImGui::PushStyleColor(ImGuiCol_Border, accent);
+    ImGui::PushStyleColor(ImGuiCol_Separator, accent);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, row_focus);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, row_focus);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(em * 0.7f, em * 0.5f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -121,7 +145,7 @@ class CheatMenuDialog final : public ModalDialog {
                                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("##mua_cheat_menu", nullptr, kFlags)) {
       ImGui::PushFont(strong);
-      ImGui::TextColored(kAccent, "CHEATS");
+      ImGui::TextColored(accent, "CHEATS");
       ImGui::PopFont();
       ImGui::Separator();
       for (size_t i = 0; i < std::size(kRows); ++i) {
@@ -139,7 +163,7 @@ class CheatMenuDialog final : public ModalDialog {
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(4);
+    ImGui::PopStyleColor(5);
     ImGui::PopFont();
   }
 
@@ -154,14 +178,14 @@ class CheatMenuDialog final : public ModalDialog {
     const ImVec2 max = ImGui::GetItemRectMax();
     ImDrawList* draw = ImGui::GetWindowDrawList();
     if (ImGui::IsItemFocused()) {
-      draw->AddRectFilled(min, max, ImGui::GetColorU32(kRowFocus), 3.0f);
+      draw->AddRectFilled(min, max, ImGui::GetColorU32(RowFocusColor()), 3.0f);
     }
     const float pad = ImGui::GetFontSize() * 0.4f;
     const float y = min.y + (height - ImGui::GetFontSize()) * 0.5f;
     const char* state = ValueText(row.kind);
     draw->AddText(ImVec2(min.x + pad, y), ImGui::GetColorU32(ImGuiCol_Text), row.label);
     draw->AddText(ImVec2(max.x - pad - ImGui::CalcTextSize(state).x, y),
-                  ImGui::GetColorU32(ValueIsOn(row.kind) ? kAccent : kDim), state);
+                  ImGui::GetColorU32(ValueIsOn(row.kind) ? AccentColor() : kDim), state);
     ImGui::PopID();
     if (pressed) {
       Activate(row.kind);

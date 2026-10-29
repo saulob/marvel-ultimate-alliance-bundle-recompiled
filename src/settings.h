@@ -40,6 +40,7 @@ REXCVAR_DECLARE(bool, mua_launcher_fullscreen);
 REXCVAR_DECLARE(bool, mua_cheat_health);
 REXCVAR_DECLARE(bool, mua_cheat_energy);
 REXCVAR_DECLARE(int32_t, mua_cheat_coin_multiplier);
+REXCVAR_DECLARE(int32_t, mua_turbo_attack);
 
 namespace mua {
 
