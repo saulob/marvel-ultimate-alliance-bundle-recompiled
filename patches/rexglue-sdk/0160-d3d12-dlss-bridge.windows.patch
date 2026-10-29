@@ -1,0 +1,367 @@
+NVIDIA DLSS Super Resolution through a DLL that implements include/rex/graphics/d3d12/rex_dlss_bridge.h, so the GPU
+plugin needs neither the NVIDIA SDK nor the DLL to build or run. DlssBridge loads the DLL (never unloaded: NGX's threads
+may still call its log callback), checks the adapter against NVIDIA's feature requirements and initializes NGX on the
+device. Nothing loads it before 0161's scene upscaler draws a scene with DLSS selected. d3d12_dlss_ngx_log_level
+forwards NGX's own log (0 none, 1 normal, 2 verbose).
+
+diff --git a/include/rex/graphics/d3d12/dlss_bridge.h b/include/rex/graphics/d3d12/dlss_bridge.h
+new file mode 100644
+index 0000000..7ce1876
+--- /dev/null
++++ b/include/rex/graphics/d3d12/dlss_bridge.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <filesystem>
++
++#include <rex/graphics/d3d12/rex_dlss_bridge.h>
++
++namespace rex::ui::d3d12 {
++class D3D12Provider;
++}
++
++namespace rex::graphics::d3d12 {
++
++// NVIDIA DLSS through a DLL that implements rex_dlss_bridge.h, so DLSS stays optional.
++class DlssBridge {
++ public:
++  DlssBridge() = default;
++  DlssBridge(const DlssBridge&) = delete;
++  DlssBridge& operator=(const DlssBridge&) = delete;
++  ~DlssBridge() { Shutdown(); }
++
++  // Loads the DLL and initializes NGX on the device; logs why DLSS can't run when it returns false.
++  bool Initialize(const std::filesystem::path& dll, const std::filesystem::path& data_path,
++                  const ui::d3d12::D3D12Provider& provider);
++  void Shutdown();
++
++  bool initialized() const { return initialized_; }
++  const RexDlssBridgeApi& api() const { return *api_; }
++  const RexDlssCapabilities& capabilities() const { return capabilities_; }
++
++ private:
++  const RexDlssBridgeApi* api_ = nullptr;
++  RexDlssCapabilities capabilities_ = {};
++  bool initialized_ = false;
++};
++
++}  // namespace rex::graphics::d3d12
+diff --git a/include/rex/graphics/d3d12/rex_dlss_bridge.h b/include/rex/graphics/d3d12/rex_dlss_bridge.h
+new file mode 100644
+index 0000000..498860c
+--- /dev/null
++++ b/include/rex/graphics/d3d12/rex_dlss_bridge.h
+@@ -0,0 +1,163 @@
++#ifndef REX_DLSS_BRIDGE_H
++#define REX_DLSS_BRIDGE_H
++
++// The C interface between the ReXGlue Direct3D 12 GPU plugin and a DLL that runs NVIDIA DLSS Super Resolution, so
++// the plugin needs neither the NVIDIA SDK nor the DLL to run.
++
++#include <stdint.h>
++#include <wchar.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct IDXGIAdapter IDXGIAdapter;
++typedef struct ID3D12Device ID3D12Device;
++typedef struct ID3D12GraphicsCommandList ID3D12GraphicsCommandList;
++typedef struct ID3D12Resource ID3D12Resource;
++
++#define REX_DLSS_BRIDGE_ABI_VERSION 1
++#define REX_DLSS_BRIDGE_ENTRY_POINT "RexDlssBridgeGetApi"
++
++typedef enum RexDlssStatus {
++  REX_DLSS_OK = 0,
++  REX_DLSS_INVALID_ARGUMENT,
++  REX_DLSS_NOT_INITIALIZED,
++  REX_DLSS_INIT_FAILED,
++  REX_DLSS_UNAVAILABLE,
++  REX_DLSS_DRIVER_UPDATE_REQUIRED,
++  REX_DLSS_MODE_UNAVAILABLE,
++  REX_DLSS_NGX_ERROR,
++} RexDlssStatus;
++
++typedef enum RexDlssQuality {
++  REX_DLSS_QUALITY_DLAA = 0,
++  REX_DLSS_QUALITY_QUALITY,
++  REX_DLSS_QUALITY_BALANCED,
++  REX_DLSS_QUALITY_PERFORMANCE,
++  REX_DLSS_QUALITY_ULTRA_PERFORMANCE,
++  REX_DLSS_QUALITY_COUNT,
++} RexDlssQuality;
++
++enum {
++  REX_DLSS_FEATURE_HDR = 1u << 0,
++  REX_DLSS_FEATURE_MV_LOW_RES = 1u << 1,
++  REX_DLSS_FEATURE_MV_JITTERED = 1u << 2,
++  REX_DLSS_FEATURE_DEPTH_INVERTED = 1u << 3,
++  REX_DLSS_FEATURE_AUTO_EXPOSURE = 1u << 4,
++};
++
++typedef enum RexDlssLogLevel {
++  REX_DLSS_LOG_INFO = 0,
++  REX_DLSS_LOG_WARNING,
++  REX_DLSS_LOG_ERROR,
++} RexDlssLogLevel;
++
++// May be called from NVIDIA's threads as well as the caller's.
++typedef void (*RexDlssLogFunction)(void* user, RexDlssLogLevel level, const char* message);
++
++typedef struct RexDlssAdapterRequirements {
++  int32_t supported;
++  // NVSDK_NGX_Feature_Support_Result bits, 0 when supported.
++  uint32_t unsupported_reasons;
++  uint32_t min_hw_architecture;
++  char min_os_version[64];
++} RexDlssAdapterRequirements;
++
++typedef struct RexDlssInitDesc {
++  uint32_t struct_size;
++  ID3D12Device* device;
++  // Must be writable: NGX keeps its logs there.
++  const wchar_t* data_path;
++  const char* engine_version;
++  RexDlssLogFunction log;
++  void* log_user;
++  // 0 off, 1 on, 2 verbose: how much of NGX's own log reaches the log function.
++  int32_t ngx_log_level;
++} RexDlssInitDesc;
++
++typedef struct RexDlssCapabilities {
++  int32_t available;
++  int32_t needs_driver_update;
++  uint32_t min_driver_major;
++  uint32_t min_driver_minor;
++  int32_t feature_init_result;
++  // The nvngx_dlss.dll beside the bridge, as major.minor.build.revision; empty when it is missing.
++  char runtime_version[32];
++} RexDlssCapabilities;
++
++typedef struct RexDlssOptimalSettings {
++  uint32_t render_width;
++  uint32_t render_height;
++  uint32_t min_render_width;
++  uint32_t min_render_height;
++  uint32_t max_render_width;
++  uint32_t max_render_height;
++} RexDlssOptimalSettings;
++
++typedef struct RexDlssFeatureDesc {
++  uint32_t struct_size;
++  // The largest render size the feature evaluates.
++  uint32_t render_width;
++  uint32_t render_height;
++  uint32_t output_width;
++  uint32_t output_height;
++  RexDlssQuality quality;
++  uint32_t flags;
++  // An NVSDK_NGX_DLSS_Hint_Render_Preset value; 0 lets the DLSS DLL choose for the quality.
++  uint32_t preset;
++} RexDlssFeatureDesc;
++
++// Inputs in D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, the output in D3D12_RESOURCE_STATE_UNORDERED_ACCESS; DLSS
++// leaves them in those states. Motion vectors are in render pixels and point from the current frame to the previous
++// one, after scaling by mv_scale; the jitter is in render pixels in the same convention.
++typedef struct RexDlssEvaluateDesc {
++  uint32_t struct_size;
++  ID3D12Resource* color;
++  ID3D12Resource* depth;
++  ID3D12Resource* motion_vectors;
++  ID3D12Resource* exposure;  // 1x1, or null with REX_DLSS_FEATURE_AUTO_EXPOSURE
++  ID3D12Resource* output;
++  uint32_t input_x;  // where color, depth and motion vectors start in their resources
++  uint32_t input_y;
++  uint32_t render_width;
++  uint32_t render_height;
++  float jitter_x;
++  float jitter_y;
++  float mv_scale_x;
++  float mv_scale_y;
++  float pre_exposure;
++  int32_t reset;
++} RexDlssEvaluateDesc;
++
++typedef struct RexDlssFeature RexDlssFeature;
++
++// NGX is not thread-safe: one thread at a time.
++typedef struct RexDlssBridgeApi {
++  uint32_t abi_version;
++  // Needs no initialization.
++  RexDlssStatus (*query_adapter)(IDXGIAdapter* adapter, const wchar_t* data_path,
++                                 RexDlssAdapterRequirements* requirements);
++  RexDlssStatus (*init)(const RexDlssInitDesc* desc, RexDlssCapabilities* capabilities);
++  RexDlssStatus (*query_optimal_settings)(uint32_t output_width, uint32_t output_height, RexDlssQuality quality,
++                                          RexDlssOptimalSettings* settings);
++  // The command list must be open on a direct or compute queue.
++  RexDlssStatus (*create_feature)(ID3D12GraphicsCommandList* command_list, const RexDlssFeatureDesc* desc,
++                                  RexDlssFeature** feature);
++  // Changes the command list's descriptor heaps, root signature and pipeline state.
++  RexDlssStatus (*evaluate)(ID3D12GraphicsCommandList* command_list, RexDlssFeature* feature,
++                            const RexDlssEvaluateDesc* desc);
++  // Only after the GPU has finished every command list that evaluated the feature.
++  void (*release_feature)(RexDlssFeature* feature);
++  void (*shutdown)(void);
++  // Why the calling thread's last call that failed did, for the log.
++  const char* (*last_error)(void);
++} RexDlssBridgeApi;
++
++typedef const RexDlssBridgeApi* (*RexDlssBridgeGetApiFunction)(uint32_t abi_version);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // REX_DLSS_BRIDGE_H
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index ebc7d14..c636611 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -76,6 +76,7 @@ if(REXGLUE_USE_D3D12)
+     set(REXGPU_XENOS_D3D12_SOURCES
+         d3d12/graphics_system.cpp
+         d3d12/command_processor.cpp
++        d3d12/dlss_bridge.cpp
+         d3d12/primitive_processor.cpp
+         d3d12/render_target_cache.cpp
+         d3d12/shader.cpp
+diff --git a/src/graphics/d3d12/dlss_bridge.cpp b/src/graphics/d3d12/dlss_bridge.cpp
+new file mode 100644
+index 0000000..acff12d
+--- /dev/null
++++ b/src/graphics/d3d12/dlss_bridge.cpp
+@@ -0,0 +1,132 @@
++#include <rex/graphics/d3d12/dlss_bridge.h>
++
++#include <array>
++#include <string>
++#include <system_error>
++#include <utility>
++
++#include <rex/cvar.h>
++#include <rex/filesystem.h>
++#include <rex/logging.h>
++#include <rex/ui/d3d12/d3d12_provider.h>
++
++REXCVAR_DEFINE_INT32(d3d12_dlss_ngx_log_level, 0, "GPU/D3D12",
++                     "How much of NVIDIA NGX's own log goes to this log: 0 none, 1 normal, 2 verbose")
++    .range(0, 2)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++namespace rex::graphics::d3d12 {
++
++namespace {
++
++void LogFromBridge(void*, RexDlssLogLevel level, const char* message) {
++  switch (level) {
++    case REX_DLSS_LOG_ERROR:
++      REXGPU_ERROR("DLSS: {}", message);
++      break;
++    case REX_DLSS_LOG_WARNING:
++      REXGPU_WARN("DLSS: {}", message);
++      break;
++    default:
++      REXGPU_INFO("DLSS: {}", message);
++      break;
++  }
++}
++
++std::string AdapterReasons(uint32_t reasons) {
++  constexpr std::array<std::pair<uint32_t, const char*>, 5> kReasons = {{
++      {1, "no support check in the driver"},
++      {2, "driver too old"},
++      {4, "graphics card not supported"},
++      {8, "Windows too old"},
++      {16, "not implemented"},
++  }};
++  std::string text;
++  for (const auto& [bit, reason] : kReasons) {
++    if (reasons & bit) {
++      text += (text.empty() ? "" : ", ") + std::string(reason);
++    }
++  }
++  return text.empty() ? "unknown reason" : text;
++}
++
++Microsoft::WRL::ComPtr<IDXGIAdapter> DeviceAdapter(const ui::d3d12::D3D12Provider& provider) {
++  Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
++  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
++  if (provider.GetDXGIFactory() && SUCCEEDED(provider.GetDXGIFactory()->QueryInterface(IID_PPV_ARGS(&factory)))) {
++    factory->EnumAdapterByLuid(provider.GetDevice()->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
++  }
++  return adapter;
++}
++
++}  // namespace
++
++bool DlssBridge::Initialize(const std::filesystem::path& dll, const std::filesystem::path& data_path,
++                            const ui::d3d12::D3D12Provider& provider) {
++  Shutdown();
++  if (provider.GetAdapterVendorID() != ui::GraphicsProvider::GpuVendorID::kNvidia) {
++    REXGPU_INFO("DLSS: off, the graphics card is not an NVIDIA one");
++    return false;
++  }
++  // Never unloaded: NGX's threads may still call the bridge's log callback after shutdown.
++  HMODULE module = LoadLibraryExW(dll.c_str(), nullptr,
++                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
++  if (!module) {
++    REXGPU_WARN("DLSS: off, {} can't be loaded (error {})", rex::path_to_utf8(dll),
++                uint32_t(GetLastError()));
++    return false;
++  }
++  const auto get_api = reinterpret_cast<RexDlssBridgeGetApiFunction>(
++      reinterpret_cast<void*>(GetProcAddress(module, REX_DLSS_BRIDGE_ENTRY_POINT)));
++  api_ = get_api ? get_api(REX_DLSS_BRIDGE_ABI_VERSION) : nullptr;
++  if (!api_) {
++    REXGPU_WARN("DLSS: off, {} doesn't offer interface version {}", rex::path_to_utf8(dll),
++                REX_DLSS_BRIDGE_ABI_VERSION);
++    Shutdown();
++    return false;
++  }
++
++  std::error_code error;
++  std::filesystem::create_directories(data_path, error);
++  if (Microsoft::WRL::ComPtr<IDXGIAdapter> adapter = DeviceAdapter(provider)) {
++    RexDlssAdapterRequirements requirements = {};
++    if (api_->query_adapter(adapter.Get(), data_path.c_str(), &requirements) != REX_DLSS_OK) {
++      REXGPU_INFO("DLSS: NVIDIA's adapter check failed ({}), trying NGX anyway", api_->last_error());
++    } else if (!requirements.supported) {
++      REXGPU_WARN("DLSS: off, NVIDIA reports the system unsupported: {} (minimum architecture 0x{:X}, Windows {})",
++                  AdapterReasons(requirements.unsupported_reasons), requirements.min_hw_architecture,
++                  requirements.min_os_version);
++      Shutdown();
++      return false;
++    }
++  }
++
++  RexDlssInitDesc desc = {};
++  desc.struct_size = sizeof(desc);
++  desc.device = provider.GetDevice();
++  desc.data_path = data_path.c_str();
++  desc.log = LogFromBridge;
++  desc.ngx_log_level = REXCVAR_GET(d3d12_dlss_ngx_log_level);
++  const RexDlssStatus status = api_->init(&desc, &capabilities_);
++  if (status != REX_DLSS_OK) {
++    REXGPU_WARN("DLSS: off ({})", api_->last_error());
++    Shutdown();
++    return false;
++  }
++  initialized_ = true;
++  REXGPU_INFO("DLSS: Super Resolution available | nvngx_dlss.dll {} | driver minimum {}.{}",
++              capabilities_.runtime_version[0] ? capabilities_.runtime_version : "from the driver",
++              capabilities_.min_driver_major, capabilities_.min_driver_minor);
++  return true;
++}
++
++void DlssBridge::Shutdown() {
++  if (initialized_) {
++    api_->shutdown();
++    initialized_ = false;
++  }
++  api_ = nullptr;
++  capabilities_ = {};
++}
++
++}  // namespace rex::graphics::d3d12

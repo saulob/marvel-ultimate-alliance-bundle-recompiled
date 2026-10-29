@@ -74,7 +74,7 @@ std::optional<std::string> ShownRenderResolution() {
   }
   const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
   return mua::RenderResolutionText(scale, mua::ParseAspectRatio(rex::cvar::GetFlagByName("mua_aspect_ratio")),
-                                   mua::ParseUpscaler(rex::cvar::GetFlagByName("mua_upscaler")),
+                                   mua::ActiveUpscaler(),
                                    mua::ParseUpscaleQuality(rex::cvar::GetFlagByName("mua_upscale_quality")));
 }
 

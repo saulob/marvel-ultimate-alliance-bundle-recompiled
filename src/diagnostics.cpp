@@ -39,9 +39,9 @@ std::string GraphicsText(const GraphicsIdentity& graphics) {
   if (graphics.internal_width) {
     text += " | internal=" + std::to_string(graphics.internal_width) + "x" + std::to_string(graphics.internal_height);
   }
-  if (graphics.fsr_input_width) {
-    text += " | fsr input=" + std::to_string(graphics.fsr_input_width) + "x" +
-            std::to_string(graphics.fsr_input_height);
+  if (graphics.upscaler_input_width) {
+    text += " | " + graphics.upscaler_input + " input=" + std::to_string(graphics.upscaler_input_width) + "x" +
+            std::to_string(graphics.upscaler_input_height);
   }
   text += " | render resolution=" + std::to_string(graphics.render_width) + "x" +
           std::to_string(graphics.render_height);

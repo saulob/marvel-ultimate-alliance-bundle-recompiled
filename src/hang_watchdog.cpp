@@ -17,7 +17,10 @@
 #include <rex/logging.h>
 
 #if defined(_WIN32)
+#include <cwchar>
+#include <exception>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #ifndef NOMINMAX
@@ -33,8 +36,6 @@
 // clang-format on
 
 #include <fmt/format.h>
-
-#include "path_utf8.h"
 #endif
 
 namespace mua {
@@ -198,22 +199,38 @@ bool InitSymbols(HANDLE process) {
   return symbols;
 }
 
+// Never throws: DbgHelp and thread names may hold unpaired surrogates.
+std::string LogText(std::wstring_view text) {
+  if (text.empty()) {
+    return {};
+  }
+  const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0, nullptr, nullptr);
+  std::string narrow(size > 0 ? size_t(size) : 0, '\0');
+  if (size > 0) {
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), narrow.data(), size, nullptr, nullptr);
+  }
+  return narrow;
+}
+
 // module!function+offset; without symbols (a release has no PDB) module+offset, which the build's PDB resolves later.
 std::string FrameName(HANDLE process, DWORD64 address) {
   IMAGEHLP_MODULEW64 module{};
   module.SizeOfStruct = sizeof(module);
   const bool has_module = SymGetModuleInfoW64(process, address, &module) != FALSE;
+  const std::string module_name = has_module ? LogText(module.ModuleName) : std::string();
   alignas(SYMBOL_INFOW) uint8_t buffer[sizeof(SYMBOL_INFOW) + 256 * sizeof(wchar_t)] = {};
   auto* symbol = reinterpret_cast<SYMBOL_INFOW*>(buffer);
   symbol->SizeOfStruct = sizeof(SYMBOL_INFOW);
   symbol->MaxNameLen = 255;
   DWORD64 displacement = 0;
   if (!SymFromAddrW(process, address, &displacement, symbol)) {
-    return has_module ? fmt::format("{}+0x{:X}", Utf8(module.ModuleName), address - module.BaseOfImage)
+    return has_module ? fmt::format("{}+0x{:X}", module_name, address - module.BaseOfImage)
                       : fmt::format("{:016X}", address);
   }
-  std::string text = Utf8(std::wstring(symbol->Name, symbol->NameLen)) + fmt::format("+0x{:X}", displacement);
-  return has_module ? Utf8(module.ModuleName) + "!" + text : text;
+  // NameLen is the full name's length even when DbgHelp truncated it to MaxNameLen.
+  std::string text = LogText(std::wstring_view(symbol->Name, wcsnlen(symbol->Name, symbol->MaxNameLen))) +
+                     fmt::format("+0x{:X}", displacement);
+  return has_module ? module_name + "!" + text : text;
 }
 
 bool IsGuestFrame(const std::string& name) {
@@ -226,7 +243,7 @@ bool IsWaiting(const std::string& top) {
 }
 
 std::string ThreadLabel(const ThreadStack& stack) {
-  return std::to_string(stack.id) + (stack.name.empty() ? "" : " \"" + Utf8(stack.name) + "\"");
+  return std::to_string(stack.id) + (stack.name.empty() ? "" : " \"" + LogText(stack.name) + "\"");
 }
 
 std::string StackText(HANDLE process, const ThreadStack& stack) {
@@ -428,9 +445,19 @@ void StartHangWatchdog(void* native_window) {
   if (!native_window) {
     return;
   }
-  std::thread(Watch, static_cast<HWND>(native_window)).detach();
+  // An exception leaving a std::thread terminates the process; a diagnostic must only stop.
+  const auto run = [](const char* name, void (*body)(HWND), HWND window) {
+    try {
+      body(window);
+    } catch (const std::exception& error) {
+      REXLOG_WARN("{} stopped: {}", name, error.what());
+    } catch (...) {
+      REXLOG_WARN("{} stopped", name);
+    }
+  };
+  std::thread(run, "Hang watchdog", Watch, static_cast<HWND>(native_window)).detach();
 #if MUA_HAS_RECOMPILED_CODE
-  std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();
+  std::thread(run, "Hitch sampler", SampleHitches, static_cast<HWND>(native_window)).detach();
 #endif
 #else
   (void)native_window;

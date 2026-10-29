@@ -1,18 +1,23 @@
 #include "settings.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 #include <toml++/toml.hpp>
 
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 
 #include "trg/settings.h"
@@ -20,6 +25,8 @@
 #include "aspect_ratio.h"
 #include "crash_report.h"
 #include "diagnostics.h"
+#include "dlss_support.h"
+#include "fsr3_support.h"
 #include "frame_limiter.h"
 #include "game_files.h"
 #include "game_handoff.h"
@@ -27,6 +34,7 @@
 #include "input_summary.h"
 #include "keybinds.h"
 #include "multisampling.h"
+#include "path_utf8.h"
 #include "platform.h"
 #include "player_names.h"
 #include "system_info.h"
@@ -59,11 +67,17 @@ REXCVAR_DEFINE_BOOL(mua_hd_text, true, "Marvel Ultimate Alliance",
 REXCVAR_DEFINE_STRING(mua_aspect_ratio, "16:9", "Marvel Ultimate Alliance",
                       "Aspect ratio the game renders in: 16:9, 16:10, 21:9, 32:9, 4:3 or 5:4 (applied at start)");
 REXCVAR_DEFINE_STRING(mua_upscaler, mua::kUpscalerOff, "Marvel Ultimate Alliance",
-                      "Upscaler from the game's picture to the window: off or fsr (AMD FSR 1, applied at start)");
+                      "Upscaler from the game's picture to the window: off, fsr (AMD FSR 1), or in Marvel Ultimate "
+                      "Alliance also fsr3 (AMD FSR 3.1) and dlss (NVIDIA DLSS); applied at start");
 REXCVAR_DEFINE_STRING(mua_upscale_quality, "native", "Marvel Ultimate Alliance",
-                      "With an upscaler, draw below the Render resolution: native, quality, balanced or performance");
+                      "With an upscaler, draw below the Render resolution: native, quality, balanced, performance or "
+                      "(AMD FSR 3.1) ultra_performance");
+REXCVAR_DEFINE_INT32(mua_fsr3_sharpness, mua::kDefaultFsr3Sharpness, "Marvel Ultimate Alliance",
+                     "AMD FSR 3.1's sharpening, 0 (off) to 100; applied at start")
+    .range(0, 100);
 REXCVAR_DEFINE_STRING(mua_graphics_adapter, "auto", "Marvel Ultimate Alliance",
-                      "Graphics card: the index d3d12_adapter takes; anything else uses the first (applied at start)");
+                      "Graphics card: the index d3d12_adapter (Windows) or vulkan_device (Linux) takes; anything "
+                      "else uses the first (applied at start)");
 REXCVAR_DEFINE_STRING(mua_player_1_name, "Player 1", "Marvel Ultimate Alliance",
                       "Name shown for local player 1 in every game; save data is not affected");
 REXCVAR_DEFINE_STRING(mua_player_2_name, "Player 2", "Marvel Ultimate Alliance",
@@ -84,6 +98,16 @@ REXCVAR_DEFINE_BOOL(mua_launcher_maximized, false, "Marvel Ultimate Alliance",
                     "Launcher window was maximized when closed");
 REXCVAR_DEFINE_BOOL(mua_launcher_fullscreen, false, "Marvel Ultimate Alliance",
                     "Launcher was left in its own F11 fullscreen, written by the launcher");
+REXCVAR_DEFINE_BOOL(mua_cheat_health, false, "Marvel Ultimate Alliance",
+                    "Infinite health for every party hero");
+REXCVAR_DEFINE_BOOL(mua_cheat_energy, false, "Marvel Ultimate Alliance",
+                    "Infinite energy for every party hero");
+REXCVAR_DEFINE_INT32(mua_cheat_coin_multiplier, 0, "Marvel Ultimate Alliance",
+                     "Coin awards multiplier: 0 (off), 2, 5 or 10")
+    .range(0, 10);
+REXCVAR_DEFINE_INT32(mua_turbo_attack, 0, "Marvel Ultimate Alliance",
+                     "Repeats the basic attack while the attack button stays held: 0 (off), 1 (on)")
+    .range(0, 4);
 
 namespace mua {
 namespace {
@@ -104,6 +128,7 @@ std::vector<std::string> GameSettingKeys() {
       "resolution_scale",
       "mua_upscaler",
       "mua_upscale_quality",
+      "mua_fsr3_sharpness",
       "swap_post_effect",
       "mua_msaa_compatibility",
       "anisotropic_override",
@@ -115,6 +140,10 @@ std::vector<std::string> GameSettingKeys() {
       "mua_show_frame_counter",
       "detailed_logging",
       "mnk_mode",
+      "mua_cheat_health",
+      "mua_cheat_energy",
+      "mua_cheat_coin_multiplier",
+      "mua_turbo_attack",
   };
   for (const KeyboardAction& action : kKeyboardActions) {
     keys.emplace_back(action.key);
@@ -127,8 +156,10 @@ std::vector<std::string> GameSettingKeys() {
 
 const std::vector<std::string> kGameSettingKeys = GameSettingKeys();
 
-constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro", "mua_frame_rate", "mua_aspect_ratio",
-                                                 "mua_upscaler", "mua_upscale_quality"};
+constexpr std::string_view kGameScopedKeys[] = {"mua_skip_intro",   "mua_frame_rate",      "mua_aspect_ratio",
+                                                 "mua_upscaler",     "mua_upscale_quality", "mua_fsr3_sharpness",
+                                                 "mua_cheat_health", "mua_cheat_energy",    "mua_cheat_coin_multiplier",
+                                                 "mua_turbo_attack"};
 
 bool IsGameKey(std::string_view key) {
   return std::ranges::find(kGameScopedKeys, key) != std::end(kGameScopedKeys);
@@ -215,6 +246,19 @@ std::vector<std::pair<std::string, std::string>> ChangedValues(const std::map<st
 
 std::string AspectRatioKey(std::string_view value) {
   return InfoFor(ParseAspectRatio(value)).key;
+}
+
+// Saved values of upscalers this version no longer has become Off, which the next save writes.
+void RetireDeprecatedUpscaler(std::string& value) {
+  const DeprecatedUpscaler* deprecated = FindDeprecatedUpscaler(value);
+  if (!deprecated) {
+    return;
+  }
+  static std::array<bool, std::size(kDeprecatedUpscalers)> logged = {};
+  if (!std::exchange(logged[size_t(deprecated - kDeprecatedUpscalers)], true)) {
+    REXLOG_INFO("Deprecated upscaler {} -> Off", deprecated->label);
+  }
+  value = kUpscalerOff;
 }
 
 std::map<std::string, std::string> ReadGameValues(const std::filesystem::path& file) {
@@ -360,11 +404,17 @@ void GameSettings::Capture(const std::filesystem::path& player_file, const std::
   frame_rate = std::to_string(FrameRateFromText(frame_rate));
   std::string& aspect = pending_["mua_aspect_ratio"];
   aspect = AspectRatioKey(aspect);
+  RetireDeprecatedUpscaler(pending_["mua_upscaler"]);
   game_saved_.clear();
   for (const GameDefinition& game : AllGames()) {
     game_saved_[game.id] = ReadGameValues(GameFile(game.id));
   }
   game_pending_ = game_saved_;
+  for (auto& [game, values] : game_pending_) {
+    if (const auto upscaler = values.find("mua_upscaler"); upscaler != values.end()) {
+      RetireDeprecatedUpscaler(upscaler->second);
+    }
+  }
   const GameDefinition* selected = FindGame(pending_[kSelectedGameKey]);
   game_ = selected ? selected->id : DefaultGame().id;
 }
@@ -531,6 +581,9 @@ void GameSettings::ApplyGameSettings() const {
 }
 
 void ApplyShaderWait() {
+  if (!rex::cvar::GetFlagInfo("async_shader_wait_ms")) {
+    return;
+  }
   rex::cvar::SetFlagByName("async_shader_wait_ms",
                            std::to_string(ShaderWaitMsFor(FrameRateOrDefault(REXCVAR_GET(mua_frame_rate)))));
 }
@@ -539,11 +592,7 @@ void ApplyDynamicPageStreaming(std::optional<GameId> game) {
   constexpr char kKey[] = "gpu_stream_dynamic_pages";
   const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(kKey);
   if (!info) {
-#if defined(_WIN32)
     REXLOG_WARN("Dynamic page streaming: {} is not in this runtime", kKey);
-#else
-    REXLOG_INFO("Dynamic page streaming: off (Direct3D 12 only)");
-#endif
     return;
   }
   if (game && info->source == rex::cvar::Source::kDefault) {
@@ -556,9 +605,26 @@ namespace {
 
 bool HostRenderTargetsActive() {
   static const bool active = HostRenderTargetsUsed(
-      rex::cvar::GetFlagByName("render_target_path_d3d12"),
-      RasterizerOrderedViewsSupported(std::atoi(CvarText("d3d12_adapter", "-1").c_str())));
+      rex::cvar::GetFlagByName(kBackendSettings.render_target_path),
+      PixelShaderEdramSupported(std::atoi(CvarText(kBackendSettings.graphics_card, "-1").c_str())));
   return active;
+}
+
+void ApplySceneProfile(const GameDefinition& game) {
+  if (rex::cvar::GetFlagInfo("d3d12_scene_profile")) {
+    rex::cvar::SetFlagByName("d3d12_scene_profile", std::string(game.scene_profile));
+  }
+}
+
+WindowSize TemporalOutputCanvas(const GameDefinition& game) {
+  return SceneCanvas(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)), game.scene_size);
+}
+
+// The 3D scene at the Render resolution, which DLSS and FSR 3.1 rebuild.
+WindowSize TemporalOutputSize(const GameDefinition& game) {
+  const WindowSize canvas = TemporalOutputCanvas(game);
+  const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
+  return {canvas.width * scale, canvas.height * scale};
 }
 
 }  // namespace
@@ -580,25 +646,120 @@ void ApplyPlayerNames() {
   }
 }
 
+UpscalerMask RuntimeUpscalers() {
+  UpscalerMask upscalers = kBackendUpscalers;
+  const rex::cvar::FlagEntry* present_effect = rex::cvar::GetFlagInfo("present_effect");
+  const std::string_view fsr1 = UpscalerInfoFor(Upscaler::kFsr1).present_effect;
+  if (!present_effect || std::ranges::find(present_effect->constraints.allowed_values, fsr1) ==
+                             present_effect->constraints.allowed_values.end()) {
+    upscalers &= ~UpscalerBit(Upscaler::kFsr1);
+  }
+  return upscalers;
+}
+
+Upscaler ActiveUpscaler() {
+  const GameDefinition* game = ActiveGame();
+  return game ? ParseUpscaler(REXCVAR_GET(mua_upscaler), game->upscalers & RuntimeUpscalers()) : Upscaler::kOff;
+}
+
 void ApplyUpscaler(const GameSettings& settings) {
-  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff));
+  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff),
+                                          Game(settings.SelectedGame()).upscalers & RuntimeUpscalers());
   if (const auto effect = PresentEffectFor(upscaler); effect && rex::cvar::GetFlagByName("present_effect") != *effect) {
     rex::cvar::SetFlagByName("present_effect", *effect);
   }
 }
 
+void ApplyDlss(const std::filesystem::path& cache_root) {
+  const bool selected = ActiveUpscaler() == Upscaler::kDlss;
+  if (!rex::cvar::GetFlagInfo("d3d12_dlss_mode")) {
+    if (selected) {
+      REXLOG_WARN("NVIDIA DLSS: this runtime has none (Direct3D 12 patched runtime only); the game draws without it");
+    }
+    return;
+  }
+  if (!selected) {
+    rex::cvar::SetFlagByName("d3d12_dlss_mode", "off");
+    return;
+  }
+  const std::filesystem::path bridge = rex::filesystem::GetExecutableFolder() / kDlssBridgeFile;
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(bridge, error)) {
+    REXLOG_WARN("NVIDIA DLSS: {} is not next to the program (built without the NVIDIA DLSS SDK); the game draws "
+                "without it",
+                kDlssBridgeFile);
+    rex::cvar::SetFlagByName("d3d12_dlss_mode", "off");
+    return;
+  }
+  const GameDefinition& game = *ActiveGame();
+  const char* mode = DlssModeFor(ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
+  ApplySceneProfile(game);
+  rex::cvar::SetFlagByName("d3d12_dlss_bridge", Utf8(bridge));
+  rex::cvar::SetFlagByName("d3d12_dlss_data_path", Utf8(cache_root / "ngx"));
+  rex::cvar::SetFlagByName("d3d12_dlss_mode", mode);
+  REXLOG_INFO("NVIDIA DLSS: {}: {} requested | scene at NVIDIA's size -> output {} | scene profile {}; NVIDIA's "
+              "runtime starts with the first 3D scene",
+              game.display_name, mode, SizeText(TemporalOutputSize(game)), game.scene_profile);
+}
+
+void ApplyFsr3() {
+  const bool selected = ActiveUpscaler() == Upscaler::kFsr3;
+  if (!rex::cvar::GetFlagInfo("d3d12_fsr3_mode")) {
+    if (selected) {
+      REXLOG_WARN("AMD FSR 3.1: this runtime has none (Direct3D 12 patched runtime only); the game draws without it");
+    }
+    return;
+  }
+  if (!selected) {
+    rex::cvar::SetFlagByName("d3d12_fsr3_mode", "off");
+    return;
+  }
+  const std::filesystem::path library = rex::filesystem::GetExecutableFolder() / kFidelityFxLibraryFile;
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(library, error)) {
+    REXLOG_WARN("AMD FSR 3.1: {} is not next to the program (built without the AMD FidelityFX SDK); the game draws "
+                "without it",
+                kFidelityFxLibraryFile);
+    rex::cvar::SetFlagByName("d3d12_fsr3_mode", "off");
+    return;
+  }
+  const GameDefinition& game = *ActiveGame();
+  const UpscaleQuality quality =
+      EffectiveQuality(Upscaler::kFsr3, ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
+  const int sharpness = std::clamp(REXCVAR_GET(mua_fsr3_sharpness), 0, 100);
+  ApplySceneProfile(game);
+  rex::cvar::SetFlagByName("d3d12_fsr3_library", Utf8(library));
+  rex::cvar::SetFlagByName("d3d12_fsr3_sharpness", std::to_string(sharpness));
+  rex::cvar::SetFlagByName("d3d12_fsr3_mode", Fsr3ModeFor(quality));
+  const WindowSize output = TemporalOutputSize(game);
+  const WindowSize scene = Fsr3SceneSize(output, TemporalOutputCanvas(game).width, quality);
+  REXLOG_INFO("AMD FSR 3.1: {}: {} requested | scene {} -> output {} | scene profile {} | sharpness {} (FidelityFX "
+              "SDK {}, {}); it starts with the first 3D scene",
+              game.display_name, Fsr3ModeFor(quality), SizeText(scene), SizeText(output), game.scene_profile,
+              sharpness, kFidelityFxSdkVersion, kFidelityFxLibraryFile);
+}
+
+// The requested upscaler; the presenter logs the passes that actually run ("Presenter: ... effects:").
 void LogUpscaling() {
-  const Upscaler upscaler = ParseUpscaler(REXCVAR_GET(mua_upscaler));
+  const Upscaler upscaler = ActiveUpscaler();
+  const UpscalerInfo& info = UpscalerInfoFor(upscaler);
   const UpscaleQuality quality = EffectiveQuality(upscaler, ParseUpscaleQuality(REXCVAR_GET(mua_upscale_quality)));
   const RenderSizes sizes =
       RenderSizesFor(ParseAspectRatio(REXCVAR_GET(mua_aspect_ratio)),
                      std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()), upscaler, quality);
-  const bool fsr = upscaler == Upscaler::kFsr1;
-  REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | FSR input: {} | FSR output: {} | Render "
-              "resolution: {} | present_effect={}",
-              UpscalingText(upscaler, quality), SizeText(sizes.guest), SizeText(sizes.internal),
-              fsr ? SizeText(sizes.internal) : "none", fsr ? "presenter output (Presenter line)" : "none",
-              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"));
+  const bool on = upscaler != Upscaler::kOff;
+  const std::string input = upscaler == Upscaler::kDlss    ? "the 3D scene at NVIDIA's size (DLSS: Super Resolution line)"
+                            : upscaler == Upscaler::kFsr3  ? "the 3D scene at AMD's size (FSR 3.1: AMD FSR 3.1 line)"
+                            : on                           ? SizeText(sizes.internal)
+                                                           : "none";
+  // A temporal upscaler is only ever active for a game.
+  const std::string output = info.scene_only ? "the 3D scene at " + SizeText(TemporalOutputSize(*ActiveGame()))
+                             : on            ? "presenter output (Presenter line)"
+                                             : "none";
+  REXLOG_INFO("Upscaling: {} | Guest source: {} | Host internal: {} | Upscaler input: {} | Upscaler output: {} | "
+              "Render resolution: {} | present_effect={} | Backend: {}",
+              UpscalingText(upscaler, quality), SizeText(sizes.guest), SizeText(sizes.internal), input, output,
+              SizeText(sizes.native), rex::cvar::GetFlagByName("present_effect"), kBackendSettings.name);
 }
 
 void PinGuestVideoMode() {
@@ -620,7 +781,7 @@ void ApplyGraphicsAdapter() {
   const std::vector<GraphicsAdapter> adapters = ListGraphicsAdapters();
   const std::optional<int> index = ResolveGraphicsAdapter(setting, adapters);
   if (!index) {
-    REXLOG_WARN("No usable Direct3D 12 graphics card found");
+    REXLOG_WARN("No usable {} graphics card found", kBackendSettings.name);
     return;
   }
   const auto chosen = std::find_if(adapters.begin(), adapters.end(),
@@ -630,8 +791,17 @@ void ApplyGraphicsAdapter() {
   } else {
     REXLOG_INFO("Graphics card: {} (adapter {})", chosen->name, *index);
   }
-  rex::cvar::SetFlagByName("d3d12_adapter", std::to_string(*index));
+  rex::cvar::SetFlagByName(kBackendSettings.graphics_card, std::to_string(*index));
   rex::cvar::SetFlagByName("mua_graphics_adapter", std::to_string(*index));
+}
+
+void ApplyVsync() {
+  const std::string tearing = CvarText(kTearingSetting, "true");
+  for (const char* key : kBackendSettings.tearing.subspan(1)) {
+    if (rex::cvar::GetFlagInfo(key)) {
+      rex::cvar::SetFlagByName(key, tearing);
+    }
+  }
 }
 
 void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& display, int monitor,
@@ -639,7 +809,8 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   const AspectRatio aspect = ParseAspectRatio(settings.Get("mua_aspect_ratio", "16:9"));
   const int scale = std::max(1, std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str()));
   const WindowSize render = RenderSize(aspect, scale);
-  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff));
+  const Upscaler upscaler = ParseUpscaler(settings.Get("mua_upscaler", kUpscalerOff),
+                                          Game(settings.SelectedGame()).upscalers & RuntimeUpscalers());
   const UpscaleQuality quality =
       EffectiveQuality(upscaler, ParseUpscaleQuality(settings.Get("mua_upscale_quality", "native")));
   const RenderSizes sizes = RenderSizesFor(aspect, scale, upscaler, quality);
@@ -672,7 +843,8 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
                   settings.Get("swap_post_effect", "none"), "Off");
   const bool host_render_targets = HostRenderTargetsActive();
   const bool msaa_compatibility = settings.GetBool("mua_msaa_compatibility", false);
-  diagnostics.launcher_graphics.multisampling = MsaaLauncherText(host_render_targets, msaa_compatibility);
+  diagnostics.launcher_graphics.multisampling =
+      MsaaLauncherText(host_render_targets, msaa_compatibility, kBackendSettings.pixel_shader_edram);
   diagnostics.launcher_graphics.texture_filtering =
       TextureFilteringName(settings.Get("anisotropic_override", "3"));
   diagnostics.launcher_graphics.upscaling = UpscalingText(upscaler, quality);
@@ -683,7 +855,7 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
 
   diagnostics.gpu.selected = selected_card;
   const GraphicsAdapterDetails adapter =
-      EffectiveGraphicsAdapter(std::atoi(CvarText("d3d12_adapter", "-1").c_str()));
+      EffectiveGraphicsAdapter(std::atoi(CvarText(kBackendSettings.graphics_card, "-1").c_str()));
   diagnostics.gpu.resolved = adapter.name;
   diagnostics.gpu.adapter = adapter.index;
   diagnostics.gpu.vendor_id = adapter.vendor_id;
@@ -718,23 +890,21 @@ void LogStartupDiagnostics(const GameSettings& settings, const MonitorInfo& disp
   diagnostics.graphics.render_height = render.height;
   diagnostics.graphics.internal_width = sizes.internal.width;
   diagnostics.graphics.internal_height = sizes.internal.height;
-  if (upscaler == Upscaler::kFsr1) {
-    diagnostics.graphics.fsr_input_width = sizes.internal.width;
-    diagnostics.graphics.fsr_input_height = sizes.internal.height;
+  if (const auto effect = PresentEffectFor(upscaler)) {
+    diagnostics.graphics.upscaler_input = std::string(*effect);
+    diagnostics.graphics.upscaler_input_width = sizes.internal.width;
+    diagnostics.graphics.upscaler_input_height = sizes.internal.height;
   }
   diagnostics.graphics.present_effect = CvarText("present_effect", "bilinear");
   diagnostics.graphics.upscaling = UpscalingText(upscaler, quality);
   diagnostics.graphics.guest_width = sizes.guest.width;
   diagnostics.graphics.guest_height = sizes.guest.height;
-  diagnostics.graphics.msaa = MsaaRuntimeText(host_render_targets, msaa_compatibility);
+  diagnostics.graphics.msaa =
+      MsaaRuntimeText(host_render_targets, msaa_compatibility, kBackendSettings.pixel_shader_edram);
   diagnostics.graphics.anti_aliasing = diagnostics.launcher_graphics.anti_aliasing;
   diagnostics.graphics.texture_filtering = diagnostics.launcher_graphics.texture_filtering;
   diagnostics.graphics.allow_invalid_fetch_constants = CvarText("gpu_allow_invalid_fetch_constants", "false");
-#if defined(_WIN32)
-  diagnostics.graphics.render_target_path = CvarText("render_target_path_d3d12", "default");
-#else
-  diagnostics.graphics.render_target_path = CvarText("render_target_path_vulkan", "default");
-#endif
+  diagnostics.graphics.render_target_path = CvarText(kBackendSettings.render_target_path, "default");
 
   diagnostics.input.keyboard_mode = settings.GetBool("mnk_mode", true) ? "On" : "Off";
   diagnostics.input.controller = window.controller;

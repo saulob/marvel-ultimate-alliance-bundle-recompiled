@@ -176,14 +176,14 @@ void TestNothingIsCreatedWithoutData() {
 
 void TestDispatch() {
   std::printf("each game starts its own program, and only that one\n");
-  CHECK(Mua1().executable == "marvel_ultimate_alliance_mua1.exe");
-  CHECK(Gold().executable == "marvel_ultimate_alliance_mua1_gold.exe");
-  CHECK(Mua2().executable == "marvel_ultimate_alliance_mua2.exe" && Mua2().runtime_supported);
-  CHECK(Mua1().executable != Gold().executable);
-  CHECK(Mua2().executable != Mua1().executable && Mua2().executable != Gold().executable);
+  CHECK(Mua1().program == "marvel_ultimate_alliance_mua1");
+  CHECK(Gold().program == "marvel_ultimate_alliance_mua1_gold");
+  CHECK(Mua2().program == "marvel_ultimate_alliance_mua2" && Mua2().runtime_supported);
+  CHECK(Mua1().program != Gold().program);
+  CHECK(Mua2().program != Mua1().program && Mua2().program != Gold().program);
   CHECK(mua::FindGame("mua2") == &Mua2() && Mua2().data_folder == "mua2");
   for (const mua::GameDefinition& game : mua::AllGames()) {
-    CHECK(game.executable != "marvel_ultimate_alliance_bundle.exe" && !game.executable.empty() && game.runtime_supported);
+    CHECK(game.program != "marvel_ultimate_alliance_bundle" && !game.program.empty() && game.runtime_supported);
   }
 
   CHECK(mua::LauncherWanted(false, false, false, false));
@@ -224,7 +224,7 @@ void TestWiring() {
   CHECK(Has(app, "static bool IsLauncher() { return !mua::GetRecompiledImage().game; }"));
   CHECK(Has(app, "game_settings_.SelectGame(*own_game);"));
   CHECK(Has(app, "StartRuntimeAndExit(library_->State(selected));"));
-  CHECK(Has(app, "std::string(game.game->executable)"));
+  CHECK(Has(app, "mua::GameProgramPath(*game.game, mua::ProgramFolder(), mua::kHostProgramPlatform)"));
   CHECK(!Has(app, "RelaunchSelf"));
   CHECK(!Has(app, "REX_DEV_FRAME_LOG"));
 

@@ -117,10 +117,10 @@ void TestDefinitions() {
           game->HasPage(mua::LauncherPage::kGameplay) && game->HasPage(mua::LauncherPage::kAchievements) &&
           game->HasPage(mua::LauncherPage::kControls));
   }
-  CHECK(Gold().executable == "marvel_ultimate_alliance_mua1_gold.exe" &&
-        Mua1().executable == "marvel_ultimate_alliance_mua1.exe" &&
-        Mua2().executable == "marvel_ultimate_alliance_mua2.exe");
-  CHECK(Mua2().executable != Mua1().executable && Mua2().executable != Gold().executable);
+  CHECK(Gold().program == "marvel_ultimate_alliance_mua1_gold" &&
+        Mua1().program == "marvel_ultimate_alliance_mua1" &&
+        Mua2().program == "marvel_ultimate_alliance_mua2");
+  CHECK(Mua2().program != Mua1().program && Mua2().program != Gold().program);
   CHECK(mua::ProfileOf(Mua2()).id == "mua2-x360" && mua::ProfileOf(Mua2()).title_id == 0x4156082F);
 }
 
@@ -133,6 +133,47 @@ void TestFramePolicies() {
         std::make_pair(std::string("30"), std::string("30 - Original")));
   CHECK(mua::FrameRateChoices(Mua1().frame_policy)[0] ==
         std::make_pair(std::string("30"), std::string("30 - Original")));
+}
+
+void TestUpscalers() {
+  std::printf("every game offers Off, FSR 1, FSR 3.1 and DLSS; NIS and CAS are gone\n");
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
+    CHECK(game->upscalers == mua::kAllUpscalers);
+  }
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
+    CHECK(mua::ParseUpscaler(mua::kUpscalerDlss, game->upscalers) ==
+          (mua::UpscalerOnBackend(mua::Upscaler::kDlss) ? mua::Upscaler::kDlss : mua::Upscaler::kOff));
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr3, game->upscalers) ==
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr3) ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff));
+  }
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
+    CHECK(mua::ParseUpscaler(mua::kUpscalerFsr1, game->upscalers) ==
+          (mua::UpscalerOnBackend(mua::Upscaler::kFsr1) ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff));
+    CHECK(mua::ParseUpscaler("nis", game->upscalers) == mua::Upscaler::kOff);
+    CHECK(mua::ParseUpscaler("cas", game->upscalers) == mua::Upscaler::kOff);
+  }
+}
+
+void TestSceneProfiles() {
+  std::printf("DLSS and FSR 3.1 only for a game with a scene profile: each game's own\n");
+  CHECK(Mua1().scene_profile == "mua1");
+  CHECK(Gold().scene_profile == "mua1-gold");
+  CHECK(Mua2().scene_profile == "mua2");
+  // A profile is named after its game.
+  for (const mua::GameDefinition* game : {&Mua1(), &Gold(), &Mua2()}) {
+    CHECK(game->scene_profile == game->key);
+  }
+  // Only MUA 2's scene has a size of its own; the others' is the video mode's.
+  CHECK(Mua2().scene_size.width == 1040 && Mua2().scene_size.height == 624);
+  CHECK(Mua1().scene_size.width == 0 && Gold().scene_size.width == 0);
+  const mua::UpscalerMask temporal = mua::UpscalerBit(mua::Upscaler::kFsr3) | mua::UpscalerBit(mua::Upscaler::kDlss);
+  for (const mua::GameDefinition& game : mua::AllGames()) {
+    CHECK(((game.upscalers & temporal) == temporal) == !game.scene_profile.empty());
+    CHECK((game.upscalers & temporal) == 0 || (game.upscalers & temporal) == temporal);
+  }
+  // Each game runs in its own program, so no scene, history or upscaler context outlives a change of game.
+  CHECK(Mua1().program != Gold().program && Gold().program != Mua2().program &&
+        Mua1().program != Mua2().program);
 }
 
 void TestSaveRoots() {
@@ -365,6 +406,8 @@ void TestExplicitRoot() {
 int main() {
   TestDefinitions();
   TestFramePolicies();
+  TestUpscalers();
+  TestSceneProfiles();
   TestProfiles();
   TestSaveRoots();
   TestActiveGame();

@@ -13,7 +13,8 @@ namespace mua {
 // is followed by one render and a faster presentation changes how often the game steps, not how fast it runs.
 inline constexpr double kWorldDeltaMin = 1e-6;
 inline constexpr double kWorldDeltaMax = 0.1;
-// Marvel Ultimate Alliance 2 floors the same delta at 10 microseconds.
+// Marvel Ultimate Alliance 2's clock floors the same delta at 10 ms, which runs game time fast above 100 FPS;
+// mua_clock_step_floor_mua2 lowers that floor to the clock's own 10 microseconds.
 inline constexpr double kMua2WorldDeltaMin = 1e-5;
 // Outside a map the game spins until 1/max_fps has passed; max_fps defaults to 31.
 inline constexpr double kMenuFrameInterval = 1.0 / 31.0;

@@ -179,6 +179,10 @@ std::filesystem::path PortFolder() {
   return rex::filesystem::GetExecutableFolder();
 }
 
+std::filesystem::path ProgramFolder() {
+  return rex::filesystem::GetExecutableFolder();
+}
+
 const char* ArchitectureName() {
 #if defined(_M_ARM64)
   return "arm64";
@@ -212,6 +216,13 @@ void InstallCrashReports() {
   InstallCrashReporting(Utf8(ec ? file : absolute).c_str());
   REXLOG_INFO("Windows crash reporting enabled for current log.");
 #endif
+}
+
+void HardExitProcess() {
+#if defined(_WIN32)
+  TerminateProcess(GetCurrentProcess(), 0);
+#endif
+  std::_Exit(0);
 }
 
 UiFontFiles FindUiFonts() {

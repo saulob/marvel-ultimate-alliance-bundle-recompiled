@@ -10,11 +10,13 @@ Alliance, Gold Edition and Marvel Ultimate Alliance 2).
 PCs or Steam Deck hardware. Steam Deck is expected to work through the AppImage, as a native Linux program and not through
 Proton. Reports are welcome.
 
-Every launcher setting works on Linux, apart from two that exist on Windows only. **Graphics card** selects a Direct3D 12
-adapter. On Linux the runtime prefers the dedicated GPU, and the usual selection variables (`DRI_PRIME`,
-`MESA_VK_DEVICE_SELECT`, `VK_LOADER_DEVICE_SELECT`, `__NV_PRIME_RENDER_OFFLOAD`) take precedence when they are set.
-**Upscaling** (AMD FSR 1) runs in the Direct3D 12 presenter, so on Linux the game always draws at the chosen Render
-resolution.
+Every launcher setting works on Linux. **Graphics card** lists the Vulkan devices, the dedicated GPU first unless one of
+the usual selection variables (`DRI_PRIME`, `MESA_VK_DEVICE_SELECT`, `VK_LOADER_DEVICE_SELECT`,
+`__NV_PRIME_RENDER_OFFLOAD`) is set. **Upscaling** offers AMD FSR 1; AMD FSR 3.1 and NVIDIA DLSS are integrated only into the Direct3D 12
+GPU plugin (AMD's `amd_fidelityfx_dx12.dll` and NVIDIA's Direct3D 12 NGX path), so they are Windows only. **Multisampling** is shown only when the GPU cannot run the fragment shader interlock
+render path, as on Windows without rasterizer-ordered views. **Cheats** (Infinite Health, Infinite Energy, Turbo Attack
+and, in Marvel Ultimate Alliance and Gold Edition, Coin Multiplier) are the same code on both systems: the launcher's
+Cheats page saves them per game, and **F10** changes them for the session while playing, which needs a keyboard.
 
 ## Requirements
 
@@ -52,7 +54,7 @@ real Steam Deck hardware is still limited, so rendering, audio, controllers and 
 3. Add it to Steam with **Games > Add a Non-Steam Game to My Library**, then play it from **Game Mode**.
 
 If Steam starts it in an environment where FUSE is unavailable, the AppImage unpacks itself and runs anyway (see below).
-Upscaling and the Graphics card selector are Windows only on the Deck too.
+AMD FSR 3.1 and NVIDIA DLSS are Windows only on the Deck too.
 
 ### If the AppImage does not start
 
@@ -103,7 +105,7 @@ A build run outside an AppImage keeps `game`, `logs` and `user_data` next to the
   views); other GPUs use host render targets.
 - Some diagnostics are Windows only: the CRASH REPORT section, the hang and hitch stack samples, and the GPU plugin's
   Performance, GPU work and PSO compile lines, which come from its Direct3D 12 backend. The frame pacing, game timing,
-  audio and save lines are the same on both. Dynamic page streaming is a Direct3D 12 optimization.
+  audio and save lines are the same on both.
 - Holding **Shift** to bring the launcher back works only if the window gets keyboard focus while Shift is still held,
   because SDL cannot read the keyboard before the window has focus. Keep Shift held until the launcher appears.
 - The VSync setting maps to Vulkan's present mode: **Off** allows immediate presentation (tearing), **On** uses mailbox or

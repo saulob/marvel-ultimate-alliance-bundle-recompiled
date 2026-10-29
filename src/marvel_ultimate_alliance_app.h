@@ -28,6 +28,7 @@
 #include "achievements_overlay.h"
 #include "active_log.h"
 #include "aspect_ratio.h"
+#include "cheat_menu.h"
 #include "diagnostics.h"
 #include "disc_identity.h"
 #include "frame_counter.h"
@@ -131,6 +132,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       REXLOG_WARN("Recompiled game code is not part of this build");
     }
     mua::ApplyGraphicsAdapter();
+    mua::ApplyVsync();
   }
 
   void OnPostLoadXexImage() override {
@@ -202,6 +204,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
       mua::PinGuestVideoMode();
       mua::ApplyAspectRatio();
       const rex::PathConfig routed = RoutedPaths(defaults, selected);
+      mua::ApplyDlss(routed.cache_root);
+      mua::ApplyFsr3();
       for (const mua::ShaderStorageRepair& repair : mua::RepairShaderStorage(routed.cache_root)) {
         REXLOG_WARN("Shader cache {}: dropped {} damaged record(s), kept {}", repair.file, repair.dropped, repair.kept);
       }
@@ -289,9 +293,16 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
         mua::QueueStartupSkipIntroNotice(REXCVAR_GET(mua_skip_intro));
         mua::CreateSkipIntroNotice(imgui_drawer());
         CreateCursorSync(imgui_drawer());
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD) || defined(MUA_RUNTIME_MUA2)
+        cheat_menu_.Attach(window(), imgui_drawer());
+#endif
         if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
           // Replaces ReXApp's own callback: the modal overlay keeps the game's input until its close press is released.
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD) || defined(MUA_RUNTIME_MUA2)
+          input->SetActiveCallback([this] { return cheat_menu_.GameInputActive(); });
+#else
           input->SetActiveCallback([this] { return GameInputActive(); });
+#endif
         }
         mua::ModalDialog::AttachEscapeKey(window());
       }
@@ -305,6 +316,9 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     }
     mua::ModalDialog::DetachEscapeKey();
     delete achievements_;
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD) || defined(MUA_RUNTIME_MUA2)
+    cheat_menu_.Detach();
+#endif
     DetachWindowHost();
     REXLOG_INFO("{}", mua::FormatCleanExit(mua::ProcessUptimeText()));
   }
@@ -315,7 +329,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     REXLOG_INFO("Window closing, hard-exiting process.");
     mua::DiscardSessionLogBeforeHardExit();
     rex::FlushLogging();
-    std::_Exit(0);
+    mua::HardExitProcess();
   }
 
   // F7 toggles the project's own overlay; ReXApp's stock one is never created.
@@ -383,14 +397,7 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
     if (!IsLauncher()) {
       return LocalRuntimeBlocker(game);
     }
-    if (game.executable.empty()) {
-      return std::format("{} has no runtime yet.", game.display_name);
-    }
-    std::error_code ec;
-    if (std::filesystem::exists(mua::PortFolder() / std::string(game.executable), ec)) {
-      return {};
-    }
-    return std::format("The {} runtime is not part of this build.", game.display_name);
+    return mua::LauncherRuntimeBlocker(game, mua::ProgramFolder(), mua::kHostProgramPlatform);
   }
 
   void LogAchievementStore(const mua::RecompiledImage& image) {
@@ -424,9 +431,10 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   }
 
   static bool StartRuntime(const mua::GameState& game) {
-    const std::filesystem::path executable = mua::PortFolder() / std::string(game.game->executable);
-    REXLOG_INFO("Starting {}", mua::Utf8(executable));
-    return mua::RelaunchExecutable(executable, L"--mua_skip_launcher=true");
+    const std::filesystem::path program =
+        mua::GameProgramPath(*game.game, mua::ProgramFolder(), mua::kHostProgramPlatform);
+    REXLOG_INFO("Starting {}", mua::Utf8(program));
+    return mua::RelaunchExecutable(program, L"--mua_skip_launcher=true");
   }
 
   [[noreturn]] static void ExitLauncher() {
@@ -492,5 +500,8 @@ class MarvelUltimateAllianceApp : public rex::ReXApp {
   std::filesystem::path shipped_config_;
   mua::UserDataSelection user_data_;
   mua::AchievementsOverlay* achievements_ = nullptr;
+#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD) || defined(MUA_RUNTIME_MUA2)
+  mua::CheatMenu cheat_menu_;
+#endif
   bool show_launcher_ = false;
 };

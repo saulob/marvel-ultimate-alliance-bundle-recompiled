@@ -14,9 +14,16 @@ namespace mua {
 // The folder the player sees the port in: the executable's, or the AppImage's.
 std::filesystem::path PortFolder();
 
+// The folder holding this build's programs: the executable's, which inside an AppImage is its read-only mount.
+std::filesystem::path ProgramFolder();
+
 // Windows: caches the current run's log file and installs the unhandled exception filter that appends
 // a CRASH REPORT block to it. A no-op on Linux.
 void InstallCrashReports();
+
+// Ends the process with exit code 0 at once. On Windows std::_Exit still runs every DLL's detach code (GPU driver,
+// NGX, audio) while the closed window stays on screen.
+[[noreturn]] void HardExitProcess();
 
 // The architecture this build runs as ("x86-64", "arm64", ...), for the startup log line.
 const char* ArchitectureName();

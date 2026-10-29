@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <format>
 #include <optional>
+#include <system_error>
 
 namespace mua {
 namespace {
@@ -12,6 +14,8 @@ constexpr PageMask kInstallPages = PageBit(LauncherPage::kPlay) | PageBit(Launch
 constexpr PageMask kPlayablePages = kInstallPages | PageBit(LauncherPage::kDisplay) |
                                     PageBit(LauncherPage::kGraphics) | PageBit(LauncherPage::kGameplay) |
                                     PageBit(LauncherPage::kAchievements) | PageBit(LauncherPage::kControls);
+
+constexpr PageMask kCheatPages = kPlayablePages | PageBit(LauncherPage::kCheats);
 
 constexpr std::array kGames = {
     GameDefinition{
@@ -24,10 +28,12 @@ constexpr std::array kGames = {
         .profile_id = "mua-x360",
         .legacy_folder = "",
         .runtime_supported = true,
-        .pages = kPlayablePages,
-        .executable = "marvel_ultimate_alliance_mua1.exe",
+        .pages = kCheatPages,
+        .program = "marvel_ultimate_alliance_mua1",
         .data_folder = "mua1",
         .frame_policy = kMua1FramePolicy,
+        .upscalers = kAllUpscalers,
+        .scene_profile = "mua1",
     },
     GameDefinition{
         .id = GameId::kMua1Gold,
@@ -39,10 +45,13 @@ constexpr std::array kGames = {
         .profile_id = "mua-gold-x360",
         .legacy_folder = "extracted",
         .runtime_supported = true,
-        .pages = kPlayablePages,
-        .executable = "marvel_ultimate_alliance_mua1_gold.exe",
+        .pages = kCheatPages,
+        .program = "marvel_ultimate_alliance_mua1_gold",
         .data_folder = "mua1_gold",
         .frame_policy = kMua1FramePolicy,
+        .upscalers = kAllUpscalers,
+        // MUA1's scene, which its later Direct3D also draws over at 4x MSAA between the scene's resolves.
+        .scene_profile = "mua1-gold",
     },
     GameDefinition{
         .id = GameId::kMua2,
@@ -54,10 +63,14 @@ constexpr std::array kGames = {
         .profile_id = "mua2-x360",
         .legacy_folder = "",
         .runtime_supported = true,
-        .pages = kPlayablePages,
-        .executable = "marvel_ultimate_alliance_mua2.exe",
+        .pages = kCheatPages,
+        .program = "marvel_ultimate_alliance_mua2",
         .data_folder = "mua2",
         .frame_policy = kMua2FramePolicy,
+        .upscalers = kAllUpscalers,
+        // Its scene is one 1040x624 surface that fits the EDRAM at 2x MSAA, beside the 1280x720 composite.
+        .scene_profile = "mua2",
+        .scene_size = {1040, 624},
     },
 };
 
@@ -102,6 +115,31 @@ std::filesystem::path GameUserDataRoot(const GameDefinition& game, const std::fi
 
 std::filesystem::path GameCacheRoot(const GameDefinition& game, const std::filesystem::path& cache_root) {
   return cache_root / std::string(game.data_folder);
+}
+
+std::string ProgramFileName(std::string_view program, ProgramPlatform platform) {
+  std::string name(program);
+  if (platform == ProgramPlatform::kWindows && !name.empty()) {
+    name += ".exe";
+  }
+  return name;
+}
+
+std::filesystem::path GameProgramPath(const GameDefinition& game, const std::filesystem::path& program_folder,
+                                      ProgramPlatform platform) {
+  return program_folder / ProgramFileName(game.program, platform);
+}
+
+std::string LauncherRuntimeBlocker(const GameDefinition& game, const std::filesystem::path& program_folder,
+                                   ProgramPlatform platform) {
+  if (game.program.empty()) {
+    return std::format("{} has no runtime yet.", game.display_name);
+  }
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(GameProgramPath(game, program_folder, platform), ec)) {
+    return {};
+  }
+  return std::format("The {} runtime is not part of this build.", game.display_name);
 }
 
 void SetActiveGame(GameId id) {

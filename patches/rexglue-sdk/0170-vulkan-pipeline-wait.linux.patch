@@ -1,0 +1,113 @@
+The Vulkan half of 0048: a draw whose pipeline is still the async placeholder waits for the real one within
+the frame's async_shader_wait_ms budget, and is skipped (with the frame's presentation, as before) only if
+it isn't ready by then.
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index c0d5e59..a11545e 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -542,6 +542,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Tracks whether any draw in the current frame used an async placeholder
+   // graphics pipeline and may have produced incomplete output.
+   bool frame_used_async_placeholder_pipeline_ = false;
++  // What is left of this frame's wait for pipelines created in the background
++  // (async_shader_wait_ms), in microseconds.
++  int64_t pipeline_wait_left_us_ = 0;
+   // Guest frame index, since some transient resources can be reused across
+   // submissions. Values updated in the beginning of a frame.
+   uint64_t frame_current_ = 1;
+diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
+index 7b938b9..a404270 100644
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -94,6 +94,9 @@ class VulkanPipelineCache {
+       VulkanRenderTargetCache::RenderPassKey render_pass_key, VkPipeline& pipeline_out,
+       const PipelineLayoutProvider*& pipeline_layout_out, void** pipeline_handle_out = nullptr);
+   bool IsCreatingPipelines() const;
++  // Waits until the pipeline of a placeholder handle is created in the background, for at most
++  // budget_us microseconds (the time spent is taken off budget_us). Returns whether it is ready.
++  bool WaitForPipeline(void* handle, int64_t& budget_us) const;
+   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
+                                     const PipelineLayoutProvider*& pipeline_layout_out,
+                                     bool* is_placeholder_out = nullptr) const;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index bf50128..6e6ca6d 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3894,8 +3894,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
+                                                 &pipeline_is_placeholder);
+   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
+-    frame_used_async_placeholder_pipeline_ = true;
+-    return true;
++    // Being created in the background: wait for it within this frame's budget (many are created
++    // at once, so most are ready in a few milliseconds), and only skip the draw if it isn't ready
++    // by then.
++    if (pipeline_wait_left_us_ > 0 &&
++        pipeline_cache_->WaitForPipeline(pipeline_handle, pipeline_wait_left_us_)) {
++      pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline,
++                                                    pipeline_layout_provider,
++                                                    &pipeline_is_placeholder);
++    }
++    if (pipeline_is_placeholder) {
++      frame_used_async_placeholder_pipeline_ = true;
++      return true;
++    }
+   }
+   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
+     return draw_fail("pipeline_lookup");
+@@ -5232,6 +5243,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   if (is_opening_frame) {
+     frame_open_ = true;
+     frame_used_async_placeholder_pipeline_ = false;
++    pipeline_wait_left_us_ = int64_t(REXCVAR_GET(async_shader_wait_ms)) * 1000;
+ 
+     // Reset bindings that depend on transient data.
+     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index efb81f0..2686b3e 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -12,12 +12,14 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <cstdint>
+ #include <cstring>
+ #include <memory>
+ #include <set>
+ #include <string>
+ #include <string_view>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -1213,6 +1215,27 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+   return startup_loading_ || !creation_queue_.empty() || creation_threads_busy_ != 0;
+ }
+ 
++bool VulkanPipelineCache::WaitForPipeline(void* handle, int64_t& budget_us) const {
++  const Pipeline* pipeline = reinterpret_cast<const Pipeline*>(handle);
++  const auto start = std::chrono::steady_clock::now();
++  auto spent_us = [&] {
++    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
++                                                                 start)
++        .count();
++  };
++  // A placeholder stays until the real pipeline replaces it, or until its creation fails.
++  while (pipeline->is_placeholder.load(std::memory_order_acquire)) {
++    if (pipeline->pipeline.load(std::memory_order_acquire) == VK_NULL_HANDLE ||
++        spent_us() >= budget_us) {
++      budget_us = std::max(budget_us - spent_us(), int64_t(0));
++      return false;
++    }
++    std::this_thread::sleep_for(std::chrono::microseconds(100));
++  }
++  budget_us = std::max(budget_us - spent_us(), int64_t(0));
++  return pipeline->pipeline.load(std::memory_order_acquire) != VK_NULL_HANDLE;
++}
++
+ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+     void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
+     bool* is_placeholder_out) const {

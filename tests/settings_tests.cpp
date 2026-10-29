@@ -3,12 +3,14 @@
 // names every game shares.
 // Scratch folders only. Run: mua_settings_tests
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <vector>
+#include <string_view>
 #include <vector>
 
 #include <toml++/toml.hpp>
@@ -470,11 +472,194 @@ void TestUpscalingPerGame(const Scratch& scratch) {
   reopened.SelectGame(mua::GameId::kMua1);
   CHECK(reopened.Get("mua_upscale_quality") == "balanced");
   mua::ApplyUpscaler(reopened);
-  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::kUpscalerAvailable ? "fsr" : effect));
+  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::UpscalerOnBackend(mua::Upscaler::kFsr1) ? "fsr" : effect));
   reopened.ApplyGameSettings();
   mua::LogUpscaling();
   CHECK(rex::cvar::GetFlagByName("window_width") == window_width);
   CHECK(rex::cvar::GetFlagByName("mua_upscale_quality") == "balanced");
+
+  rex::cvar::SetFlagByName("present_effect", effect);
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  fs::remove_all(root / "mua1");
+  fs::remove(scratch.player);
+}
+
+void TestFsr3Settings(const Scratch& scratch) {
+  std::printf("AMD FSR 3.1, its quality and sharpness are MUA 1's own, and FSR 1 stays fsr\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.Get("mua_fsr3_sharpness") == "80");
+  settings.Set("mua_upscaler", "fsr3");
+  settings.Set("mua_upscale_quality", "ultra_performance");
+  settings.Set("mua_fsr3_sharpness", "35");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_fsr3_sharpness") == "80");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Save());
+  const toml::table mua1 = toml::parse_file((root / "mua1" / "game_settings.toml").string());
+  CHECK(mua1["mua_upscaler"].value<std::string>() == "fsr3");
+  CHECK(mua1["mua_upscale_quality"].value<std::string>() == "ultra_performance");
+  CHECK(mua1["mua_fsr3_sharpness"].value<int64_t>() == 35 || mua1["mua_fsr3_sharpness"].value<std::string>() == "35");
+
+  const std::string effect = rex::cvar::GetFlagByName("present_effect");
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  reopened.SelectGame(mua::GameId::kMua1);
+  CHECK(reopened.Get("mua_upscaler") == "fsr3");
+  CHECK(reopened.Get("mua_fsr3_sharpness") == "35");
+  // FSR 3.1 presents plainly, so FSR 1's sharpening never runs on its output.
+  mua::ApplyUpscaler(reopened);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::UpscalerOnBackend(mua::Upscaler::kFsr3) ? "bilinear" : effect));
+  reopened.ApplyGameSettings();
+  CHECK(rex::cvar::GetFlagByName("mua_upscaler") == "fsr3");
+  CHECK(rex::cvar::GetFlagByName("mua_upscale_quality") == "ultra_performance");
+  CHECK(rex::cvar::GetFlagByName("mua_fsr3_sharpness") == "35");
+  // Without the GPU plugin's d3d12_fsr3_mode (this test's runtime has none) nothing is set.
+  mua::ApplyFsr3();
+  CHECK(!rex::cvar::GetFlagInfo("d3d12_fsr3_mode"));
+  mua::LogUpscaling();
+
+  // A saved FSR 1 choice is still FSR 1.
+  reopened.Set("mua_upscaler", "fsr");
+  reopened.Set("mua_upscale_quality", "balanced");
+  mua::ApplyUpscaler(reopened);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == (mua::UpscalerOnBackend(mua::Upscaler::kFsr1) ? "fsr" : effect));
+
+  rex::cvar::SetFlagByName("present_effect", effect);
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
+  rex::cvar::SetFlagByName("mua_fsr3_sharpness", "80");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  fs::remove_all(root / "mua1");
+  fs::remove(scratch.player);
+}
+
+void TestTemporalUpscalersPerGame(const Scratch& scratch) {
+  std::printf("FSR 3.1 and DLSS are each game's own choice; MUA 2 reads a saved one as Off\n");
+  const fs::path root = scratch.player.parent_path();
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  settings.Set("mua_upscaler", "dlss");
+  settings.Set("mua_upscale_quality", "quality");
+  settings.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "native");
+  settings.Set("mua_upscaler", "fsr3");
+  settings.Set("mua_upscale_quality", "ultra_performance");
+  settings.Set("mua_fsr3_sharpness", "60");
+  settings.SelectGame(mua::GameId::kMua2);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_fsr3_sharpness") == "80");
+  settings.Set("mua_upscaler", "fsr");
+  settings.Set("mua_upscale_quality", "balanced");
+  settings.SelectGame(mua::GameId::kMua1);
+  CHECK(settings.Get("mua_upscaler") == "dlss");
+  CHECK(settings.Save());
+  const auto saved = [&](const char* folder, const char* key) {
+    return toml::parse_file((root / folder / "game_settings.toml").string())[key].value<std::string>();
+  };
+  CHECK(saved("mua1", "mua_upscaler") == "dlss" && saved("mua1", "mua_upscale_quality") == "quality");
+  CHECK(saved("mua1_gold", "mua_upscaler") == "fsr3" &&
+        saved("mua1_gold", "mua_upscale_quality") == "ultra_performance");
+  CHECK(saved("mua2", "mua_upscaler") == "fsr" && saved("mua2", "mua_upscale_quality") == "balanced");
+  CHECK(!fs::exists(scratch.player) || !toml::parse_file(scratch.player.string()).contains("mua_upscaler"));
+
+  struct Expected {
+    mua::GameId game;
+    const char* upscaler;
+    mua::Upscaler parsed;
+  };
+  const mua::Upscaler fsr3 = mua::UpscalerOnBackend(mua::Upscaler::kFsr3) ? mua::Upscaler::kFsr3 : mua::Upscaler::kOff;
+  const mua::Upscaler dlss = mua::UpscalerOnBackend(mua::Upscaler::kDlss) ? mua::Upscaler::kDlss : mua::Upscaler::kOff;
+  const mua::Upscaler fsr1 = mua::UpscalerOnBackend(mua::Upscaler::kFsr1) ? mua::Upscaler::kFsr1 : mua::Upscaler::kOff;
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  for (const Expected& expected : {Expected{mua::GameId::kMua1, "dlss", dlss},
+                                   Expected{mua::GameId::kMua1Gold, "fsr3", fsr3},
+                                   Expected{mua::GameId::kMua2, "fsr", fsr1}}) {
+    reopened.SelectGame(expected.game);
+    CHECK(reopened.Get("mua_upscaler") == expected.upscaler);
+    CHECK(mua::ParseUpscaler(reopened.Get("mua_upscaler"), mua::Game(expected.game).upscalers) == expected.parsed);
+  }
+  reopened.SelectGame(mua::GameId::kMua1Gold);
+  CHECK(reopened.Get("mua_fsr3_sharpness") == "60");
+
+  // A MUA 2 file naming FSR 3.1 or DLSS, saved before MUA 2 had a scene profile, is now that upscaler, and the other
+  // games keep their own choices.
+  for (const auto& [temporal, parsed] : {std::pair{"fsr3", fsr3}, std::pair{"dlss", dlss}}) {
+    std::ofstream(root / "mua2" / "game_settings.toml", std::ios::trunc)
+        << "mua_upscaler = \"" << temporal << "\"\nmua_upscale_quality = \"performance\"\n";
+    mua::GameSettings older;
+    older.Capture(scratch.player, scratch.shipped);
+    older.SelectGame(mua::GameId::kMua2);
+    CHECK(older.Get("mua_upscaler") == temporal);
+    CHECK(mua::ParseUpscaler(older.Get("mua_upscaler"), mua::Game(mua::GameId::kMua2).upscalers) == parsed);
+    older.SelectGame(mua::GameId::kMua1);
+    CHECK(older.Get("mua_upscaler") == "dlss");
+    older.SelectGame(mua::GameId::kMua1Gold);
+    CHECK(older.Get("mua_upscaler") == "fsr3");
+  }
+
+  rex::cvar::SetFlagByName("mua_upscaler", "off");
+  rex::cvar::SetFlagByName("mua_upscale_quality", "native");
+  rex::cvar::SetFlagByName("mua_fsr3_sharpness", "80");
+  rex::cvar::SetFlagByName("mua_game", "mua1-gold");
+  for (const char* folder : {"mua1", "mua1_gold", "mua2"}) {
+    fs::remove_all(root / folder);
+  }
+  fs::remove(scratch.player);
+}
+
+void TestDeprecatedUpscalersAreOff(const Scratch& scratch) {
+  std::printf("NVIDIA NIS and AMD CAS saved by earlier versions are Off and saved as off\n");
+  const fs::path root = scratch.player.parent_path();
+  const std::string effect = rex::cvar::GetFlagByName("present_effect");
+  CHECK(!rex::cvar::GetFlagInfo("mua_nis_sharpness") && !rex::cvar::GetFlagInfo("mua_cas_sharpness"));
+  // MUA 1's own file from a version with NIS, and CAS in the shared file, as earlier versions wrote them.
+  fs::create_directories(root / "mua1");
+  std::ofstream(root / "mua1" / "game_settings.toml") << "mua_upscaler = \"nis\"\nmua_nis_sharpness = 75\n"
+                                                         "mua_upscale_quality = \"balanced\"\n";
+  std::ofstream(scratch.player) << "mua_upscaler = \"cas\"\nmua_cas_sharpness = 40\n";
+  // What loading that file sets; earlier tests here already set the cvar, which a config file doesn't override.
+  rex::cvar::SetFlagByName("mua_upscaler", "cas");
+  rex::cvar::SetFlagByName("mua_game", "mua1");
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  CHECK(settings.Get("mua_upscaler") == "off");
+  CHECK(settings.Get("mua_upscale_quality") == "balanced");
+  for (const mua::GameId other : {mua::GameId::kMua1Gold, mua::GameId::kMua2}) {
+    settings.SelectGame(other);
+    CHECK(settings.Get("mua_upscaler") == "off");
+  }
+  settings.SelectGame(mua::GameId::kMua1);
+  mua::ApplyUpscaler(settings);
+  CHECK(rex::cvar::GetFlagByName("present_effect") == effect);
+  settings.ApplyGameSettings();
+  CHECK(mua::ActiveUpscaler() == mua::Upscaler::kOff);
+  CHECK(settings.Save());
+  const toml::table mua1 = toml::parse_file((root / "mua1" / "game_settings.toml").string());
+  CHECK(mua1["mua_upscaler"].value<std::string>() == "off");
+  CHECK(mua1["mua_upscale_quality"].value<std::string>() == "balanced");
+  CHECK(toml::parse_file(scratch.player.string())["mua_upscaler"].value<std::string>() == "off");
+
+  mua::GameSettings reopened;
+  reopened.Capture(scratch.player, scratch.shipped);
+  reopened.SelectGame(mua::GameId::kMua1);
+  CHECK(reopened.Get("mua_upscaler") == "off");
+  // The launcher shows Off, FSR 1 and DLSS only.
+  for (const char* value : {"nis", "cas"}) {
+    reopened.Set("mua_upscaler", value);
+    mua::ApplyUpscaler(reopened);
+    CHECK(rex::cvar::GetFlagByName("present_effect") == effect);
+  }
 
   rex::cvar::SetFlagByName("present_effect", effect);
   rex::cvar::SetFlagByName("mua_upscaler", "off");
@@ -614,6 +799,39 @@ void TestPlayerNamesAreShared(const Scratch& scratch) {
   fs::remove(scratch.player);
 }
 
+void TestRuntimeUpscalers() {
+  std::printf("this runtime's presenter runs AMD FSR 1 on either backend; DLSS and FSR 3.1 only on Direct3D 12\n");
+  CHECK(mua::RuntimeUpscalers() == mua::kBackendUpscalers);
+  CHECK(mua::RuntimeUpscalers() & mua::UpscalerBit(mua::Upscaler::kFsr1));
+  CHECK(rex::cvar::SetFlagByName("present_effect", "fsr"));
+  CHECK(rex::cvar::SetFlagByName("present_effect", "bilinear"));
+  CHECK(!rex::cvar::GetFlagInfo("d3d12_dlss_mode") || mua::kGraphicsBackend == mua::GraphicsBackend::kDirect3D12);
+}
+
+void TestVsyncUsesTheBackendsSettings(const Scratch& scratch) {
+  std::printf("VSync saves and applies this backend's own presenter settings\n");
+  for (const char* key : mua::kBackendSettings.tearing) {
+    CHECK(rex::cvar::GetFlagInfo(key) != nullptr);
+  }
+  CHECK(std::string_view(mua::kTearingSetting) == mua::kBackendSettings.tearing.front());
+  const std::string before = rex::cvar::GetFlagByName(mua::kTearingSetting);
+  const bool vsync_off = before != "true";
+  mua::GameSettings settings;
+  settings.Capture(scratch.player, scratch.shipped);
+  settings.SetBool(mua::kTearingSetting, vsync_off);
+  CHECK(settings.Save());
+  CHECK(toml::parse_file(scratch.player.string())[mua::kTearingSetting].value<bool>() == vsync_off);
+  for (const char* tearing : {"false", "true"}) {
+    rex::cvar::SetFlagByName(mua::kTearingSetting, tearing);
+    mua::ApplyVsync();
+    for (const char* key : mua::kBackendSettings.tearing) {
+      CHECK(rex::cvar::GetFlagByName(key) == tearing);
+    }
+  }
+  rex::cvar::SetFlagByName(mua::kTearingSetting, before);
+  mua::ApplyVsync();
+}
+
 }  // namespace
 
 int main() {
@@ -633,8 +851,13 @@ int main() {
   TestAspectRatioPerGame(scratch);
   TestAspectRatioVideoMode();
   TestUpscalingPerGame(scratch);
+  TestFsr3Settings(scratch);
+  TestTemporalUpscalersPerGame(scratch);
+  TestDeprecatedUpscalersAreOff(scratch);
   TestPlayerNamesAreShared(scratch);
   TestHdTextIsShared(scratch);
+  TestVsyncUsesTheBackendsSettings(scratch);
+  TestRuntimeUpscalers();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

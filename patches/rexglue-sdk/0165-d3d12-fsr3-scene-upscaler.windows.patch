@@ -1,0 +1,2982 @@
+AMD FidelityFX Super Resolution 3.1 as a second backend of 0161's scene upscaler, beside DLSS: the same scene detection,
+capture, depth (0163), camera motion vectors, jitter, pre-scene targets (0162, 0164) and write-back, with AMD's signed
+amd_fidelityfx_dx12.dll (FidelityFX SDK v1.1.4, upscaler 3.1.4) through its C API, ffx_api. thirdparty/fidelityfx-api
+holds that SDK's ffx_api.h, ffx_api_types.h, ffx_upscale.h and dx12/ffx_api_dx12.h unchanged, with AMD's MIT license.
+
+d3d12_fsr3_mode (off, native, quality, balanced, performance, ultra_performance) selects it when d3d12_dlss_mode is off,
+d3d12_fsr3_library names the DLL and d3d12_fsr3_sharpness (0 to 100, default 80) is FSR's own RCAS. Fsr3Upscaler loads
+the DLL at the first scene draw (never unloaded), queries the render size of the mode and the jitter phase count with
+AMD's helpers (scene_layout.h has the same formulas as fallbacks) and records the context's creation and each upscale
+on the command list through ExternalCall. The context is created once, again only when the depth convention changes,
+and destroyed after the GPU is done with it. The inputs keep the states FidelityFX is told (compute read, output UAV).
+
+The jitter is AMD's sequence (Halton(2,3) of index + 1, minus a half) moving the scene by render pixels, x right and y
+down, as AMD's projection jitter does; the motion vectors are render pixels from the current to the previous position
+without jitter (motionVectorScale 1); depth is 0 to 1, inverted when the scene's zfunc is GREATER or GEQUAL. The camera
+planes and vertical field of view come from the depth and y rows of the draws' object-to-clip matrices (the projection
+most of them share), FLT_MAX for an infinite far plane. viewSpaceToMetersFactor is AMD's default of 1. Log lines of the
+shared code carry the backend's name; DLSS's are unchanged.
+
+FSR 3.1 writes alpha 1 to its whole output, and the game's passes after the scene read the scene's own alpha. The
+write-back of the FSR output (scene_encode mode 3) keeps FSR 3.1's color and takes alpha from the scene's own
+render-size color, sampled bilinearly at each output pixel's unjittered position.
+
+diff --git a/include/rex/graphics/d3d12/fsr3_upscaler.h b/include/rex/graphics/d3d12/fsr3_upscaler.h
+new file mode 100644
+index 0000000..0d1e30d
+--- /dev/null
++++ b/include/rex/graphics/d3d12/fsr3_upscaler.h
+@@ -0,0 +1,95 @@
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++#include <filesystem>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include <rex/ui/d3d12/d3d12_api.h>
++
++namespace rex::graphics::d3d12 {
++
++// AMD FidelityFX Super Resolution 3.1 through AMD's signed amd_fidelityfx_dx12.dll and its C API (ffx_api), loaded at
++// run time so the GPU plugin runs without it.
++class Fsr3Upscaler {
++ public:
++  // FfxApiUpscaleQualityMode.
++  enum Quality : uint32_t { kNative, kQuality, kBalanced, kPerformance, kUltraPerformance };
++
++  struct CreateDesc {
++    bool depth_inverted = false;
++    uint32_t max_render_width = 0;
++    uint32_t max_render_height = 0;
++    uint32_t output_width = 0;
++    uint32_t output_height = 0;
++  };
++
++  // Resources in D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, the output in D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++  // FidelityFX returns them to those states.
++  struct Frame {
++    ID3D12Resource* color = nullptr;   // RGBA8, render size
++    ID3D12Resource* depth = nullptr;   // R32F, render size, 0 to 1
++    ID3D12Resource* motion = nullptr;  // RG16F, render pixels, current to previous, without jitter
++    ID3D12Resource* output = nullptr;  // RGBA8, output size
++    uint32_t render_width = 0;
++    uint32_t render_height = 0;
++    uint32_t output_width = 0;
++    uint32_t output_height = 0;
++    float jitter_x = 0.0f;  // render pixels the scene was moved by, x right, y down
++    float jitter_y = 0.0f;
++    float sharpness = 0.0f;
++    float frame_time_ms = 0.0f;
++    float camera_near = 0.0f;
++    float camera_far = 0.0f;
++    float camera_fov_y = 0.0f;
++    bool reset = false;
++  };
++
++  struct RecordArgs {
++    bool create = false;
++    CreateDesc create_desc;
++    Frame frame;
++  };
++
++  Fsr3Upscaler() = default;
++  Fsr3Upscaler(const Fsr3Upscaler&) = delete;
++  Fsr3Upscaler& operator=(const Fsr3Upscaler&) = delete;
++  ~Fsr3Upscaler() { DestroyContext(); }
++
++  // Logs why FSR 3.1 can't run when it returns false.
++  bool Load(const std::filesystem::path& dll, ID3D12Device* device);
++  bool loaded() const { return create_context_ != nullptr; }
++  // The upscaler versions the DLL offers on the device, such as "3.1.4".
++  std::string versions() const { return versions_; }
++
++  std::optional<std::pair<uint32_t, uint32_t>> QueryRenderSize(uint32_t output_width, uint32_t output_height,
++                                                                Quality quality) const;
++  std::optional<uint32_t> QueryJitterPhaseCount(uint32_t render_width, uint32_t output_width) const;
++
++  // On the thread that records the command list (DeferredCommandList::ExternalCall): creates the context first when
++  // asked or when there is none, then records the upscale. The GPU must be done with an earlier context.
++  static void RecordOnCommandList(void* upscaler, ID3D12GraphicsCommandList* command_list, const void* args);
++
++  // The GPU must be done with the context.
++  void DestroyContext();
++
++  bool failed() const { return failed_.load(std::memory_order_relaxed); }
++
++ private:
++  bool CreateContext(const CreateDesc& desc);
++  void Record(ID3D12GraphicsCommandList* command_list, const RecordArgs& args);
++
++  // ffx_api's entry points (PfnFfxCreateContext and so on).
++  void* create_context_ = nullptr;
++  void* destroy_context_ = nullptr;
++  void* query_ = nullptr;
++  void* dispatch_ = nullptr;
++  ID3D12Device* device_ = nullptr;
++  std::string versions_;
++  void* context_ = nullptr;
++  std::atomic<bool> failed_{false};
++};
++
++}  // namespace rex::graphics::d3d12
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index a2dd44a..685f390 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -9,7 +9,7 @@
+ #include <optional>
+ #include <vector>
+ 
+-// Geometry and math of the DLSS scene upscaler that doesn't need a GPU.
++// Geometry and math of the scene upscaler (NVIDIA DLSS, AMD FSR 3.1) that doesn't need a GPU.
+ namespace rex::graphics::d3d12::scene {
+ 
+ inline constexpr uint32_t kTileWidthSamples = 80;
+@@ -536,4 +536,102 @@ inline uint32_t SnapRenderWidth(uint32_t render_width, uint32_t guest_width, uin
+   return min_width && snapped < min_width ? render_width : snapped;
+ }
+ 
++// scene_encode.cs.hlsl mode 3: the render-size position, in pixels, holding the scene alpha of an output pixel; the
++// scene was drawn moved by jitter render pixels.
++inline std::array<float, 2> SceneAlphaSourcePosition(uint32_t x, uint32_t y, const std::array<float, 2>& source_scale,
++                                                     const std::array<float, 2>& jitter,
++                                                     const std::array<float, 4>& source_clamp) {
++  return {std::clamp((float(x) + 0.5f) * source_scale[0] + jitter[0], source_clamp[0] + 0.5f, source_clamp[2] - 0.5f),
++          std::clamp((float(y) + 0.5f) * source_scale[1] + jitter[1], source_clamp[1] + 0.5f, source_clamp[3] - 0.5f)};
++}
++
++// AMD FSR 3.1's quality modes, FfxApiUpscaleQualityMode order: output size over render size along each axis.
++inline constexpr std::array<float, 5> kFsr3UpscaleRatios = {1.0f, 1.5f, 1.7f, 2.0f, 3.0f};
++
++// ffxFsr3UpscalerGetRenderResolutionFromQualityMode.
++inline uint32_t Fsr3RenderSize(uint32_t output_size, uint32_t quality_mode) {
++  const size_t mode = std::min<size_t>(quality_mode, kFsr3UpscaleRatios.size() - 1);
++  return uint32_t(float(output_size) / kFsr3UpscaleRatios[mode]);
++}
++
++// ffxFsr3UpscalerGetJitterPhaseCount; FSR 3.1 derives the same count from each dispatch's render and output widths.
++inline uint32_t Fsr3JitterPhaseCount(uint32_t render_width, uint32_t output_width) {
++  if (!render_width) {
++    return 8;
++  }
++  return std::max(uint32_t(8.0f * std::pow(double(float(output_width) / float(render_width)), 2.0)), uint32_t(1));
++}
++
++// The camera planes FSR 3.1 reconstructs view depth with: the view depths where the depth buffer holds its near and far
++// values (far is infinite when nothing reaches its value) and the vertical field of view in radians.
++struct CameraProjection {
++  double near_depth = 0.0;
++  double far_depth = 0.0;
++  double fov_y = 0.0;
++};
++
++// From an object-to-clip matrix whose clip w is the view depth and whose clip z mixes the w row with a constant, as a
++// perspective projection of any affine object-to-view transform gives (the y row is the field of view times the view
++// up row, which has the forward row's length when the object scale is uniform). z_scale and z_offset are the guest
++// viewport's; inverted when nearer surfaces have greater depth.
++inline std::optional<CameraProjection> CameraProjectionFor(const Matrix& m, double z_scale, double z_offset,
++                                                           bool inverted) {
++  const double w[3] = {m[12], m[13], m[14]};
++  const double w_length_squared = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
++  if (!(w_length_squared > 1.0e-12)) {
++    return std::nullopt;
++  }
++  const double a = (m[8] * w[0] + m[9] * w[1] + m[10] * w[2]) / w_length_squared;
++  const double z_rest[3] = {m[8] - a * w[0], m[9] - a * w[1], m[10] - a * w[2]};
++  if (z_rest[0] * z_rest[0] + z_rest[1] * z_rest[1] + z_rest[2] * z_rest[2] > 1.0e-6 * w_length_squared) {
++    return std::nullopt;
++  }
++  // Depth buffer value = alpha + beta / view depth.
++  const double alpha = z_scale * a + z_offset;
++  const double beta = z_scale * (m[11] - a * m[15]);
++  const auto depth_at = [&](double value) {
++    const double denominator = value - alpha;
++    return std::abs(denominator) < 1.0e-9 ? INFINITY : beta / denominator;
++  };
++  CameraProjection projection;
++  projection.near_depth = depth_at(inverted ? 1.0 : 0.0);
++  projection.far_depth = depth_at(inverted ? 0.0 : 1.0);
++  if (projection.far_depth < 0.0) {
++    projection.far_depth = INFINITY;
++  }
++  const double y_along_w = (m[4] * w[0] + m[5] * w[1] + m[6] * w[2]) / w_length_squared;
++  const double y[3] = {m[4] - y_along_w * w[0], m[5] - y_along_w * w[1], m[6] - y_along_w * w[2]};
++  const double focal = std::sqrt((y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) / w_length_squared);
++  projection.fov_y = focal > 0.0 ? 2.0 * std::atan(1.0 / focal) : 0.0;
++  if (!(projection.near_depth > 0.0) || !std::isfinite(projection.near_depth) ||
++      !(projection.far_depth > projection.near_depth) || !(projection.fov_y > 0.0 && projection.fov_y < 3.1)) {
++    return std::nullopt;
++  }
++  return projection;
++}
++
++inline bool NearlyEqual(const CameraProjection& a, const CameraProjection& b) {
++  const auto close = [](double x, double y) {
++    return x == y || std::abs(x - y) <= 1.0e-3 * std::max(std::abs(x), std::abs(y));
++  };
++  return close(a.near_depth, b.near_depth) && close(a.far_depth, b.far_depth) && close(a.fov_y, b.fov_y);
++}
++
++// The projection most of the scene's draws share (sky domes and the like may use their own).
++inline std::optional<CameraProjection> ConsensusCameraProjection(const std::vector<CameraProjection>& projections) {
++  size_t best = SIZE_MAX;
++  size_t best_agreeing = 0;
++  for (size_t i = 0; i < projections.size(); ++i) {
++    size_t agreeing = 0;
++    for (const CameraProjection& other : projections) {
++      agreeing += NearlyEqual(projections[i], other);
++    }
++    if (agreeing > best_agreeing) {
++      best_agreeing = agreeing;
++      best = i;
++    }
++  }
++  return best == SIZE_MAX ? std::nullopt : std::optional<CameraProjection>(projections[best]);
++}
++
+ }  // namespace rex::graphics::d3d12::scene
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index a49caaa..036ab98 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -2,13 +2,16 @@
+ 
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <cstdint>
++#include <memory>
+ #include <optional>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+ 
+ #include <rex/graphics/d3d12/dlss_bridge.h>
++#include <rex/graphics/d3d12/fsr3_upscaler.h>
+ #include <rex/graphics/d3d12/scene_layout.h>
+ #include <rex/graphics/d3d12/scene_motion_analysis.h>
+ #include <rex/graphics/registers.h>
+@@ -28,14 +31,14 @@ class D3D12RenderTargetCache;
+ class D3D12SharedMemory;
+ class D3D12TextureCache;
+ 
+-// NVIDIA DLSS Super Resolution of the 3D scene only. Draws into the multisampled color and depth surfaces the game
+-// renders its scene in are drawn smaller (by the scale DLSS asks for) and jittered. At each resolve of the scene, its
+-// color and depth are copied out of the EDRAM and the game's texture gets them stretched to full size; when the scene
+-// is done, camera motion vectors are computed from the depth and the object-to-clip matrices of draws with static
+-// vertex shaders, DLSS runs, and its output replaces the textures with the scene's final content, so everything the
+-// game draws from them afterwards (post-processing, HUD, menus) keeps the full resolution. Surfaces drawn only before
+-// the scene in a frame, such as shadow maps, are drawn at the smallest whole resolution scale that keeps the scene's
+-// detail, and their resolves copy them stretched to full size.
++// NVIDIA DLSS or AMD FSR 3.1 Super Resolution of the 3D scene only. Draws into the multisampled color and depth
++// surfaces the game renders its scene in are drawn smaller (by the scale the upscaler asks for) and jittered. At each
++// resolve of the scene, its color and depth are copied out of the EDRAM and the game's texture gets them stretched to
++// full size; when the scene is done, camera motion vectors are computed from the depth and the object-to-clip matrices
++// of draws with static vertex shaders, the upscaler runs, and its output replaces the textures with the scene's final
++// content, so everything the game draws from them afterwards (post-processing, HUD, menus) keeps the full resolution.
++// Surfaces drawn only before the scene in a frame, such as shadow maps, are drawn at the smallest whole resolution
++// scale that keeps the scene's detail, and their resolves copy them stretched to full size.
+ class SceneUpscaler {
+  public:
+   SceneUpscaler(D3D12CommandProcessor& command_processor, D3D12RenderTargetCache& render_target_cache,
+@@ -99,13 +102,22 @@ class SceneUpscaler {
+     kRootParameterCount,
+   };
+ 
++  enum class Backend { kDlss, kFsr3 };
++
+   enum class Encode : uint32_t {
+     kOutput,
+     kStretchedColor,
+     kStretchedDepth,
++    kOutputSceneAlpha,
+   };
+ 
++  const char* Tag() const { return backend_ == Backend::kFsr3 ? "FSR 3.1" : "DLSS"; }
+   bool EnsureRuntime();
++  bool StartDlss();
++  bool StartFsr3();
++  void LogRuntime() const;
++  bool PerformanceMode() const;
++  bool UpscalerFailed() const;
+   bool EnsureResources();
+   void ReleaseResources();
+   void DisableForSession(const std::string& reason);
+@@ -124,13 +136,17 @@ class SceneUpscaler {
+                            uint32_t index_count);
+   std::optional<scene::Matrix> EstimateCameraReprojection(uint32_t& matched_out, uint32_t& agreeing_out) const;
+   void FinishScene();
++  void EvaluateDlss(bool reset, const std::array<float, 2>& jitter);
++  void EvaluateFsr3(bool reset, const std::array<float, 2>& jitter);
++  void UpdateCameraProjection();
+   void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STATES new_state);
+   void EncodeStaging(Encode encode, const SceneResolve* resolve);
+   bool CopyStagingTo(const SceneResolve& resolve);
+   void Dispatch(ID3D12PipelineState* pipeline, const void* constants, uint32_t constant_dwords,
+                 std::array<ID3D12Resource*, 2> sources, std::array<DXGI_FORMAT, 2> source_formats,
+                 std::array<ID3D12Resource*, 2> dests, std::array<DXGI_FORMAT, 2> dest_formats,
+-                uint32_t width, uint32_t height);
++                uint32_t width, uint32_t height,
++                UINT source1_mapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+   std::array<float, 2> JitterForFrame() const;
+   static void EvaluateOnCommandList(void* context, ID3D12GraphicsCommandList* command_list, const void* data);
+ 
+@@ -144,10 +160,12 @@ class SceneUpscaler {
+   bool disabled_ = false;
+   uint32_t resolution_scale_x_ = 1;
+   uint32_t resolution_scale_y_ = 1;
++  Backend backend_ = Backend::kDlss;
+   RexDlssQuality quality_ = REX_DLSS_QUALITY_DLAA;
+   DlssBridge bridge_;
++  Fsr3Upscaler::Quality fsr3_quality_ = Fsr3Upscaler::kNative;
+ 
+-  // Guest pixels of the scene, and host pixels of the DLSS input and output.
++  // Guest pixels of the scene, and host pixels of the upscaler's input and output.
+   uint32_t guest_width_ = 0;
+   uint32_t guest_height_ = 0;
+   uint32_t render_width_ = 0;
+@@ -187,6 +205,18 @@ class SceneUpscaler {
+   Feature feature_;
+   bool feature_recreate_ = true;
+ 
++  // AMD FSR 3.1: its context is created and used on the command list when it is executed.
++  std::unique_ptr<Fsr3Upscaler> fsr3_;
++  uint32_t fsr3_render_width_ = 0;
++  uint32_t fsr3_render_height_ = 0;
++  uint32_t fsr3_sharpness_ = 0;
++  bool fsr3_recreate_ = true;
++  bool fsr3_context_requested_ = false;
++  bool fsr3_depth_inverted_ = false;
++  std::optional<scene::CameraProjection> camera_projection_;
++  bool camera_projection_missing_logged_ = false;
++  std::chrono::steady_clock::time_point last_upscale_time_;
++
+   // Surfaces drawn before the scene: their scale, and whether this frame draws the reduced ones at it.
+   uint32_t pre_scene_scale_x_ = 1;
+   uint32_t pre_scene_scale_y_ = 1;
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 1010221..e4ad997 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -77,6 +77,7 @@ if(REXGLUE_USE_D3D12)
+         d3d12/graphics_system.cpp
+         d3d12/command_processor.cpp
+         d3d12/dlss_bridge.cpp
++        d3d12/fsr3_upscaler.cpp
+         d3d12/primitive_processor.cpp
+         d3d12/render_target_cache.cpp
+         d3d12/scene_upscaler.cpp
+@@ -115,6 +116,11 @@ target_include_directories(rexgpu-xenos PRIVATE
+ 
+ target_compile_options(rexgpu-xenos PRIVATE -Wno-unused-variable)
+ 
++# AMD FidelityFX SDK v1.1.4's ffx_api headers (FSR 3.1); amd_fidelityfx_dx12.dll itself is loaded at run time.
++if(REXGLUE_USE_D3D12)
++    target_include_directories(rexgpu-xenos PRIVATE ${REXGLUE_ROOT}/thirdparty/fidelityfx-api/include)
++endif()
++
+ # ThinLTO in Release on Windows: the command processor's per-draw path calls across many translation units (render
+ # target, texture and pipeline caches, shared memory, register file), which only link-time optimization can inline.
+ if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+diff --git a/src/graphics/d3d12/fsr3_upscaler.cpp b/src/graphics/d3d12/fsr3_upscaler.cpp
+new file mode 100644
+index 0000000..2d5cfe9
+--- /dev/null
++++ b/src/graphics/d3d12/fsr3_upscaler.cpp
+@@ -0,0 +1,200 @@
++#include <rex/graphics/d3d12/fsr3_upscaler.h>
++
++#include <algorithm>
++#include <array>
++#include <cwchar>
++#include <string>
++#include <type_traits>
++
++#include <ffx_api/dx12/ffx_api_dx12.h>
++#include <ffx_api/ffx_api.h>
++#include <ffx_api/ffx_upscale.h>
++
++#include <rex/filesystem.h>
++#include <rex/logging.h>
++
++namespace rex::graphics::d3d12 {
++
++namespace {
++
++constexpr uint32_t kMaxLoggedMessages = 32;
++std::atomic<uint32_t> logged_messages{0};
++
++void LogMessage(uint32_t type, const wchar_t* message) {
++  if (!message || logged_messages.fetch_add(1, std::memory_order_relaxed) >= kMaxLoggedMessages) {
++    return;
++  }
++  const int length = int(std::wcslen(message));
++  std::string text(size_t(WideCharToMultiByte(CP_UTF8, 0, message, length, nullptr, 0, nullptr, nullptr)), '\0');
++  WideCharToMultiByte(CP_UTF8, 0, message, length, text.data(), int(text.size()), nullptr, nullptr);
++  if (type == FFX_API_MESSAGE_TYPE_ERROR) {
++    REXGPU_ERROR("FSR 3.1: {}", text);
++  } else {
++    REXGPU_WARN("FSR 3.1: {}", text);
++  }
++}
++
++template <typename T>
++T* Entry(HMODULE module, const char* name) {
++  return reinterpret_cast<T*>(reinterpret_cast<void*>(GetProcAddress(module, name)));
++}
++
++}  // namespace
++
++bool Fsr3Upscaler::Load(const std::filesystem::path& dll, ID3D12Device* device) {
++  // Never unloaded: FidelityFX keeps its context's objects in it.
++  HMODULE module = LoadLibraryExW(dll.c_str(), nullptr,
++                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
++  if (!module) {
++    REXGPU_WARN("FSR 3.1: off, {} can't be loaded (error {})", rex::path_to_utf8(dll), uint32_t(GetLastError()));
++    return false;
++  }
++  auto* create_context = Entry<std::remove_pointer_t<PfnFfxCreateContext>>(module, "ffxCreateContext");
++  auto* destroy_context = Entry<std::remove_pointer_t<PfnFfxDestroyContext>>(module, "ffxDestroyContext");
++  auto* query = Entry<std::remove_pointer_t<PfnFfxQuery>>(module, "ffxQuery");
++  auto* dispatch = Entry<std::remove_pointer_t<PfnFfxDispatch>>(module, "ffxDispatch");
++  if (!create_context || !destroy_context || !query || !dispatch) {
++    REXGPU_WARN("FSR 3.1: off, {} is not AMD's FidelityFX API DLL", rex::path_to_utf8(dll));
++    return false;
++  }
++  device_ = device;
++  query_ = reinterpret_cast<void*>(query);
++  std::array<uint64_t, 8> ids = {};
++  std::array<const char*, 8> names = {};
++  uint64_t count = names.size();
++  ffxQueryDescGetVersions versions = {};
++  versions.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
++  versions.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
++  versions.device = device;
++  versions.outputCount = &count;
++  versions.versionIds = ids.data();
++  versions.versionNames = names.data();
++  if (query(nullptr, &versions.header) != FFX_API_RETURN_OK || !count) {
++    REXGPU_WARN("FSR 3.1: off, {} offers no upscaler for this graphics card", rex::path_to_utf8(dll));
++    query_ = nullptr;
++    device_ = nullptr;
++    return false;
++  }
++  versions_.clear();
++  for (uint64_t i = 0; i < std::min<uint64_t>(count, names.size()); ++i) {
++    versions_ += (versions_.empty() ? "" : ", ") + std::string(names[i] ? names[i] : "?");
++  }
++  create_context_ = reinterpret_cast<void*>(create_context);
++  destroy_context_ = reinterpret_cast<void*>(destroy_context);
++  dispatch_ = reinterpret_cast<void*>(dispatch);
++  return true;
++}
++
++std::optional<std::pair<uint32_t, uint32_t>> Fsr3Upscaler::QueryRenderSize(uint32_t output_width,
++                                                                            uint32_t output_height,
++                                                                            Quality quality) const {
++  uint32_t width = 0;
++  uint32_t height = 0;
++  ffxQueryDescUpscaleGetRenderResolutionFromQualityMode desc = {};
++  desc.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GETRENDERRESOLUTIONFROMQUALITYMODE;
++  desc.displayWidth = output_width;
++  desc.displayHeight = output_height;
++  desc.qualityMode = quality;
++  desc.pOutRenderWidth = &width;
++  desc.pOutRenderHeight = &height;
++  if (!query_ || reinterpret_cast<PfnFfxQuery>(query_)(nullptr, &desc.header) != FFX_API_RETURN_OK || !width ||
++      !height) {
++    return std::nullopt;
++  }
++  return std::make_pair(width, height);
++}
++
++std::optional<uint32_t> Fsr3Upscaler::QueryJitterPhaseCount(uint32_t render_width, uint32_t output_width) const {
++  int32_t phases = 0;
++  ffxQueryDescUpscaleGetJitterPhaseCount desc = {};
++  desc.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTERPHASECOUNT;
++  desc.renderWidth = render_width;
++  desc.displayWidth = output_width;
++  desc.pOutPhaseCount = &phases;
++  if (!query_ || reinterpret_cast<PfnFfxQuery>(query_)(nullptr, &desc.header) != FFX_API_RETURN_OK || phases <= 0) {
++    return std::nullopt;
++  }
++  return uint32_t(phases);
++}
++
++bool Fsr3Upscaler::CreateContext(const CreateDesc& desc) {
++  DestroyContext();
++  ffxCreateBackendDX12Desc backend = {};
++  backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
++  backend.device = device_;
++  ffxCreateContextDescUpscale upscale = {};
++  upscale.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
++  upscale.header.pNext = &backend.header;
++  upscale.flags = desc.depth_inverted ? FFX_UPSCALE_ENABLE_DEPTH_INVERTED : 0u;
++  upscale.maxRenderSize = {desc.max_render_width, desc.max_render_height};
++  upscale.maxUpscaleSize = {desc.output_width, desc.output_height};
++  upscale.fpMessage = LogMessage;
++  ffxContext context = nullptr;
++  const ffxReturnCode_t result =
++      reinterpret_cast<PfnFfxCreateContext>(create_context_)(&context, &upscale.header, nullptr);
++  if (result != FFX_API_RETURN_OK || !context) {
++    REXGPU_WARN("FSR 3.1: the upscaler context can't be created (FidelityFX error {})", result);
++    return false;
++  }
++  context_ = context;
++  ffxQueryGetProviderVersion provider = {};
++  provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
++  reinterpret_cast<PfnFfxQuery>(query_)(&context, &provider.header);
++  REXGPU_INFO("FSR 3.1: upscaler context created | FidelityFX upscaler {} | max render {}x{} -> output {}x{} | depth "
++              "{}",
++              provider.versionName ? provider.versionName : "unknown", desc.max_render_width, desc.max_render_height,
++              desc.output_width, desc.output_height, desc.depth_inverted ? "inverted (1 near)" : "0 near, 1 far");
++  return true;
++}
++
++void Fsr3Upscaler::DestroyContext() {
++  if (context_) {
++    ffxContext context = context_;
++    reinterpret_cast<PfnFfxDestroyContext>(destroy_context_)(&context, nullptr);
++    context_ = nullptr;
++  }
++}
++
++void Fsr3Upscaler::RecordOnCommandList(void* upscaler, ID3D12GraphicsCommandList* command_list, const void* args) {
++  static_cast<Fsr3Upscaler*>(upscaler)->Record(command_list, *static_cast<const RecordArgs*>(args));
++}
++
++void Fsr3Upscaler::Record(ID3D12GraphicsCommandList* command_list, const RecordArgs& args) {
++  if (failed() || !loaded()) {
++    return;
++  }
++  if ((args.create || !context_) && !CreateContext(args.create_desc)) {
++    failed_.store(true, std::memory_order_relaxed);
++    return;
++  }
++  const Frame& frame = args.frame;
++  ffxDispatchDescUpscale desc = {};
++  desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
++  desc.commandList = command_list;
++  desc.color = ffxApiGetResourceDX12(frame.color, FFX_API_RESOURCE_STATE_COMPUTE_READ);
++  desc.depth = ffxApiGetResourceDX12(frame.depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
++  desc.motionVectors = ffxApiGetResourceDX12(frame.motion, FFX_API_RESOURCE_STATE_COMPUTE_READ);
++  desc.output = ffxApiGetResourceDX12(frame.output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
++  desc.jitterOffset = {frame.jitter_x, frame.jitter_y};
++  desc.motionVectorScale = {1.0f, 1.0f};
++  desc.renderSize = {frame.render_width, frame.render_height};
++  desc.upscaleSize = {frame.output_width, frame.output_height};
++  desc.enableSharpening = frame.sharpness > 0.0f;
++  desc.sharpness = frame.sharpness;
++  desc.frameTimeDelta = frame.frame_time_ms;
++  desc.preExposure = 1.0f;
++  desc.reset = frame.reset;
++  desc.cameraNear = frame.camera_near;
++  desc.cameraFar = frame.camera_far;
++  desc.cameraFovAngleVertical = frame.camera_fov_y;
++  // The game's world units aren't known; AMD's default only moves a distance-based motion threshold.
++  desc.viewSpaceToMetersFactor = 1.0f;
++  ffxContext context = context_;
++  const ffxReturnCode_t result = reinterpret_cast<PfnFfxDispatch>(dispatch_)(&context, &desc.header);
++  if (result != FFX_API_RETURN_OK) {
++    REXGPU_WARN("FSR 3.1: the upscale failed (FidelityFX error {})", result);
++    failed_.store(true, std::memory_order_relaxed);
++  }
++}
++
++}  // namespace rex::graphics::d3d12
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index 1e2fed2..8a5af62 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdlib>
++#include <cfloat>
+ #include <cstring>
+ #include <filesystem>
+ 
+@@ -33,6 +34,18 @@ REXCVAR_DEFINE_STRING(d3d12_dlss_bridge, "", "GPU/D3D12",
+ REXCVAR_DEFINE_STRING(d3d12_dlss_data_path, "", "GPU/D3D12",
+                       "Writable folder for NVIDIA NGX's files; empty uses the DLSS bridge's folder")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_STRING(d3d12_fsr3_mode, "off", "GPU/D3D12",
++                      "AMD FSR 3.1 Super Resolution of the 3D scene: off, native, quality, balanced, performance, "
++                      "ultra_performance; d3d12_dlss_mode takes precedence")
++    .allowed({"off", "native", "quality", "balanced", "performance", "ultra_performance"})
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_STRING(d3d12_fsr3_library, "", "GPU/D3D12",
++                      "Path of AMD's amd_fidelityfx_dx12.dll, which runs FSR 3.1; empty leaves FSR 3.1 off")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(d3d12_fsr3_sharpness, 80, "GPU/D3D12",
++                     "FSR 3.1's own sharpening (RCAS) of its output, 0 (off) to 100")
++    .range(0, 100)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_scale, true, "GPU/D3D12",
+                     "With DLSS, draw the targets drawn only before the 3D scene, such as shadow maps, at the scene's "
+                     "resolution scale instead of the full one")
+@@ -58,6 +71,7 @@ namespace {
+ constexpr uint32_t kSceneSurfaceMinDraws = 20;
+ constexpr size_t kMaxTrackedMatrices = 2048;
+ constexpr size_t kMaxReprojectionSamples = 256;
++constexpr size_t kMaxProjectionSamples = 64;
+ constexpr size_t kMaxOtherResolves = 16;
+ constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFF;
+ constexpr uint32_t kEdramTileWidth = xenos::kEdramTileWidthSamples;
+@@ -99,8 +113,14 @@ struct EncodeConstants {
+   float source_texel_size[2];
+   float source_clamp[4];
+   uint32_t depth_is_float24;
++  float jitter[2];
+ };
+ 
++// scene_encode.cs.hlsl's mode 3 reads the scene color's alpha as its single-component source.
++constexpr UINT kAlphaAsFirstComponent = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
++    D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
++    D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3);
++
+ struct StretchConstants {
+   uint32_t base_dwords;
+   uint32_t pitch_dwords;
+@@ -131,6 +151,20 @@ std::optional<RexDlssQuality> ParseMode(const std::string& mode) {
+   return std::nullopt;
+ }
+ 
++std::optional<Fsr3Upscaler::Quality> ParseFsr3Mode(const std::string& mode) {
++  if (mode == "native") return Fsr3Upscaler::kNative;
++  if (mode == "quality") return Fsr3Upscaler::kQuality;
++  if (mode == "balanced") return Fsr3Upscaler::kBalanced;
++  if (mode == "performance") return Fsr3Upscaler::kPerformance;
++  if (mode == "ultra_performance") return Fsr3Upscaler::kUltraPerformance;
++  return std::nullopt;
++}
++
++const char* Fsr3QualityName(Fsr3Upscaler::Quality quality) {
++  constexpr const char* kNames[] = {"Native", "Quality", "Balanced", "Performance", "Ultra Performance"};
++  return kNames[std::min<uint32_t>(quality, Fsr3Upscaler::kUltraPerformance)];
++}
++
+ const char* QualityName(RexDlssQuality quality) {
+   switch (quality) {
+     case REX_DLSS_QUALITY_DLAA:
+@@ -179,18 +213,33 @@ SceneUpscaler::~SceneUpscaler() { Shutdown(); }
+ bool SceneUpscaler::Initialize(uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y) {
+   Shutdown();
+   const std::optional<RexDlssQuality> quality = ParseMode(REXCVAR_GET(d3d12_dlss_mode));
+-  if (!quality) {
++  const std::optional<Fsr3Upscaler::Quality> fsr3_quality = ParseFsr3Mode(REXCVAR_GET(d3d12_fsr3_mode));
++  if (!quality && !fsr3_quality) {
+     return true;
+   }
+-  if (REXCVAR_GET(d3d12_dlss_bridge).empty()) {
++  backend_ = quality ? Backend::kDlss : Backend::kFsr3;
++  if (quality && fsr3_quality) {
++    REXGPU_WARN("FSR 3.1: off, d3d12_dlss_mode is set too and DLSS runs instead");
++  }
++  if (backend_ == Backend::kDlss && REXCVAR_GET(d3d12_dlss_bridge).empty()) {
+     REXGPU_WARN("DLSS: off, no DLSS bridge (d3d12_dlss_bridge) - the scene renders without it");
+     return true;
+   }
++  if (backend_ == Backend::kFsr3 && REXCVAR_GET(d3d12_fsr3_library).empty()) {
++    REXGPU_WARN("FSR 3.1: off, no FidelityFX runtime (d3d12_fsr3_library) - the scene renders without it");
++    return true;
++  }
+   if (render_target_cache_.GetPath() != RenderTargetCache::Path::kPixelShaderInterlock) {
+-    REXGPU_WARN("DLSS: off, it needs the rasterizer-ordered view render target path - the scene renders without it");
++    REXGPU_WARN("{}: off, it needs the rasterizer-ordered view render target path - the scene renders without it",
++                Tag());
+     return true;
+   }
+-  quality_ = *quality;
++  if (quality) {
++    quality_ = *quality;
++  } else {
++    fsr3_quality_ = *fsr3_quality;
++    fsr3_sharpness_ = uint32_t(std::clamp(REXCVAR_GET(d3d12_fsr3_sharpness), 0, 100));
++  }
+   resolution_scale_x_ = draw_resolution_scale_x;
+   resolution_scale_y_ = draw_resolution_scale_y;
+   guest_width_ = VideoModeDimension("video_mode_width", 1280);
+@@ -246,7 +295,7 @@ bool SceneUpscaler::Initialize(uint32_t draw_resolution_scale_x, uint32_t draw_r
+         device, shaders::scene_edram_stretch_cs, sizeof(shaders::scene_edram_stretch_cs), root_signature_);
+   }
+   if (!root_signature_ || !capture_pipeline_ || !motion_pipeline_ || !encode_pipeline_ || !stretch_pipeline_) {
+-    REXGPU_ERROR("DLSS: off, its compute pipelines can't be created - the scene renders without it");
++    REXGPU_ERROR("{}: off, its compute pipelines can't be created - the scene renders without it", Tag());
+     Shutdown();
+     return true;
+   }
+@@ -260,6 +309,14 @@ void SceneUpscaler::Shutdown() {
+     feature_.api->release_feature(feature_.handle);
+     feature_.handle = nullptr;
+   }
++  if (fsr3_) {
++    if (fsr3_context_requested_) {
++      command_processor_.AwaitAllQueueOperationsCompletion();
++    }
++    fsr3_->DestroyContext();
++    fsr3_.reset();
++    fsr3_context_requested_ = false;
++  }
+   ReleaseResources();
+   ui::d3d12::util::ReleaseAndNull(stretch_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(encode_pipeline_);
+@@ -273,7 +330,7 @@ void SceneUpscaler::Shutdown() {
+ 
+ void SceneUpscaler::DisableForSession(const std::string& reason) {
+   if (!disabled_) {
+-    REXGPU_WARN("DLSS: off for this session, {} - the scene renders at full resolution without DLSS", reason);
++    REXGPU_WARN("{0}: off for this session, {1} - the scene renders at full resolution without {0}", Tag(), reason);
+   }
+   disabled_ = true;
+   runtime_ready_ = false;
+@@ -284,6 +341,47 @@ bool SceneUpscaler::EnsureRuntime() {
+   if (runtime_ready_ || disabled_ || !enabled_) {
+     return runtime_ready_;
+   }
++  if (!(backend_ == Backend::kFsr3 ? StartFsr3() : StartDlss())) {
++    return false;
++  }
++  const bool pre_scene_scale = REXCVAR_GET(d3d12_dlss_pre_scene_scale);
++  pre_scene_scale_x_ =
++      pre_scene_scale ? scene::PreSceneScale(render_width_, guest_width_, resolution_scale_x_) : resolution_scale_x_;
++  pre_scene_scale_y_ =
++      pre_scene_scale ? scene::PreSceneScale(render_height_, guest_height_, resolution_scale_y_) : resolution_scale_y_;
++  pre_scene_native_ = REXCVAR_GET(d3d12_dlss_pre_scene_native) && PerformanceMode() &&
++                      (pre_scene_scale_x_ > 1 || pre_scene_scale_y_ > 1) &&
++                      (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
++  if (!EnsureResources()) {
++    DisableForSession("its textures can't be created");
++    return false;
++  }
++  if (backend_ == Backend::kDlss) {
++    feature_.api = &bridge_.api();
++    feature_recreate_ = true;
++  } else {
++    fsr3_recreate_ = true;
++  }
++  runtime_ready_ = true;
++  LogRuntime();
++  std::string pre_scene_text = ScaleText(pre_scene_scale_x_, pre_scene_scale_y_);
++  if (pre_scene_scale_x_ == resolution_scale_x_ && pre_scene_scale_y_ == resolution_scale_y_) {
++    pre_scene_text += pre_scene_scale ? " (no smaller whole scale keeps the scene's detail)"
++                                      : " (d3d12_dlss_pre_scene_scale off)";
++  }
++  if (pre_scene_native_) {
++    pre_scene_text += ", 1x for those only the scene samples";
++  }
++  REXGPU_INFO("{}: scale domains | output, HUD and menus {}x{} ({}) | scene {}x{} ({}) | targets drawn before the "
++              "scene {}",
++              Tag(), output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_), render_width_,
++              render_height_,
++              ScaleText(double(render_width_) / double(guest_width_), double(render_height_) / double(guest_height_)),
++              pre_scene_text);
++  return true;
++}
++
++bool SceneUpscaler::StartDlss() {
+   const std::filesystem::path dll = rex::to_path(REXCVAR_GET(d3d12_dlss_bridge));
+   const std::string& data = REXCVAR_GET(d3d12_dlss_data_path);
+   if (!bridge_.Initialize(dll, data.empty() ? dll.parent_path() : rex::to_path(data),
+@@ -307,22 +405,44 @@ bool SceneUpscaler::EnsureRuntime() {
+   }
+   const float ratio = float(output_width_) / float(render_width_);
+   jitter_phases_ = std::clamp(uint32_t(std::ceil(8.0f * ratio * ratio)), uint32_t(8), uint32_t(72));
+-  const bool pre_scene_scale = REXCVAR_GET(d3d12_dlss_pre_scene_scale);
+-  pre_scene_scale_x_ =
+-      pre_scene_scale ? scene::PreSceneScale(render_width_, guest_width_, resolution_scale_x_) : resolution_scale_x_;
+-  pre_scene_scale_y_ =
+-      pre_scene_scale ? scene::PreSceneScale(render_height_, guest_height_, resolution_scale_y_) : resolution_scale_y_;
+-  pre_scene_native_ = REXCVAR_GET(d3d12_dlss_pre_scene_native) &&
+-                      (quality_ == REX_DLSS_QUALITY_PERFORMANCE || quality_ == REX_DLSS_QUALITY_ULTRA_PERFORMANCE) &&
+-                      (pre_scene_scale_x_ > 1 || pre_scene_scale_y_ > 1) &&
+-                      (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
+-  if (!EnsureResources()) {
+-    DisableForSession("its textures can't be created");
++  return true;
++}
++
++bool SceneUpscaler::StartFsr3() {
++  fsr3_ = std::make_unique<Fsr3Upscaler>();
++  if (!fsr3_->Load(rex::to_path(REXCVAR_GET(d3d12_fsr3_library)), command_processor_.GetD3D12Provider().GetDevice())) {
++    fsr3_.reset();
++    DisableForSession("AMD FSR 3.1 is unavailable");
+     return false;
+   }
+-  feature_.api = &bridge_.api();
+-  feature_recreate_ = true;
+-  runtime_ready_ = true;
++  const std::optional<std::pair<uint32_t, uint32_t>> size =
++      fsr3_->QueryRenderSize(output_width_, output_height_, fsr3_quality_);
++  fsr3_render_width_ = size ? size->first : scene::Fsr3RenderSize(output_width_, fsr3_quality_);
++  fsr3_render_height_ = size ? size->second : scene::Fsr3RenderSize(output_height_, fsr3_quality_);
++  render_width_ = fsr3_quality_ == Fsr3Upscaler::kNative
++                      ? output_width_
++                      : scene::SnapRenderWidth(fsr3_render_width_, guest_width_, 0, output_width_);
++  render_height_ = std::min(fsr3_render_height_, output_height_);
++  if (!render_width_ || !render_height_) {
++    DisableForSession(std::string("FSR 3.1 offers no render size for ") + Fsr3QualityName(fsr3_quality_));
++    return false;
++  }
++  jitter_phases_ = fsr3_->QueryJitterPhaseCount(render_width_, output_width_)
++                       .value_or(scene::Fsr3JitterPhaseCount(render_width_, output_width_));
++  return true;
++}
++
++void SceneUpscaler::LogRuntime() const {
++  if (backend_ == Backend::kFsr3) {
++    REXGPU_INFO("FSR 3.1: AMD FSR 3.1 {} | scene {}x{} -> output {}x{} | AMD's render size {}x{} | FidelityFX "
++                "upscaler {} | jitter Halton(2,3) {} phases | motion vectors render pixels, current to previous, "
++                "without jitter | depth R32F 0 to 1 | color RGBA8 SDR, no auto exposure, pre-exposure 1 | output "
++                "alpha the scene's own | sharpness {}",
++                Fsr3QualityName(fsr3_quality_), render_width_, render_height_, output_width_, output_height_,
++                fsr3_render_width_, fsr3_render_height_, fsr3_->versions(), jitter_phases_,
++                fsr3_sharpness_ ? std::to_string(fsr3_sharpness_) : std::string("off"));
++    return;
++  }
+   REXGPU_INFO(
+       "DLSS: Super Resolution {} | output {}x{} | NVIDIA recommends {}x{} (dynamic {}x{} to {}x{}) | scene input {}x{} "
+       "| jitter Halton(2,3) {} phases | preset {}",
+@@ -330,21 +450,20 @@ bool SceneUpscaler::EnsureRuntime() {
+       optimal_.min_render_width, optimal_.min_render_height, optimal_.max_render_width, optimal_.max_render_height,
+       render_width_, render_height_, jitter_phases_,
+       REXCVAR_GET(d3d12_dlss_preset) ? std::to_string(REXCVAR_GET(d3d12_dlss_preset)) : std::string("default"));
+-  std::string pre_scene_text = ScaleText(pre_scene_scale_x_, pre_scene_scale_y_);
+-  if (pre_scene_scale_x_ == resolution_scale_x_ && pre_scene_scale_y_ == resolution_scale_y_) {
+-    pre_scene_text += pre_scene_scale ? " (no smaller whole scale keeps the scene's detail)"
+-                                      : " (d3d12_dlss_pre_scene_scale off)";
++}
++
++bool SceneUpscaler::PerformanceMode() const {
++  if (backend_ == Backend::kFsr3) {
++    return fsr3_quality_ == Fsr3Upscaler::kPerformance || fsr3_quality_ == Fsr3Upscaler::kUltraPerformance;
+   }
+-  if (pre_scene_native_) {
+-    pre_scene_text += ", 1x for those only the scene samples";
++  return quality_ == REX_DLSS_QUALITY_PERFORMANCE || quality_ == REX_DLSS_QUALITY_ULTRA_PERFORMANCE;
++}
++
++bool SceneUpscaler::UpscalerFailed() const {
++  if (backend_ == Backend::kFsr3) {
++    return fsr3_ && fsr3_->failed();
+   }
+-  REXGPU_INFO("DLSS: scale domains | output, HUD and menus {}x{} ({}) | scene {}x{} ({}) | targets drawn before the "
+-              "scene {}",
+-              output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_), render_width_,
+-              render_height_,
+-              ScaleText(double(render_width_) / double(guest_width_), double(render_height_) / double(guest_height_)),
+-              pre_scene_text);
+-  return true;
++  return feature_.failed.load(std::memory_order_relaxed);
+ }
+ 
+ bool SceneUpscaler::EnsureResources() {
+@@ -617,9 +736,9 @@ void SceneUpscaler::LogPreSceneTargets() const {
+     std::string& list = pre_scene_native_ && surface.native ? native : surface.reduced ? reduced : kept;
+     list += (list.empty() ? "" : ", ") + SurfaceText(surface.key);
+   }
+-  REXGPU_INFO("DLSS: targets drawn before the scene at 1x (sampled only by the scene): {} | at {}: {} | kept at {} "
++  REXGPU_INFO("{}: targets drawn before the scene at 1x (sampled only by the scene): {} | at {}: {} | kept at {} "
+               "(drawn into or sampled after the scene): {}",
+-              native.empty() ? "none" : native, ScaleText(pre_scene_scale_x_, pre_scene_scale_y_),
++              Tag(), native.empty() ? "none" : native, ScaleText(pre_scene_scale_x_, pre_scene_scale_y_),
+               reduced.empty() ? "none" : reduced, ScaleText(resolution_scale_x_, resolution_scale_y_),
+               kept.empty() ? "none" : kept);
+ }
+@@ -681,7 +800,7 @@ void SceneUpscaler::Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES&
+ void SceneUpscaler::Dispatch(ID3D12PipelineState* pipeline, const void* constants, uint32_t constant_dwords,
+                              std::array<ID3D12Resource*, 2> sources, std::array<DXGI_FORMAT, 2> source_formats,
+                              std::array<ID3D12Resource*, 2> dests, std::array<DXGI_FORMAT, 2> dest_formats,
+-                             uint32_t width, uint32_t height) {
++                             uint32_t width, uint32_t height, UINT source1_mapping) {
+   ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[4];
+   if (!command_processor_.RequestOneUseSingleViewDescriptors(4, descriptors)) {
+     return;
+@@ -689,7 +808,7 @@ void SceneUpscaler::Dispatch(ID3D12PipelineState* pipeline, const void* constant
+   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+   for (uint32_t i = 0; i < 2; ++i) {
+     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++    srv.Shader4ComponentMapping = i == 1 ? source1_mapping : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+     if (source_formats[i] == DXGI_FORMAT_UNKNOWN && !sources[i]) {
+       // The EDRAM, as a raw buffer.
+       render_target_cache_.WriteEdramRawSRVDescriptor(descriptors[i].first);
+@@ -884,14 +1003,21 @@ void SceneUpscaler::EncodeStaging(Encode encode, const SceneResolve* resolve) {
+   if (!constants.region_size[0] || !constants.region_size[1]) {
+     return;
+   }
+-  ID3D12Resource* color_source = encode == Encode::kOutput ? output_ : color_;
++  const bool scene_alpha = encode == Encode::kOutputSceneAlpha;
++  if (scene_alpha) {
++    const std::array<float, 2> jitter = JitterForFrame();
++    std::copy(jitter.begin(), jitter.end(), constants.jitter);
++  }
++  ID3D12Resource* color_source = encode == Encode::kOutput || scene_alpha ? output_ : color_;
+   Transition(color_, color_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   Transition(depth_, depth_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   Transition(output_, output_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   Transition(staging_, staging_state_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-  Dispatch(encode_pipeline_, &constants, sizeof(constants) / sizeof(uint32_t), {color_source, depth_},
+-           {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_FLOAT}, {staging_, nullptr},
+-           {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, constants.region_size[0], constants.region_size[1]);
++  Dispatch(encode_pipeline_, &constants, sizeof(constants) / sizeof(uint32_t),
++           {color_source, scene_alpha ? color_ : depth_},
++           {DXGI_FORMAT_R8G8B8A8_UNORM, scene_alpha ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R32_FLOAT},
++           {staging_, nullptr}, {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, constants.region_size[0],
++           constants.region_size[1], scene_alpha ? kAlphaAsFirstComponent : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+   Transition(staging_, staging_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+ }
+ 
+@@ -962,53 +1088,26 @@ void SceneUpscaler::FinishScene() {
+   Transition(output_, output_state_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   command_processor_.SubmitBarriers();
+ 
+-  // A second scene in a frame would be a second step of DLSS's history.
+-  const bool dlss = !feature_.failed.load(std::memory_order_relaxed) && !scenes_finished_this_frame_;
++  // A second scene in a frame would be a second step of the upscaler's history.
++  const bool upscaled = !UpscalerFailed() && !scenes_finished_this_frame_;
+   if (scenes_finished_this_frame_) {
+     structure_mismatch_ = "the scene was resolved in more than one pass in a frame";
+   }
+   ++scenes_finished_this_frame_;
+-  if (dlss) {
+-    if (feature_recreate_ && feature_.handle) {
+-      // The previous feature may still be in use by submitted command lists.
+-      command_processor_.AwaitAllQueueOperationsCompletion();
++  if (upscaled) {
++    if (backend_ == Backend::kFsr3) {
++      EvaluateFsr3(reset, jitter);
++    } else {
++      EvaluateDlss(reset, jitter);
+     }
+-    EvaluateArgs args = {};
+-    args.create = feature_recreate_;
+-    args.feature_desc.struct_size = sizeof(args.feature_desc);
+-    args.feature_desc.render_width = render_width_;
+-    args.feature_desc.render_height = render_height_;
+-    args.feature_desc.output_width = output_width_;
+-    args.feature_desc.output_height = output_height_;
+-    args.feature_desc.quality = quality_;
+-    args.feature_desc.flags =
+-        REX_DLSS_FEATURE_MV_LOW_RES | (depth_inverted_ ? REX_DLSS_FEATURE_DEPTH_INVERTED : 0u);
+-    args.feature_desc.preset = uint32_t(REXCVAR_GET(d3d12_dlss_preset));
+-    RexDlssEvaluateDesc& evaluate = args.evaluate;
+-    evaluate.struct_size = sizeof(evaluate);
+-    evaluate.color = color_;
+-    evaluate.depth = depth_;
+-    evaluate.motion_vectors = motion_;
+-    evaluate.output = output_;
+-    evaluate.render_width = render_width_;
+-    evaluate.render_height = render_height_;
+-    evaluate.jitter_x = jitter[0];
+-    evaluate.jitter_y = jitter[1];
+-    evaluate.mv_scale_x = 1.0f;
+-    evaluate.mv_scale_y = 1.0f;
+-    evaluate.pre_exposure = 1.0f;
+-    evaluate.reset = reset || feature_recreate_;
+-    command_processor_.GetDeferredCommandList().ExternalCall(EvaluateOnCommandList, &feature_, &args,
+-                                                             sizeof(args));
+-    command_processor_.InvalidateCommandListState();
+-    feature_recreate_ = false;
+   }
+   Transition(output_, output_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+ 
+   // The textures of resolves that later ones cover again keep their stretched earlier content.
+   uint32_t final_resolves = 0;
+-  if (dlss) {
+-    EncodeStaging(Encode::kOutput, nullptr);
++  if (upscaled) {
++    // FSR 3.1 writes alpha 1, and the game's passes after the scene read the scene's own alpha.
++    EncodeStaging(backend_ == Backend::kFsr3 ? Encode::kOutputSceneAlpha : Encode::kOutput, nullptr);
+     std::vector<scene::ResolveRect> rects;
+     for (const SceneResolve& resolve : color_resolves_) {
+       rects.push_back(resolve.rect);
+@@ -1026,10 +1125,10 @@ void SceneUpscaler::FinishScene() {
+   if (!active_logged_) {
+     active_logged_ = true;
+     REXGPU_INFO(
+-        "DLSS: {} | scene color EDRAM base {} {} {}x MSAA -> {}x{} RGBA8 | depth base {} {} {} -> R32F | motion: camera "
++        "{}: {} | scene color EDRAM base {} {} {}x MSAA -> {}x{} RGBA8 | depth base {} {} {} -> R32F | motion: camera "
+         "reprojection from static draws ({} of {} agree) -> RG16F | output {}x{} written to {} of {} color resolve(s), "
+         "{} depth resolve(s) stretched | HUD and menus at full resolution",
+-        dlss ? "active" : "not evaluated (scene stretched)", surface_->color_base,
++        Tag(), upscaled ? "active" : "not evaluated (scene stretched)", surface_->color_base,
+         surface_->color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA ? "k_8_8_8_8_GAMMA" : "k_8_8_8_8",
+         1u << uint32_t(surface_->msaa), render_width_, render_height_, surface_->depth_base,
+         surface_->depth_format == xenos::DepthRenderTargetFormat::kD24FS8 ? "D24FS8" : "D24S8",
+@@ -1040,6 +1139,117 @@ void SceneUpscaler::FinishScene() {
+   depth_resolves_.clear();
+ }
+ 
++void SceneUpscaler::EvaluateDlss(bool reset, const std::array<float, 2>& jitter) {
++  if (feature_recreate_ && feature_.handle) {
++    // The previous feature may still be in use by submitted command lists.
++    command_processor_.AwaitAllQueueOperationsCompletion();
++  }
++  EvaluateArgs args = {};
++  args.create = feature_recreate_;
++  args.feature_desc.struct_size = sizeof(args.feature_desc);
++  args.feature_desc.render_width = render_width_;
++  args.feature_desc.render_height = render_height_;
++  args.feature_desc.output_width = output_width_;
++  args.feature_desc.output_height = output_height_;
++  args.feature_desc.quality = quality_;
++  args.feature_desc.flags = REX_DLSS_FEATURE_MV_LOW_RES | (depth_inverted_ ? REX_DLSS_FEATURE_DEPTH_INVERTED : 0u);
++  args.feature_desc.preset = uint32_t(REXCVAR_GET(d3d12_dlss_preset));
++  RexDlssEvaluateDesc& evaluate = args.evaluate;
++  evaluate.struct_size = sizeof(evaluate);
++  evaluate.color = color_;
++  evaluate.depth = depth_;
++  evaluate.motion_vectors = motion_;
++  evaluate.output = output_;
++  evaluate.render_width = render_width_;
++  evaluate.render_height = render_height_;
++  evaluate.jitter_x = jitter[0];
++  evaluate.jitter_y = jitter[1];
++  evaluate.mv_scale_x = 1.0f;
++  evaluate.mv_scale_y = 1.0f;
++  evaluate.pre_exposure = 1.0f;
++  evaluate.reset = reset || feature_recreate_;
++  command_processor_.GetDeferredCommandList().ExternalCall(EvaluateOnCommandList, &feature_, &args, sizeof(args));
++  command_processor_.InvalidateCommandListState();
++  feature_recreate_ = false;
++}
++
++void SceneUpscaler::EvaluateFsr3(bool reset, const std::array<float, 2>& jitter) {
++  UpdateCameraProjection();
++  // The depth convention is part of the context.
++  const bool recreate = fsr3_recreate_ || fsr3_depth_inverted_ != depth_inverted_;
++  if (recreate && fsr3_context_requested_) {
++    // The previous context may still be in use by submitted command lists.
++    command_processor_.AwaitAllQueueOperationsCompletion();
++  }
++  const auto now = std::chrono::steady_clock::now();
++  float frame_time_ms = std::chrono::duration<float, std::milli>(now - last_upscale_time_).count();
++  last_upscale_time_ = now;
++  if (!(frame_time_ms > 0.0f && frame_time_ms <= 200.0f)) {
++    frame_time_ms = 1000.0f / 60.0f;
++  }
++  Fsr3Upscaler::RecordArgs args;
++  args.create = recreate;
++  args.create_desc.depth_inverted = depth_inverted_;
++  args.create_desc.max_render_width = render_width_;
++  args.create_desc.max_render_height = render_height_;
++  args.create_desc.output_width = output_width_;
++  args.create_desc.output_height = output_height_;
++  Fsr3Upscaler::Frame& frame = args.frame;
++  frame.color = color_;
++  frame.depth = depth_;
++  frame.motion = motion_;
++  frame.output = output_;
++  frame.render_width = render_width_;
++  frame.render_height = render_height_;
++  frame.output_width = output_width_;
++  frame.output_height = output_height_;
++  frame.jitter_x = jitter[0];
++  frame.jitter_y = jitter[1];
++  frame.sharpness = float(fsr3_sharpness_) / 100.0f;
++  frame.frame_time_ms = frame_time_ms;
++  // Until the game's projection is found.
++  const scene::CameraProjection camera = camera_projection_.value_or(scene::CameraProjection{0.1, INFINITY, 1.0});
++  frame.camera_near = float(camera.near_depth);
++  frame.camera_far = std::isfinite(camera.far_depth) ? float(camera.far_depth) : FLT_MAX;
++  frame.camera_fov_y = float(camera.fov_y);
++  frame.reset = reset || recreate;
++  command_processor_.GetDeferredCommandList().ExternalCall(Fsr3Upscaler::RecordOnCommandList, fsr3_.get(), &args,
++                                                           sizeof(args));
++  command_processor_.InvalidateCommandListState();
++  fsr3_recreate_ = false;
++  fsr3_context_requested_ = true;
++  fsr3_depth_inverted_ = depth_inverted_;
++}
++
++void SceneUpscaler::UpdateCameraProjection() {
++  std::vector<scene::CameraProjection> projections;
++  projections.reserve(std::min(matrices_.size(), kMaxProjectionSamples));
++  const double z_scale = guest_viewport_[4] != 0.0f ? guest_viewport_[4] : 1.0;
++  for (const auto& [key, matrix] : matrices_) {
++    if (projections.size() >= kMaxProjectionSamples) {
++      break;
++    }
++    if (const auto projection = scene::CameraProjectionFor(matrix, z_scale, guest_viewport_[5], depth_inverted_)) {
++      projections.push_back(*projection);
++    }
++  }
++  const std::optional<scene::CameraProjection> consensus = scene::ConsensusCameraProjection(projections);
++  if (consensus && !camera_projection_) {
++    REXGPU_INFO("FSR 3.1: camera from the game's projection | near {:.4g} | far {} | vertical field of view {:.1f} "
++                "degrees | depth {}",
++                consensus->near_depth,
++                std::isfinite(consensus->far_depth) ? fmt::format("{:.4g}", consensus->far_depth) : "infinite",
++                consensus->fov_y * 57.29577951308232, depth_inverted_ ? "1 near, 0 far" : "0 near, 1 far");
++  } else if (!consensus && !camera_projection_ && !camera_projection_missing_logged_) {
++    camera_projection_missing_logged_ = true;
++    REXGPU_INFO("FSR 3.1: no camera projection in this frame's draws yet, near 0.1 and an infinite far plane until "
++                "one is found");
++  }
++  if (consensus) {
++    camera_projection_ = consensus;
++  }
++}
++
+ void SceneUpscaler::BeforeSwap() {
+   if (!enabled_ || disabled_) {
+     return;
+@@ -1047,8 +1257,8 @@ void SceneUpscaler::BeforeSwap() {
+   if (scene_pending_) {
+     FinishScene();
+   }
+-  if (feature_.failed.load(std::memory_order_relaxed) && runtime_ready_) {
+-    DisableForSession("DLSS stopped working");
++  if (UpscalerFailed() && runtime_ready_) {
++    DisableForSession(std::string(Tag()) + " stopped working");
+   }
+   if (!structure_mismatch_.empty() && runtime_ready_) {
+     DisableForSession(structure_mismatch_);
+@@ -1077,7 +1287,7 @@ void SceneUpscaler::BeforeSwap() {
+       surface.depth_format = xenos::DepthRenderTargetFormat((best_key >> 48) & 0xFF);
+       surface_ = surface;
+       reset_history_ = true;
+-      REXGPU_INFO("DLSS: scene surface found: color base {} {}x MSAA, depth base {}, {} draws in a frame",
++      REXGPU_INFO("{}: scene surface found: color base {} {}x MSAA, depth base {}, {} draws in a frame", Tag(),
+                   surface.color_base, 1u << uint32_t(surface.msaa), surface.depth_base, best_draws);
+     }
+   }
+@@ -1101,7 +1311,7 @@ void SceneUpscaler::BeforeSwap() {
+   }
+   if (runtime_ready_ && frames_finished_ >= last_summary_frame_ + 600) {
+     REXGPU_INFO(
+-        "DLSS: {} frames | camera found in {}, moving in {} | history resets {} | static draws agreeing {} of {}",
++        "{}: {} frames | camera found in {}, moving in {} | history resets {} | static draws agreeing {} of {}", Tag(),
+         frames_finished_ - last_summary_frame_, frames_camera_, frames_camera_moving_, frames_reset_, last_agreeing_,
+         last_matched_);
+     last_summary_frame_ = frames_finished_;
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/scene_encode_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/scene_encode_cs.h
+index 74e31a6..aae3084 100644
+--- a/src/graphics/shaders/bytecode/d3d12_5_1/scene_encode_cs.h
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/scene_encode_cs.h
+@@ -18,6 +18,7 @@
+ //   float2 source_texel_size;          // Offset:   40 Size:     8
+ //   float4 source_clamp;               // Offset:   48 Size:    16
+ //   uint depth_is_float24;             // Offset:   64 Size:     4
++//   float2 jitter;                     // Offset:   68 Size:     8
+ //
+ // }
+ //
+@@ -63,8 +64,8 @@ endif
+ iadd r0.xy, vThreadID.xyxx, CB0[0][1].xyxx
+ ieq r1.x, CB0[0][0].w, l(2)
+ if_z CB0[0][0].w
+-  mov r0.zw, l(0,0,0,0)
+-  ld r2.xyzw, r0.xyzw, T0[0].xyzw
++  mov r0.z, l(0)
++  ld r2.xyzw, r0.xyzz, T0[0].xyzw
+   mov_sat r2.xyzw, r2.xyzw
+   mad r2.xyzw, r2.xyzw, l(255.000000, 255.000000, 255.000000, 255.000000), l(0.500000, 0.500000, 0.500000, 0.500000)
+   ftou r2.xyzw, r2.xyzw
+@@ -72,53 +73,73 @@ if_z CB0[0][0].w
+   imad r0.z, r2.z, l(0x00010000), r0.z
+   imad r0.z, r2.w, l(0x01000000), r0.z
+ else
+-  utof r1.yz, r0.xxyx
+-  add r1.yz, r1.yyzy, l(0.000000, 0.500000, 0.500000, 0.000000)
+-  mul r1.yz, r1.yyzy, CB0[0][2].xxyx
+-  if_nz r1.x
+-    round_ni r2.xy, r1.yzyy
+-    add r2.zw, CB0[0][3].zzzw, l(0.000000, 0.000000, -1.000000, -1.000000)
+-    max r2.xy, r2.xyxx, CB0[0][3].xyxx
+-    min r2.xy, r2.zwzz, r2.xyxx
+-    ftou r2.xy, r2.xyxx
+-    mov r2.zw, l(0,0,0,0)
+-    ld r0.w, r2.xyzw, T1[1].yzwx
+-    ult r1.w, r0.w, l(0x38800000)
+-    if_nz r1.w
+-      ushr r1.w, r0.w, l(23)
+-      iadd r1.w, -r1.w, l(113)
+-      umin r1.w, r1.w, l(24)
+-      bfi r2.x, l(23), l(0), r0.w, l(0x00800000)
+-      ushr r1.w, r2.x, r1.w
+-    else
+-      iadd r1.w, r0.w, l(0xc8000000)
+-    endif
+-    ubfe r2.x, l(1), l(3), r1.w
+-    iadd r1.w, r1.w, r2.x
+-    iadd r1.w, r1.w, l(3)
+-    ubfe r1.w, l(24), l(3), r1.w
+-    ge r2.x, l(0.000000), r0.w
+-    uge r2.y, r0.w, l(0x3ffffff8)
+-    movc r1.w, r2.y, l(0.000000), r1.w
+-    movc r1.w, r2.x, l(0), r1.w
+-    mov_sat r0.w, r0.w
+-    mul r0.w, r0.w, l(16777215.000000)
+-    round_ne r0.w, r0.w
+-    ftou r0.w, r0.w
+-    movc r0.w, CB0[0][4].x, r1.w, r0.w
+-    ishl r0.z, r0.w, l(8)
+-  else
++  ieq r1.y, CB0[0][0].w, l(3)
++  if_nz r1.y
++    utof r1.yz, r0.xxyx
++    add r1.yz, r1.yyzy, l(0.000000, 0.500000, 0.500000, 0.000000)
++    mad r1.yz, r1.yyzy, CB0[0][2].xxyx, CB0[0][4].yyzy
+     add r2.xyzw, CB0[0][3].xyzw, l(0.500000, 0.500000, -0.500000, -0.500000)
+     max r1.yz, r1.yyzy, r2.xxyx
+     min r1.yz, r2.zzwz, r1.yyzy
+     mul r1.yz, r1.yyzy, CB0[0][2].zzwz
+-    sample_l r2.xyzw, r1.yzyy, T0[0].xyzw, S0[0], l(0.000000)
++    sample_l r2.w, r1.yzyy, T1[1].yzwx, S0[0], l(0.000000)
++    mov r0.w, l(0)
++    ld r2.xyz, r0.xyww, T0[0].xyzw
+     mov_sat r2.xyzw, r2.xyzw
+     mad r2.xyzw, r2.xyzw, l(255.000000, 255.000000, 255.000000, 255.000000), l(0.500000, 0.500000, 0.500000, 0.500000)
+     ftou r2.xyzw, r2.xyzw
+     imad r0.w, r2.y, l(256), r2.x
+     imad r0.w, r2.z, l(0x00010000), r0.w
+     imad r0.z, r2.w, l(0x01000000), r0.w
++  else
++    utof r1.yz, r0.xxyx
++    add r1.yz, r1.yyzy, l(0.000000, 0.500000, 0.500000, 0.000000)
++    mul r1.yz, r1.yyzy, CB0[0][2].xxyx
++    if_nz r1.x
++      round_ni r2.xy, r1.yzyy
++      add r2.zw, CB0[0][3].zzzw, l(0.000000, 0.000000, -1.000000, -1.000000)
++      max r2.xy, r2.xyxx, CB0[0][3].xyxx
++      min r2.xy, r2.zwzz, r2.xyxx
++      ftou r2.xy, r2.xyxx
++      mov r2.zw, l(0,0,0,0)
++      ld r0.w, r2.xyzw, T1[1].yzwx
++      ult r1.w, r0.w, l(0x38800000)
++      if_nz r1.w
++        ushr r1.w, r0.w, l(23)
++        iadd r1.w, -r1.w, l(113)
++        umin r1.w, r1.w, l(24)
++        bfi r2.x, l(23), l(0), r0.w, l(0x00800000)
++        ushr r1.w, r2.x, r1.w
++      else
++        iadd r1.w, r0.w, l(0xc8000000)
++      endif
++      ubfe r2.x, l(1), l(3), r1.w
++      iadd r1.w, r1.w, r2.x
++      iadd r1.w, r1.w, l(3)
++      ubfe r1.w, l(24), l(3), r1.w
++      ge r2.x, l(0.000000), r0.w
++      uge r2.y, r0.w, l(0x3ffffff8)
++      movc r1.w, r2.y, l(0.000000), r1.w
++      movc r1.w, r2.x, l(0), r1.w
++      mov_sat r0.w, r0.w
++      mul r0.w, r0.w, l(16777215.000000)
++      round_ne r0.w, r0.w
++      ftou r0.w, r0.w
++      movc r0.w, CB0[0][4].x, r1.w, r0.w
++      ishl r0.z, r0.w, l(8)
++    else
++      add r2.xyzw, CB0[0][3].xyzw, l(0.500000, 0.500000, -0.500000, -0.500000)
++      max r1.yz, r1.yyzy, r2.xxyx
++      min r1.yz, r2.zzwz, r1.yyzy
++      mul r1.yz, r1.yyzy, CB0[0][2].zzwz
++      sample_l r2.xyzw, r1.yzyy, T0[0].xyzw, S0[0], l(0.000000)
++      mov_sat r2.xyzw, r2.xyzw
++      mad r2.xyzw, r2.xyzw, l(255.000000, 255.000000, 255.000000, 255.000000), l(0.500000, 0.500000, 0.500000, 0.500000)
++      ftou r2.xyzw, r2.xyzw
++      imad r0.w, r2.y, l(256), r2.x
++      imad r0.w, r2.z, l(0x00010000), r0.w
++      imad r0.z, r2.w, l(0x01000000), r0.w
++    endif
+   endif
+ endif
+ udiv r1.yz, null, r0.xxyx, CB0[0][0].yyzy
+@@ -138,26 +159,26 @@ iadd r0.x, r0.x, r0.y
+ ishl r0.x, r0.x, l(2)
+ store_raw U0[0].x, r0.x, r0.z
+ ret
+-// Approximately 83 instruction slots used
++// Approximately 103 instruction slots used
+ #endif
+ 
+ const BYTE scene_encode_cs[] =
+ {
+-     68,  88,  66,  67,  25,  45,
+-    213,  51,  32,  11,   1,  56,
+-    150, 214,  88, 116, 178, 143,
+-     14, 111,   1,   0,   0,   0,
+-     20,  15,   0,   0,   5,   0,
++     68,  88,  66,  67, 200, 224,
++    197,  38, 174,  44, 189,  31,
++    187, 232, 227, 200,  35, 134,
++     21, 173,   1,   0,   0,   0,
++    160,  17,   0,   0,   5,   0,
+       0,   0,  52,   0,   0,   0,
+-    108,   4,   0,   0, 124,   4,
+-      0,   0, 140,   4,   0,   0,
+-    120,  14,   0,   0,  82,  68,
+-     69,  70,  48,   4,   0,   0,
++    152,   4,   0,   0, 168,   4,
++      0,   0, 184,   4,   0,   0,
++      4,  17,   0,   0,  82,  68,
++     69,  70,  92,   4,   0,   0,
+       1,   0,   0,   0,  48,   1,
+       0,   0,   5,   0,   0,   0,
+      60,   0,   0,   0,   1,   5,
+      83,  67,   0, 133,   0,   0,
+-      5,   4,   0,   0,  19,  19,
++     52,   4,   0,   0,  19,  19,
+      68,  37,  60,   0,   0,   0,
+      24,   0,   0,   0,  40,   0,
+       0,   0,  40,   0,   0,   0,
+@@ -204,206 +225,314 @@ const BYTE scene_encode_cs[] =
+     103, 105, 110, 103,   0,  99,
+     111, 110, 115, 116,  97, 110,
+     116, 115,   0, 171,  37,   1,
+-      0,   0,  10,   0,   0,   0,
++      0,   0,  11,   0,   0,   0,
+      72,   1,   0,   0,  80,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0, 216,   2,
++      0,   0,   0,   0,   0,   3,
+       0,   0,   0,   0,   0,   0,
+       4,   0,   0,   0,   2,   0,
+-      0,   0, 236,   2,   0,   0,
++      0,   0,  20,   3,   0,   0,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+-      0,   0,  16,   3,   0,   0,
++      0,   0,  56,   3,   0,   0,
+       4,   0,   0,   0,   4,   0,
+       0,   0,   2,   0,   0,   0,
+-    236,   2,   0,   0,   0,   0,
++     20,   3,   0,   0,   0,   0,
+       0,   0, 255, 255, 255, 255,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+-     27,   3,   0,   0,   8,   0,
++     67,   3,   0,   0,   8,   0,
+       0,   0,   4,   0,   0,   0,
+-      2,   0,   0,   0, 236,   2,
++      2,   0,   0,   0,  20,   3,
+       0,   0,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+       0,   0, 255, 255, 255, 255,
+-      0,   0,   0,   0,  39,   3,
++      0,   0,   0,   0,  79,   3,
+       0,   0,  12,   0,   0,   0,
+       4,   0,   0,   0,   2,   0,
+-      0,   0, 236,   2,   0,   0,
++      0,   0,  20,   3,   0,   0,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+-      0,   0,  44,   3,   0,   0,
++      0,   0,  84,   3,   0,   0,
+      16,   0,   0,   0,   8,   0,
+       0,   0,   2,   0,   0,   0,
+-     64,   3,   0,   0,   0,   0,
++    104,   3,   0,   0,   0,   0,
+       0,   0, 255, 255, 255, 255,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+-    100,   3,   0,   0,  24,   0,
++    140,   3,   0,   0,  24,   0,
+       0,   0,   8,   0,   0,   0,
+-      2,   0,   0,   0,  64,   3,
++      2,   0,   0,   0, 104,   3,
+       0,   0,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+       0,   0, 255, 255, 255, 255,
+-      0,   0,   0,   0, 112,   3,
++      0,   0,   0,   0, 152,   3,
+       0,   0,  32,   0,   0,   0,
+       8,   0,   0,   0,   2,   0,
+-      0,   0, 132,   3,   0,   0,
++      0,   0, 172,   3,   0,   0,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+-      0,   0, 168,   3,   0,   0,
++      0,   0, 208,   3,   0,   0,
+      40,   0,   0,   0,   8,   0,
+       0,   0,   2,   0,   0,   0,
+-    132,   3,   0,   0,   0,   0,
++    172,   3,   0,   0,   0,   0,
+       0,   0, 255, 255, 255, 255,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+-    186,   3,   0,   0,  48,   0,
++    226,   3,   0,   0,  48,   0,
+       0,   0,  16,   0,   0,   0,
+-      2,   0,   0,   0, 208,   3,
++      2,   0,   0,   0, 248,   3,
+       0,   0,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+       0,   0, 255, 255, 255, 255,
+-      0,   0,   0,   0, 244,   3,
++      0,   0,   0,   0,  28,   4,
+       0,   0,  64,   0,   0,   0,
+       4,   0,   0,   0,   2,   0,
+-      0,   0, 236,   2,   0,   0,
++      0,   0,  20,   3,   0,   0,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+-      0,   0, 112, 105, 116,  99,
+-    104,  95, 100, 119, 111, 114,
+-    100, 115,   0, 100, 119, 111,
+-    114, 100,   0, 171,   0,   0,
+-     19,   0,   1,   0,   1,   0,
++      0,   0,  45,   4,   0,   0,
++     68,   0,   0,   0,   8,   0,
++      0,   0,   2,   0,   0,   0,
++    172,   3,   0,   0,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    112, 105, 116,  99, 104,  95,
++    100, 119, 111, 114, 100, 115,
++      0, 100, 119, 111, 114, 100,
++      0, 171,   0,   0,  19,   0,
++      1,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  13,   3,
++      0,   0, 116, 105, 108, 101,
++     95, 119, 105, 100, 116, 104,
++      0, 116, 105, 108, 101,  95,
++    104, 101, 105, 103, 104, 116,
++      0, 109, 111, 100, 101,   0,
++    114, 101, 103, 105, 111, 110,
++     95, 111, 114, 105, 103, 105,
++    110,   0, 117, 105, 110, 116,
++     50,   0,   1,   0,  19,   0,
++      1,   0,   2,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-    229,   2,   0,   0, 116, 105,
+-    108, 101,  95, 119, 105, 100,
+-    116, 104,   0, 116, 105, 108,
+-    101,  95, 104, 101, 105, 103,
+-    104, 116,   0, 109, 111, 100,
+-    101,   0, 114, 101, 103, 105,
+-    111, 110,  95, 111, 114, 105,
+-    103, 105, 110,   0, 117, 105,
+-    110, 116,  50,   0,   1,   0,
+-     19,   0,   1,   0,   2,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  98,   3,
++      0,   0, 114, 101, 103, 105,
++    111, 110,  95, 115, 105, 122,
++    101,   0, 115, 111, 117, 114,
++     99, 101,  95, 115,  99,  97,
++    108, 101,   0, 102, 108, 111,
++     97, 116,  50,   0,   1,   0,
++      3,   0,   1,   0,   2,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-     58,   3,   0,   0, 114, 101,
+-    103, 105, 111, 110,  95, 115,
++      0,   0,   0,   0,   0,   0,
++    165,   3,   0,   0, 115, 111,
++    117, 114,  99, 101,  95, 116,
++    101, 120, 101, 108,  95, 115,
+     105, 122, 101,   0, 115, 111,
+-    117, 114,  99, 101,  95, 115,
+-     99,  97, 108, 101,   0, 102,
+-    108, 111,  97, 116,  50,   0,
+-      1,   0,   3,   0,   1,   0,
+-      2,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0, 125,   3,   0,   0,
+-    115, 111, 117, 114,  99, 101,
+-     95, 116, 101, 120, 101, 108,
+-     95, 115, 105, 122, 101,   0,
+-    115, 111, 117, 114,  99, 101,
+-     95,  99, 108,  97, 109, 112,
+-      0, 102, 108, 111,  97, 116,
+-     52,   0, 171, 171,   1,   0,
+-      3,   0,   1,   0,   4,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-    199,   3,   0,   0, 100, 101,
+-    112, 116, 104,  95, 105, 115,
+-     95, 102, 108, 111,  97, 116,
+-     50,  52,   0,  77, 105,  99,
+-    114, 111, 115, 111, 102, 116,
+-     32,  40,  82,  41,  32,  72,
+-     76,  83,  76,  32,  83, 104,
+-     97, 100, 101, 114,  32,  67,
+-    111, 109, 112, 105, 108, 101,
+-    114,  32,  49,  48,  46,  49,
+-      0, 171, 171, 171,  73,  83,
++    117, 114,  99, 101,  95,  99,
++    108,  97, 109, 112,   0, 102,
++    108, 111,  97, 116,  52,   0,
++    171, 171,   1,   0,   3,   0,
++      1,   0,   4,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0, 239,   3,
++      0,   0, 100, 101, 112, 116,
++    104,  95, 105, 115,  95, 102,
++    108, 111,  97, 116,  50,  52,
++      0, 106, 105, 116, 116, 101,
++    114,   0,  77, 105,  99, 114,
++    111, 115, 111, 102, 116,  32,
++     40,  82,  41,  32,  72,  76,
++     83,  76,  32,  83, 104,  97,
++    100, 101, 114,  32,  67, 111,
++    109, 112, 105, 108, 101, 114,
++     32,  49,  48,  46,  49,   0,
++     73,  83,  71,  78,   8,   0,
++      0,   0,   0,   0,   0,   0,
++      8,   0,   0,   0,  79,  83,
+      71,  78,   8,   0,   0,   0,
+       0,   0,   0,   0,   8,   0,
+-      0,   0,  79,  83,  71,  78,
+-      8,   0,   0,   0,   0,   0,
+-      0,   0,   8,   0,   0,   0,
+-     83,  72,  69,  88, 228,   9,
+-      0,   0,  81,   0,   5,   0,
+-    121,   2,   0,   0, 106,   8,
+-      0,   1,  89,   0,   0,   7,
+-     70, 142,  48,   0,   0,   0,
++      0,   0,  83,  72,  69,  88,
++     68,  12,   0,   0,  81,   0,
++      5,   0,  17,   3,   0,   0,
++    106,   8,   0,   1,  89,   0,
++      0,   7,  70, 142,  48,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   5,   0,
+       0,   0,   0,   0,   0,   0,
+-     90,   0,   0,   6,  70, 110,
+-     48,   0,   0,   0,   0,   0,
++      5,   0,   0,   0,   0,   0,
++      0,   0,  90,   0,   0,   6,
++     70, 110,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-     88,  24,   0,   7,  70, 126,
+-     48,   0,   0,   0,   0,   0,
++      0,   0,  88,  24,   0,   7,
++     70, 126,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,  85,  85,   0,   0,
+-      0,   0,   0,   0,  88,  24,
+-      0,   7,  70, 126,  48,   0,
++      0,   0,   0,   0,  85,  85,
++      0,   0,   0,   0,   0,   0,
++     88,  24,   0,   7,  70, 126,
++     48,   0,   1,   0,   0,   0,
+       1,   0,   0,   0,   1,   0,
+-      0,   0,   1,   0,   0,   0,
+-     85,  85,   0,   0,   0,   0,
+-      0,   0, 157,   0,   0,   6,
+-     70, 238,  49,   0,   0,   0,
++      0,   0,  85,  85,   0,   0,
++      0,   0,   0,   0, 157,   0,
++      0,   6,  70, 238,  49,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,  95,   0,   0,   2,
+-     50,   0,   2,   0, 104,   0,
+-      0,   2,   3,   0,   0,   0,
+-    155,   0,   0,   4,   8,   0,
+-      0,   0,   8,   0,   0,   0,
+-      1,   0,   0,   0,  80,   0,
+-      0,   8,  50,   0,  16,   0,
+-      0,   0,   0,   0,  70,   0,
+-      2,   0, 230, 138,  48,   0,
+-      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  95,   0,
++      0,   2,  50,   0,   2,   0,
++    104,   0,   0,   2,   3,   0,
++      0,   0, 155,   0,   0,   4,
++      8,   0,   0,   0,   8,   0,
+       0,   0,   1,   0,   0,   0,
+-     60,   0,   0,   7,  18,   0,
+-     16,   0,   0,   0,   0,   0,
+-     26,   0,  16,   0,   0,   0,
+-      0,   0,  10,   0,  16,   0,
+-      0,   0,   0,   0,  31,   0,
+-      4,   3,  10,   0,  16,   0,
+-      0,   0,   0,   0,  62,   0,
+-      0,   1,  21,   0,   0,   1,
+-     30,   0,   0,   8,  50,   0,
++     80,   0,   0,   8,  50,   0,
+      16,   0,   0,   0,   0,   0,
+-     70,   0,   2,   0,  70, 128,
++     70,   0,   2,   0, 230, 138,
+      48,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   1,   0,
+-      0,   0,  32,   0,   0,   9,
+-     18,   0,  16,   0,   1,   0,
+-      0,   0,  58, 128,  48,   0,
++      0,   0,  60,   0,   0,   7,
++     18,   0,  16,   0,   0,   0,
++      0,   0,  26,   0,  16,   0,
++      0,   0,   0,   0,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     31,   0,   4,   3,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     62,   0,   0,   1,  21,   0,
++      0,   1,  30,   0,   0,   8,
++     50,   0,  16,   0,   0,   0,
++      0,   0,  70,   0,   2,   0,
++     70, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  32,   0,
++      0,   9,  18,   0,  16,   0,
++      1,   0,   0,   0,  58, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,  64,   0,   0,
++      2,   0,   0,   0,  31,   0,
++      0,   5,  58, 128,  48,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      1,  64,   0,   0,   2,   0,
+-      0,   0,  31,   0,   0,   5,
++     54,   0,   0,   5,  66,   0,
++     16,   0,   0,   0,   0,   0,
++      1,  64,   0,   0,   0,   0,
++      0,   0,  45,   0,   0,   8,
++    242,   0,  16,   0,   2,   0,
++      0,   0,  70,  10,  16,   0,
++      0,   0,   0,   0,  70, 126,
++     32,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  54,  32,
++      0,   5, 242,   0,  16,   0,
++      2,   0,   0,   0,  70,  14,
++     16,   0,   2,   0,   0,   0,
++     50,   0,   0,  15, 242,   0,
++     16,   0,   2,   0,   0,   0,
++     70,  14,  16,   0,   2,   0,
++      0,   0,   2,  64,   0,   0,
++      0,   0, 127,  67,   0,   0,
++    127,  67,   0,   0, 127,  67,
++      0,   0, 127,  67,   2,  64,
++      0,   0,   0,   0,   0,  63,
++      0,   0,   0,  63,   0,   0,
++      0,  63,   0,   0,   0,  63,
++     28,   0,   0,   5, 242,   0,
++     16,   0,   2,   0,   0,   0,
++     70,  14,  16,   0,   2,   0,
++      0,   0,  35,   0,   0,   9,
++     66,   0,  16,   0,   0,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,   1,  64,
++      0,   0,   0,   1,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  35,   0,   0,   9,
++     66,   0,  16,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,   1,  64,
++      0,   0,   0,   0,   1,   0,
++     42,   0,  16,   0,   0,   0,
++      0,   0,  35,   0,   0,   9,
++     66,   0,  16,   0,   0,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,   1,  64,
++      0,   0,   0,   0,   0,   1,
++     42,   0,  16,   0,   0,   0,
++      0,   0,  18,   0,   0,   1,
++     32,   0,   0,   9,  34,   0,
++     16,   0,   1,   0,   0,   0,
+      58, 128,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,  54,   0,
+-      0,   8, 194,   0,  16,   0,
+-      0,   0,   0,   0,   2,  64,
++      0,   0,   0,   0,   1,  64,
++      0,   0,   3,   0,   0,   0,
++     31,   0,   4,   3,  26,   0,
++     16,   0,   1,   0,   0,   0,
++     86,   0,   0,   5,  98,   0,
++     16,   0,   1,   0,   0,   0,
++      6,   1,  16,   0,   0,   0,
++      0,   0,   0,   0,   0,  10,
++     98,   0,  16,   0,   1,   0,
++      0,   0,  86,   6,  16,   0,
++      1,   0,   0,   0,   2,  64,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   0,  63,   0,   0,
++      0,  63,   0,   0,   0,   0,
++     50,   0,   0,  13,  98,   0,
++     16,   0,   1,   0,   0,   0,
++     86,   6,  16,   0,   1,   0,
++      0,   0,   6, 129,  48,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   2,   0,   0,   0,
++     86, 134,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-     45,   0,   0,   8, 242,   0,
++      4,   0,   0,   0,   0,   0,
++      0,  12, 242,   0,  16,   0,
++      2,   0,   0,   0,  70, 142,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,
++      0,   0,   2,  64,   0,   0,
++      0,   0,   0,  63,   0,   0,
++      0,  63,   0,   0,   0, 191,
++      0,   0,   0, 191,  52,   0,
++      0,   7,  98,   0,  16,   0,
++      1,   0,   0,   0,  86,   6,
++     16,   0,   1,   0,   0,   0,
++      6,   1,  16,   0,   2,   0,
++      0,   0,  51,   0,   0,   7,
++     98,   0,  16,   0,   1,   0,
++      0,   0, 166,  11,  16,   0,
++      2,   0,   0,   0,  86,   6,
++     16,   0,   1,   0,   0,   0,
++     56,   0,   0,   9,  98,   0,
++     16,   0,   1,   0,   0,   0,
++     86,   6,  16,   0,   1,   0,
++      0,   0, 166, 139,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   2,   0,   0,   0,
++     72,   0,   0,  13, 130,   0,
+      16,   0,   2,   0,   0,   0,
+-     70,  14,  16,   0,   0,   0,
++    150,   5,  16,   0,   1,   0,
++      0,   0, 150, 115,  32,   0,
++      1,   0,   0,   0,   1,   0,
++      0,   0,   0,  96,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,  64,   0,   0,
++      0,   0,   0,   0,  54,   0,
++      0,   5, 130,   0,  16,   0,
++      0,   0,   0,   0,   1,  64,
++      0,   0,   0,   0,   0,   0,
++     45,   0,   0,   8, 114,   0,
++     16,   0,   2,   0,   0,   0,
++     70,  15,  16,   0,   0,   0,
+       0,   0,  70, 126,  32,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,  54,  32,   0,   5,
+@@ -423,23 +552,23 @@ const BYTE scene_encode_cs[] =
+       0,   5, 242,   0,  16,   0,
+       2,   0,   0,   0,  70,  14,
+      16,   0,   2,   0,   0,   0,
+-     35,   0,   0,   9,  66,   0,
++     35,   0,   0,   9, 130,   0,
+      16,   0,   0,   0,   0,   0,
+      26,   0,  16,   0,   2,   0,
+       0,   0,   1,  64,   0,   0,
+       0,   1,   0,   0,  10,   0,
+      16,   0,   2,   0,   0,   0,
+-     35,   0,   0,   9,  66,   0,
++     35,   0,   0,   9, 130,   0,
+      16,   0,   0,   0,   0,   0,
+      42,   0,  16,   0,   2,   0,
+       0,   0,   1,  64,   0,   0,
+-      0,   0,   1,   0,  42,   0,
++      0,   0,   1,   0,  58,   0,
+      16,   0,   0,   0,   0,   0,
+      35,   0,   0,   9,  66,   0,
+      16,   0,   0,   0,   0,   0,
+      58,   0,  16,   0,   2,   0,
+       0,   0,   1,  64,   0,   0,
+-      0,   0,   0,   1,  42,   0,
++      0,   0,   0,   1,  58,   0,
+      16,   0,   0,   0,   0,   0,
+      18,   0,   0,   1,  86,   0,
+       0,   5,  98,   0,  16,   0,
+@@ -673,109 +802,110 @@ const BYTE scene_encode_cs[] =
+       0,   1,  58,   0,  16,   0,
+       0,   0,   0,   0,  21,   0,
+       0,   1,  21,   0,   0,   1,
+-     78,   0,   0,  10,  98,   0,
+-     16,   0,   1,   0,   0,   0,
+-      0, 208,   0,   0,   6,   1,
+-     16,   0,   0,   0,   0,   0,
+-     86, 134,  48,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,  35,   0,
+-      0,  12,  50,   0,  16,   0,
+-      0,   0,   0,   0, 150,   5,
+-     16, 128,  65,   0,   0,   0,
+-      1,   0,   0,   0, 150, 133,
++     21,   0,   0,   1,  78,   0,
++      0,  10,  98,   0,  16,   0,
++      1,   0,   0,   0,   0, 208,
++      0,   0,   6,   1,  16,   0,
++      0,   0,   0,   0,  86, 134,
+      48,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,  70,   0,  16,   0,
+-      0,   0,   0,   0,  31,   0,
+-      4,   3,  10,   0,  16,   0,
+-      1,   0,   0,   0,  85,   0,
+-      0,   9, 130,   0,  16,   0,
+-      0,   0,   0,   0,  26, 128,
+-     48,   0,   0,   0,   0,   0,
++      0,   0,  35,   0,   0,  12,
++     50,   0,  16,   0,   0,   0,
++      0,   0, 150,   5,  16, 128,
++     65,   0,   0,   0,   1,   0,
++      0,   0, 150, 133,  48,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   1,  64,   0,   0,
+-      1,   0,   0,   0,  80,   0,
+-      0,   7,  18,   0,  16,   0,
+-      1,   0,   0,   0,  10,   0,
+-     16,   0,   0,   0,   0,   0,
+-     58,   0,  16,   0,   0,   0,
+-      0,   0,  30,   0,   0,   8,
+-    130,   0,  16,   0,   1,   0,
+-      0,   0,  58,   0,  16, 128,
+-     65,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0,  31,   0,   4,   3,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  85,   0,   0,   9,
++    130,   0,  16,   0,   0,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,  64,   0,   0,   1,   0,
++      0,   0,  80,   0,   0,   7,
++     18,   0,  16,   0,   1,   0,
+       0,   0,  10,   0,  16,   0,
+-      0,   0,   0,   0,  30,   0,
+-      0,   7, 130,   0,  16,   0,
+       0,   0,   0,   0,  58,   0,
+      16,   0,   0,   0,   0,   0,
++     30,   0,   0,   8, 130,   0,
++     16,   0,   1,   0,   0,   0,
++     58,   0,  16, 128,  65,   0,
++      0,   0,   0,   0,   0,   0,
+      10,   0,  16,   0,   0,   0,
+-      0,   0,  55,   0,   0,   9,
+-     18,   0,  16,   0,   0,   0,
+-      0,   0,  10,   0,  16,   0,
++      0,   0,  30,   0,   0,   7,
++    130,   0,  16,   0,   0,   0,
++      0,   0,  58,   0,  16,   0,
++      0,   0,   0,   0,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
+       1,   0,   0,   0,  58,   0,
+-     16,   0,   1,   0,   0,   0,
+-     58,   0,  16,   0,   0,   0,
+-      0,   0,  21,   0,   0,   1,
+-     38,   0,   0,  12,   0, 208,
+-      0,   0, 130,   0,  16,   0,
+-      0,   0,   0,   0,  42, 128,
+-     48,   0,   0,   0,   0,   0,
++     16,   0,   0,   0,   0,   0,
++     21,   0,   0,   1,  38,   0,
++      0,  12,   0, 208,   0,   0,
++    130,   0,  16,   0,   0,   0,
++      0,   0,  42, 128,  48,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,  26, 128,  48,   0,
+       0,   0,   0,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-     38,   0,   0,   8,   0, 208,
+-      0,   0, 130,   0,  16,   0,
+-      0,   0,   0,   0,  58,   0,
+-     16,   0,   0,   0,   0,   0,
+-     26,   0,  16,   0,   1,   0,
+-      0,   0,  35,   0,   0,  11,
++      0,   0,   0,   0,  38,   0,
++      0,   8,   0, 208,   0,   0,
+     130,   0,  16,   0,   0,   0,
+-      0,   0,  42,   0,  16,   0,
+-      1,   0,   0,   0,  10, 128,
+-     48,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+       0,   0,  58,   0,  16,   0,
+-      0,   0,   0,   0,  35,   0,
+-      0,  11,  34,   0,  16,   0,
+       0,   0,   0,   0,  26,   0,
++     16,   0,   1,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
+      16,   0,   0,   0,   0,   0,
+-     26, 128,  48,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,  10, 128,  48,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,  58,   0,
+-     16,   0,   0,   0,   0,   0,
+-     30,   0,   0,   7,  18,   0,
+-     16,   0,   0,   0,   0,   0,
+-     10,   0,  16,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   0,   0,
++      0,   0,  35,   0,   0,  11,
++     34,   0,  16,   0,   0,   0,
+       0,   0,  26,   0,  16,   0,
+-      0,   0,   0,   0,  41,   0,
++      0,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  58,   0,  16,   0,
++      0,   0,   0,   0,  30,   0,
+       0,   7,  18,   0,  16,   0,
+       0,   0,   0,   0,  10,   0,
+      16,   0,   0,   0,   0,   0,
+-      1,  64,   0,   0,   2,   0,
+-      0,   0, 166,   0,   0,   8,
+-     18, 224,  33,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  41,   0,   0,   7,
++     18,   0,  16,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      0,   0,   0,   0,   1,  64,
++      0,   0,   2,   0,   0,   0,
++    166,   0,   0,   8,  18, 224,
++     33,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     42,   0,  16,   0,   0,   0,
++      0,   0,  62,   0,   0,   1,
++     83,  84,  65,  84, 148,   0,
++      0,   0, 103,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     22,   0,   0,   0,  26,   0,
++      0,   0,  10,   0,   0,   0,
++      7,   0,   0,   0,   5,   0,
+       0,   0,   0,   0,   0,   0,
+-     10,   0,  16,   0,   0,   0,
+-      0,   0,  42,   0,  16,   0,
+-      0,   0,   0,   0,  62,   0,
+-      0,   1,  83,  84,  65,  84,
+-    148,   0,   0,   0,  83,   0,
+-      0,   0,   3,   0,   0,   0,
+-      0,   0,   0,   0,   1,   0,
+-      0,   0,  15,   0,   0,   0,
+-     22,   0,   0,   0,  10,   0,
+-      0,   0,   6,   0,   0,   0,
+-      4,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   3,   0,
++      0,   0,   5,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   5,   0,   0,   0,
+-      4,   0,   0,   0,   7,   0,
++      7,   0,   0,   0,   4,   0,
++      0,   0,   9,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+@@ -785,6 +915,5 @@ const BYTE scene_encode_cs[] =
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   1,   0,
+-      0,   0
++      0,   0,   1,   0,   0,   0
+ };
+diff --git a/src/graphics/shaders/scene_encode.cs.hlsl b/src/graphics/shaders/scene_encode.cs.hlsl
+index d93f628..c5e0b40 100644
+--- a/src/graphics/shaders/scene_encode.cs.hlsl
++++ b/src/graphics/shaders/scene_encode.cs.hlsl
+@@ -1,7 +1,8 @@
+ // Writes the scene at the output size into a single-sampled EDRAM-layout buffer that the resolve copy shaders then copy
+-// into the game's scene textures: mode 0 copies the DLSS output, mode 1 stretches the render-size color bilinearly and
+-// mode 2 the render-size depth, both from within source_clamp only (one resolve's pixels). From src/graphics/shaders,
+-// then without trailing spaces:
++// into the game's scene textures: mode 0 copies the upscaler's output, mode 1 stretches the render-size color
++// bilinearly and mode 2 the render-size depth, both from within source_clamp only (one resolve's pixels), and mode 3
++// copies the upscaler's color with the alpha of the render-size scene color (t1, alpha in its first component), which
++// FSR 3.1 doesn't keep. From src/graphics/shaders, then without trailing spaces:
+ //   fxc /nologo /T cs_5_1 /O3 /E main /Vn scene_encode_cs /Fh bytecode/d3d12_5_1/scene_encode_cs.h
+ //       scene_encode.cs.hlsl
+ 
+@@ -24,6 +25,8 @@ cbuffer constants : register(b0) {
+   float4 source_clamp;
+ 
+   uint depth_is_float24;
++  // Render pixels the scene was drawn moved by.
++  float2 jitter;
+ };
+ 
+ Texture2D<float4> color : register(t0);
+@@ -46,6 +49,11 @@ void main(uint3 id : SV_DispatchThreadID) {
+   uint packed;
+   if (mode == 0u) {
+     packed = PackColor(color[position]);
++  } else if (mode == 3u) {
++    float2 source_position = (float2(position) + 0.5f) * source_scale + jitter;
++    source_position = clamp(source_position, source_clamp.xy + 0.5f, source_clamp.zw - 0.5f);
++    float alpha = depth.SampleLevel(linear_clamp, source_position * source_texel_size, 0.0f);
++    packed = PackColor(float4(color[position].rgb, alpha));
+   } else {
+     float2 source_position = (float2(position) + 0.5f) * source_scale;
+     if (is_depth) {
+diff --git a/thirdparty/fidelityfx-api/LICENSE.txt b/thirdparty/fidelityfx-api/LICENSE.txt
+new file mode 100644
+index 0000000..3712e34
+--- /dev/null
++++ b/thirdparty/fidelityfx-api/LICENSE.txt
+@@ -0,0 +1,21 @@
++This file is part of the FidelityFX SDK.
++
++Copyright (C) 2024 Advanced Micro Devices, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files(the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions :
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
+diff --git a/thirdparty/fidelityfx-api/include/ffx_api/dx12/ffx_api_dx12.h b/thirdparty/fidelityfx-api/include/ffx_api/dx12/ffx_api_dx12.h
+new file mode 100644
+index 0000000..fd174ec
+--- /dev/null
++++ b/thirdparty/fidelityfx-api/include/ffx_api/dx12/ffx_api_dx12.h
+@@ -0,0 +1,318 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2024 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++#include "../ffx_api.h"
++#include "../ffx_api_types.h"
++#include <d3d12.h>
++#include <dxgi.h>
++#include <dxgi1_5.h>
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12 0x0000002u
++struct ffxCreateBackendDX12Desc
++{
++    ffxCreateContextDescHeader header;
++    ID3D12Device              *device;  ///< Device on which the backend will run.
++};
++
++#define FFX_API_EFFECT_ID_FRAMEGENERATIONSWAPCHAIN_DX12 0x00030000u
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WRAP_DX12 0x30001u
++struct ffxCreateContextDescFrameGenerationSwapChainWrapDX12
++{
++    ffxCreateContextDescHeader header;
++    IDXGISwapChain4** swapchain;        ///< Input swap chain to wrap, output frame interpolation swapchain.
++    ID3D12CommandQueue* gameQueue;      ///< Input command queue to be used for presentation.
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_NEW_DX12 0x30005u
++struct ffxCreateContextDescFrameGenerationSwapChainNewDX12
++{
++    ffxCreateContextDescHeader header;
++    IDXGISwapChain4** swapchain;        ///< Output frame interpolation swapchain.
++    DXGI_SWAP_CHAIN_DESC* desc;         ///< Swap chain creation parameters.
++    IDXGIFactory* dxgiFactory;          ///< IDXGIFactory to use for DX12 swapchain creation.
++    ID3D12CommandQueue* gameQueue;      ///< Input command queue to be used for presentation.
++};
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12 0x30006u
++struct ffxCreateContextDescFrameGenerationSwapChainForHwndDX12
++{
++    ffxCreateContextDescHeader header;
++    IDXGISwapChain4** swapchain;                     ///< Output frame interpolation swapchain.
++    HWND hwnd;                                       ///< HWND handle for the calling application;
++    DXGI_SWAP_CHAIN_DESC1* desc;                     ///< Swap chain creation parameters.
++    DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreenDesc; ///< Fullscreen swap chain creation parameters.
++    IDXGIFactory* dxgiFactory;                       ///< IDXGIFactory to use for DX12 swapchain creation.
++    ID3D12CommandQueue* gameQueue;                   ///< Input command queue to be used for presentation.
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_REGISTERUIRESOURCE_DX12 0x30002u
++struct ffxConfigureDescFrameGenerationSwapChainRegisterUiResourceDX12
++{
++    ffxConfigureDescHeader header;
++    struct FfxApiResource  uiResource;   ///< Resource containing user interface for composition. May be empty.
++    uint32_t               flags;        ///< Zero or combination of values from FfxApiUiCompositionFlags.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_INTERPOLATIONCOMMANDLIST_DX12 0x30003u
++struct ffxQueryDescFrameGenerationSwapChainInterpolationCommandListDX12
++{
++    ffxQueryDescHeader header;
++    void** pOutCommandList;             ///< Output command list (ID3D12GraphicsCommandList) to be used for frame generation dispatch.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_INTERPOLATIONTEXTURE_DX12 0x30004u
++struct ffxQueryDescFrameGenerationSwapChainInterpolationTextureDX12
++{
++    ffxQueryDescHeader header;
++    struct FfxApiResource *pOutTexture; ///< Output resource in which the frame interpolation result should be placed.
++};
++
++#define FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12 0x30007u
++struct ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12
++{
++    ffxDispatchDescHeader header;
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_KEYVALUE_DX12 0x30008u
++struct ffxConfigureDescFrameGenerationSwapChainKeyValueDX12
++{
++    ffxConfigureDescHeader  header;
++    uint64_t                key;        ///< Configuration key, member of the FfxApiConfigureFrameGenerationSwapChainKeyDX12 enumeration.
++    uint64_t                u64;        ///< Integer value or enum value to set.
++    void*                   ptr;        ///< Pointer to set or pointer to value to set.
++};
++
++//enum value matches enum FfxFrameInterpolationSwapchainConfigureKey
++enum FfxApiConfigureFrameGenerationSwapChainKeyDX12
++{
++    FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_WAITCALLBACK = 0,                     ///< Sets FfxWaitCallbackFunc
++    FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING = 2,                ///< Sets FfxApiSwapchainFramePacingTuning
++};
++
++#define FFX_API_QUERY_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_GPU_MEMORY_USAGE_DX12 0x00030009u
++struct ffxQueryFrameGenerationSwapChainGetGPUMemoryUsageDX12
++{
++    ffxQueryDescHeader header;
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageFrameGenerationSwapchain;
++};
++
++#if defined(__cplusplus)
++
++static inline uint32_t ffxApiGetSurfaceFormatDX12(DXGI_FORMAT format)
++{
++    switch (format)
++    {
++    case DXGI_FORMAT_R32G32B32A32_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS;
++    case DXGI_FORMAT_R32G32B32A32_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT;
++    case DXGI_FORMAT_R32G32B32A32_UINT:
++        return FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT;
++    //case DXGI_FORMAT_R32G32B32A32_SINT:
++    //case DXGI_FORMAT_R32G32B32_TYPELESS:
++    //case DXGI_FORMAT_R32G32B32_FLOAT:
++    //case DXGI_FORMAT_R32G32B32_UINT:
++    //case DXGI_FORMAT_R32G32B32_SINT:
++
++    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS;
++    case DXGI_FORMAT_R16G16B16A16_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
++    //case DXGI_FORMAT_R16G16B16A16_UNORM:
++    //case DXGI_FORMAT_R16G16B16A16_UINT:
++    //case DXGI_FORMAT_R16G16B16A16_SNORM:
++    //case DXGI_FORMAT_R16G16B16A16_SINT:
++
++    case DXGI_FORMAT_R32G32_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R32G32_TYPELESS;
++    case DXGI_FORMAT_R32G32_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R32G32_FLOAT;
++    //case DXGI_FORMAT_R32G32_FLOAT:
++    //case DXGI_FORMAT_R32G32_UINT:
++    //case DXGI_FORMAT_R32G32_SINT:
++
++    case DXGI_FORMAT_R32G8X24_TYPELESS:
++    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
++    case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R32_FLOAT;
++
++    case DXGI_FORMAT_R24G8_TYPELESS:
++    case DXGI_FORMAT_D24_UNORM_S8_UINT:
++    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R32_UINT;
++
++    case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:
++    case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
++        return FFX_API_SURFACE_FORMAT_R8_UINT;
++
++    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS;
++    case DXGI_FORMAT_R10G10B10A2_UNORM:
++        return FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM;
++    //case DXGI_FORMAT_R10G10B10A2_UINT:
++    
++    case DXGI_FORMAT_R11G11B10_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT;
++
++    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS;
++    case DXGI_FORMAT_R8G8B8A8_UNORM:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB;
++    //case DXGI_FORMAT_R8G8B8A8_UINT:
++    case DXGI_FORMAT_R8G8B8A8_SNORM:
++        return FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM;
++
++    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS;
++    case DXGI_FORMAT_B8G8R8A8_UNORM:
++        return FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++        return FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB;
++
++    case DXGI_FORMAT_R16G16_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R16G16_TYPELESS;
++    case DXGI_FORMAT_R16G16_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
++    //case DXGI_FORMAT_R16G16_UNORM:
++    case DXGI_FORMAT_R16G16_UINT:
++        return FFX_API_SURFACE_FORMAT_R16G16_UINT;
++    //case DXGI_FORMAT_R16G16_SNORM
++    //case DXGI_FORMAT_R16G16_SINT 
++
++    //case DXGI_FORMAT_R32_SINT:
++    case DXGI_FORMAT_R32_UINT:
++        return FFX_API_SURFACE_FORMAT_R32_UINT;
++    case DXGI_FORMAT_R32_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R32_TYPELESS;
++    case DXGI_FORMAT_D32_FLOAT:
++    case DXGI_FORMAT_R32_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R32_FLOAT;
++
++    case DXGI_FORMAT_R8G8_UINT:
++        return FFX_API_SURFACE_FORMAT_R8G8_UINT;
++    case DXGI_FORMAT_R8G8_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R8G8_TYPELESS;
++    case DXGI_FORMAT_R8G8_UNORM:
++        return FFX_API_SURFACE_FORMAT_R8G8_UNORM;
++    //case DXGI_FORMAT_R8G8_SNORM:
++    //case DXGI_FORMAT_R8G8_SINT:
++
++    case DXGI_FORMAT_R16_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R16_TYPELESS;
++    case DXGI_FORMAT_R16_FLOAT:
++        return FFX_API_SURFACE_FORMAT_R16_FLOAT;
++    case DXGI_FORMAT_R16_UINT:
++        return FFX_API_SURFACE_FORMAT_R16_UINT;
++    case DXGI_FORMAT_D16_UNORM:
++    case DXGI_FORMAT_R16_UNORM:
++        return FFX_API_SURFACE_FORMAT_R16_UNORM;
++    case DXGI_FORMAT_R16_SNORM:
++        return FFX_API_SURFACE_FORMAT_R16_SNORM;
++    //case DXGI_FORMAT_R16_SINT:
++
++    case DXGI_FORMAT_R8_TYPELESS:
++        return FFX_API_SURFACE_FORMAT_R8_TYPELESS;
++    case DXGI_FORMAT_R8_UNORM:
++    case DXGI_FORMAT_A8_UNORM:
++        return FFX_API_SURFACE_FORMAT_R8_UNORM;
++    case DXGI_FORMAT_R8_UINT:
++        return FFX_API_SURFACE_FORMAT_R8_UINT;
++    //case DXGI_FORMAT_R8_SNORM:
++    //case DXGI_FORMAT_R8_SINT:
++    //case DXGI_FORMAT_R1_UNORM:
++
++    case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:
++        return FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP;
++
++    case DXGI_FORMAT_UNKNOWN:
++    default:
++        return FFX_API_SURFACE_FORMAT_UNKNOWN;
++    }
++}
++
++static inline FfxApiResource ffxApiGetResourceDX12(ID3D12Resource* pRes, uint32_t state = FFX_API_RESOURCE_STATE_COMPUTE_READ, uint32_t additionalUsages = 0)
++{
++    FfxApiResource res{};
++    res.resource = pRes;
++    res.state = state;
++    if (!pRes) return res;
++
++    D3D12_RESOURCE_DESC desc = pRes->GetDesc();
++    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
++    {
++        res.description.flags = FFX_API_RESOURCE_FLAGS_NONE;
++        res.description.usage = FFX_API_RESOURCE_USAGE_UAV;
++        res.description.size = static_cast<uint32_t>(desc.Width);
++        res.description.stride = static_cast<uint32_t>(desc.Height);
++        res.description.type = FFX_API_RESOURCE_TYPE_BUFFER;
++    }
++    else
++    {
++        res.description.flags = FFX_API_RESOURCE_FLAGS_NONE;
++        if (desc.Format == DXGI_FORMAT_D16_UNORM || desc.Format == DXGI_FORMAT_D32_FLOAT)
++        {
++            res.description.usage = FFX_API_RESOURCE_USAGE_DEPTHTARGET;
++        }
++        else if (desc.Format == DXGI_FORMAT_D24_UNORM_S8_UINT || desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
++        {
++            res.description.usage = FFX_API_RESOURCE_USAGE_DEPTHTARGET | FFX_API_RESOURCE_USAGE_STENCILTARGET;
++        }
++        else
++        {
++            res.description.usage = FFX_API_RESOURCE_USAGE_READ_ONLY;
++        }
++
++        if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
++            res.description.usage |= FFX_API_RESOURCE_USAGE_UAV;
++        
++        res.description.width = static_cast<uint32_t>(desc.Width);
++        res.description.height = static_cast<uint32_t>(desc.Height);
++        res.description.depth = static_cast<uint32_t>(desc.DepthOrArraySize);
++        res.description.mipCount = static_cast<uint32_t>(desc.MipLevels);
++
++        switch (desc.Dimension)
++        {
++        case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
++            res.description.type = FFX_API_RESOURCE_TYPE_TEXTURE1D;
++            break;
++        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
++            if (desc.DepthOrArraySize == 6)
++                res.description.type = FFX_API_RESOURCE_TYPE_TEXTURE_CUBE;
++            else
++                res.description.type = FFX_API_RESOURCE_TYPE_TEXTURE2D;
++            break;
++        case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
++            res.description.type = FFX_API_RESOURCE_TYPE_TEXTURE3D;
++            break;
++        }
++    }
++
++    res.description.format = ffxApiGetSurfaceFormatDX12(desc.Format);
++    res.description.usage |= additionalUsages;
++    return res;
++}
++
++#endif
+diff --git a/thirdparty/fidelityfx-api/include/ffx_api/ffx_api.h b/thirdparty/fidelityfx-api/include/ffx_api/ffx_api.h
+new file mode 100644
+index 0000000..e136191
+--- /dev/null
++++ b/thirdparty/fidelityfx-api/include/ffx_api/ffx_api.h
+@@ -0,0 +1,158 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2024 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++
++#if defined(__cplusplus)
++extern "C" {
++#endif  // #if defined(__cplusplus)
++
++#define FFX_API_ENTRY __declspec(dllexport)
++#include <stdint.h>
++
++enum FfxApiReturnCodes
++{
++    FFX_API_RETURN_OK                     = 0, ///< The oparation was successful.
++    FFX_API_RETURN_ERROR                  = 1, ///< An error occurred that is not further specified.
++    FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE = 2, ///< The structure type given was not recognized for the function or context with which it was used. This is likely a programming error.
++    FFX_API_RETURN_ERROR_RUNTIME_ERROR    = 3, ///< The underlying runtime (e.g. D3D12, Vulkan) or effect returned an error code.
++    FFX_API_RETURN_NO_PROVIDER            = 4, ///< No provider was found for the given structure type. This is likely a programming error.
++    FFX_API_RETURN_ERROR_MEMORY           = 5, ///< A memory allocation failed.
++    FFX_API_RETURN_ERROR_PARAMETER        = 6, ///< A parameter was invalid, e.g. a null pointer, empty resource or out-of-bounds enum value.
++};
++
++typedef void* ffxContext;
++typedef uint32_t ffxReturnCode_t;
++
++#define FFX_API_EFFECT_MASK 0xffff0000u
++#define FFX_API_EFFECT_ID_GENERAL 0x00000000u
++
++// Base Descriptor types
++typedef uint64_t ffxStructType_t;
++typedef struct ffxApiHeader
++{
++    ffxStructType_t      type;  ///< The structure type. Must always be set to the corresponding value for any structure (found nearby with a similar name).
++    struct ffxApiHeader* pNext; ///< Pointer to next structure, used for optional parameters and extensions. Can be null.
++} ffxApiHeader;
++
++typedef ffxApiHeader ffxCreateContextDescHeader;
++typedef ffxApiHeader ffxConfigureDescHeader;
++typedef ffxApiHeader ffxQueryDescHeader;
++typedef ffxApiHeader ffxDispatchDescHeader;
++
++// Extensions for global debug
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_SILENCE  0x0000000u
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_ERRORS   0x0000001u
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_WARNINGS 0x0000002u
++#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_VERBOSE  0xfffffffu
++
++enum FfxApiMsgType
++{
++    FFX_API_MESSAGE_TYPE_ERROR   = 0,
++    FFX_API_MESSAGE_TYPE_WARNING = 1,
++    FFX_API_MESSAGE_TYPE_COUNT
++};
++
++typedef void (*ffxApiMessage)(uint32_t type, const wchar_t* message);
++
++#define FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1 0x0000001u
++struct ffxConfigureDescGlobalDebug1
++{
++    ffxConfigureDescHeader header;
++    ffxApiMessage          fpMessage;
++    uint32_t               debugLevel;
++};
++
++#define FFX_API_QUERY_DESC_TYPE_GET_VERSIONS 4u
++struct ffxQueryDescGetVersions
++{
++    ffxQueryDescHeader header;
++    uint64_t createDescType;    ///< Create description for the effect whose versions should be enumerated.
++    void* device;               ///< For DX12: pointer to ID3D12Device.
++    uint64_t *outputCount;      ///< Input capacity of id and name arrays. Output number of returned versions. If initially zero, output is number of available versions.
++    uint64_t *versionIds;       ///< Output array of version ids to be used as version overrides. If null, only names and count are returned.
++    const char** versionNames;  ///< Output array of version names for display. If null, only ids and count are returned. If both this and versionIds are null, only count is returned.
++};
++
++#define FFX_API_DESC_TYPE_OVERRIDE_VERSION 5u
++struct ffxOverrideVersion
++{
++    ffxApiHeader header;
++    uint64_t versionId;  ///< Id of version to use. Must be a value returned from a query in ffxQueryDescGetVersions.versionIds array.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION 6u
++struct ffxQueryGetProviderVersion
++{
++    ffxQueryDescHeader header;
++    uint64_t versionId;      ///< Id of provider being used for queried context. 0 if invalid.
++    const char* versionName; ///< Version name for display. If nullptr, the query was invalid.
++};
++
++// Memory allocation function. Must return a valid pointer to at least size bytes of memory aligned to hold any type.
++// May return null to indicate failure. Standard library malloc fulfills this requirement.
++typedef void* (*ffxAlloc)(void* pUserData, uint64_t size);
++
++// Memory deallocation function. May be called with null pointer as second argument.
++typedef void (*ffxDealloc)(void* pUserData, void* pMem);
++
++typedef struct ffxAllocationCallbacks
++{
++    void* pUserData;
++    ffxAlloc alloc;
++    ffxDealloc dealloc;
++} ffxAllocationCallbacks;
++
++// Creates a FFX object context.
++// Depending on the desc structures provided to this function, the context will be created with the desired version and attributes.
++// Non-zero return indicates error code.
++// Pointers passed in desc must remain live until ffxDestroyContext is called on the context.
++// MemCb may be null; the system allocator (malloc/free) will be used in this case.
++FFX_API_ENTRY ffxReturnCode_t ffxCreateContext(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* memCb);
++typedef ffxReturnCode_t (*PfnFfxCreateContext)(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* memCb);
++
++// Destroys an FFX object context.
++// Non-zero return indicates error code.
++// MemCb must be compatible with the callbacks passed into ffxCreateContext.
++FFX_API_ENTRY ffxReturnCode_t ffxDestroyContext(ffxContext* context, const ffxAllocationCallbacks* memCb);
++typedef ffxReturnCode_t (*PfnFfxDestroyContext)(ffxContext* context, const ffxAllocationCallbacks* memCb);
++
++// Configures the provided FFX object context.
++// If context is null, configure operates on any global state.
++// Non-zero return indicates error code.
++FFX_API_ENTRY ffxReturnCode_t ffxConfigure(ffxContext* context, const ffxConfigureDescHeader* desc);
++typedef ffxReturnCode_t (*PfnFfxConfigure)(ffxContext* context, const ffxConfigureDescHeader* desc);
++
++// Queries the provided FFX object context.
++// If context is null, query operates on any global state.
++// Non-zero return indicates error code.
++FFX_API_ENTRY ffxReturnCode_t ffxQuery(ffxContext* context, ffxQueryDescHeader* desc);
++typedef ffxReturnCode_t (*PfnFfxQuery)(ffxContext* context, ffxQueryDescHeader* desc);
++
++// Dispatches work on the given FFX object context defined by the dispatch descriptor.
++// Non-zero return indicates error code.
++FFX_API_ENTRY ffxReturnCode_t ffxDispatch(ffxContext* context, const ffxDispatchDescHeader* desc);
++typedef ffxReturnCode_t (*PfnFfxDispatch)(ffxContext* context, const ffxDispatchDescHeader* desc);
++
++#if defined(__cplusplus)
++}
++#endif  // #if defined(__cplusplus)
+diff --git a/thirdparty/fidelityfx-api/include/ffx_api/ffx_api_types.h b/thirdparty/fidelityfx-api/include/ffx_api/ffx_api_types.h
+new file mode 100644
+index 0000000..87a9d0b
+--- /dev/null
++++ b/thirdparty/fidelityfx-api/include/ffx_api/ffx_api_types.h
+@@ -0,0 +1,243 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2024 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++
++#include <stdint.h>
++#include <stdbool.h>
++
++/// An enumeration of surface formats. Needs to match enum FfxSurfaceFormat
++enum FfxApiSurfaceFormat
++{
++    FFX_API_SURFACE_FORMAT_UNKNOWN,                     ///< Unknown format
++    FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS,       ///< 32 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT,           ///< 32 bit per channel, 4 channel uint format
++    FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT,          ///< 32 bit per channel, 4 channel float format
++    FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT,          ///< 16 bit per channel, 4 channel float format
++    FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT,             ///< 32 bit per channel, 3 channel float format
++    FFX_API_SURFACE_FORMAT_R32G32_FLOAT,                ///< 32 bit per channel, 2 channel float format
++    FFX_API_SURFACE_FORMAT_R8_UINT,                     ///< 8 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R32_UINT,                    ///< 32 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS,           ///<  8 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM,              ///<  8 bit per channel, 4 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM,              ///<  8 bit per channel, 4 channel signed normalized format
++    FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB,               ///<  8 bit per channel, 4 channel srgb normalized
++    FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS,           ///<  8 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM,              ///<  8 bit per channel, 4 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB,               ///<  8 bit per channel, 4 channel srgb normalized
++    FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT,             ///< 32 bit 3 channel float format
++    FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM,           ///< 10 bit per 3 channel, 2 bit for 1 channel normalized format
++    FFX_API_SURFACE_FORMAT_R16G16_FLOAT,                ///< 16 bit per channel, 2 channel float format
++    FFX_API_SURFACE_FORMAT_R16G16_UINT,                 ///< 16 bit per channel, 2 channel unsigned int format
++    FFX_API_SURFACE_FORMAT_R16G16_SINT,                 ///< 16 bit per channel, 2 channel signed int format
++    FFX_API_SURFACE_FORMAT_R16_FLOAT,                   ///< 16 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R16_UINT,                    ///< 16 bit per channel, 1 channel unsigned int format
++    FFX_API_SURFACE_FORMAT_R16_UNORM,                   ///< 16 bit per channel, 1 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R16_SNORM,                   ///< 16 bit per channel, 1 channel signed normalized format
++    FFX_API_SURFACE_FORMAT_R8_UNORM,                    ///<  8 bit per channel, 1 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R8G8_UNORM,                  ///<  8 bit per channel, 2 channel unsigned normalized format
++    FFX_API_SURFACE_FORMAT_R8G8_UINT,                   ///<  8 bit per channel, 2 channel unsigned integer format
++    FFX_API_SURFACE_FORMAT_R32_FLOAT,                   ///< 32 bit per channel, 1 channel float format
++    FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP,          ///<  9 bit per channel, 5 bit exponent format
++
++    FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS,       ///< 16 bit per channel, 4 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32G32_TYPELESS,             ///< 32 bit per channel, 2 channel typeless format
++    FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS,        ///< 10 bit per 3 channel, 2 bit for 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R16G16_TYPELESS,             ///< 16 bit per channel, 2 channel typless format
++    FFX_API_SURFACE_FORMAT_R16_TYPELESS,                ///< 16 bit per channel, 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R8_TYPELESS,                 ///<  8 bit per channel, 1 channel typeless format
++    FFX_API_SURFACE_FORMAT_R8G8_TYPELESS,               ///<  8 bit per channel, 2 channel typeless format
++    FFX_API_SURFACE_FORMAT_R32_TYPELESS,                ///< 32 bit per channel, 1 channel typeless format
++};
++
++/// An enumeration of resource usage.
++enum FfxApiResourceUsage
++{
++    FFX_API_RESOURCE_USAGE_READ_ONLY = 0,                   ///< No usage flags indicate a resource is read only.
++    FFX_API_RESOURCE_USAGE_RENDERTARGET = (1<<0),           ///< Indicates a resource will be used as render target.
++    FFX_API_RESOURCE_USAGE_UAV = (1<<1),                    ///< Indicates a resource will be used as UAV.
++    FFX_API_RESOURCE_USAGE_DEPTHTARGET = (1<<2),            ///< Indicates a resource will be used as depth target.
++    FFX_API_RESOURCE_USAGE_INDIRECT = (1<<3),               ///< Indicates a resource will be used as indirect argument buffer
++    FFX_API_RESOURCE_USAGE_ARRAYVIEW = (1<<4),              ///< Indicates a resource that will generate array views. Works on 2D and cubemap textures
++    FFX_API_RESOURCE_USAGE_STENCILTARGET = (1<<5),          ///< Indicates a resource will be used as stencil target.
++};
++
++
++/// An enumeration of resource states.
++enum FfxApiResourceState
++{
++    FFX_API_RESOURCE_STATE_COMMON               = (1 << 0),
++    FFX_API_RESOURCE_STATE_UNORDERED_ACCESS     = (1 << 1), ///< Indicates a resource is in the state to be used as UAV.
++    FFX_API_RESOURCE_STATE_COMPUTE_READ         = (1 << 2), ///< Indicates a resource is in the state to be read by compute shaders.
++    FFX_API_RESOURCE_STATE_PIXEL_READ           = (1 << 3), ///< Indicates a resource is in the state to be read by pixel shaders.
++    FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ   = (FFX_API_RESOURCE_STATE_PIXEL_READ | FFX_API_RESOURCE_STATE_COMPUTE_READ), ///< Indicates a resource is in the state to be read by pixel or compute shaders.
++    FFX_API_RESOURCE_STATE_COPY_SRC             = (1 << 4), ///< Indicates a resource is in the state to be used as source in a copy command.
++    FFX_API_RESOURCE_STATE_COPY_DEST            = (1 << 5), ///< Indicates a resource is in the state to be used as destination in a copy command.
++    FFX_API_RESOURCE_STATE_GENERIC_READ         = (FFX_API_RESOURCE_STATE_COPY_SRC | FFX_API_RESOURCE_STATE_COMPUTE_READ),  ///< Indicates a resource is in generic (slow) read state.
++    FFX_API_RESOURCE_STATE_INDIRECT_ARGUMENT    = (1 << 6), ///< Indicates a resource is in the state to be used as an indirect command argument
++    FFX_API_RESOURCE_STATE_PRESENT              = (1 << 7), ///< Indicates a resource is in the state to be used to present to the swap chain
++    FFX_API_RESOURCE_STATE_RENDER_TARGET        = (1 << 8), ///< Indicates a resource is in the state to be used as render target
++};
++
++/// An enumeration of surface dimensions.
++enum FfxApiResourceDimension
++{
++    FFX_API_RESOURCE_DIMENSION_TEXTURE_1D,              ///< A resource with a single dimension.
++    FFX_API_RESOURCE_DIMENSION_TEXTURE_2D,              ///< A resource with two dimensions.
++};
++
++/// An enumeration of resource flags.
++enum FfxApiResourceFlags
++{
++    FFX_API_RESOURCE_FLAGS_NONE             = 0,            ///< No flags.
++    FFX_API_RESOURCE_FLAGS_ALIASABLE        = (1 << 0),     ///< A bit indicating a resource does not need to persist across frames.
++    FFX_API_RESOURCE_FLAGS_UNDEFINED        = (1 << 1),     ///< Special case flag used internally when importing resources that require additional setup
++};
++
++// An enumeration for different resource types
++enum FfxApiResourceType
++{
++    FFX_API_RESOURCE_TYPE_BUFFER,                       ///< The resource is a buffer.
++    FFX_API_RESOURCE_TYPE_TEXTURE1D,                    ///< The resource is a 1-dimensional texture.
++    FFX_API_RESOURCE_TYPE_TEXTURE2D,                    ///< The resource is a 2-dimensional texture.
++    FFX_API_RESOURCE_TYPE_TEXTURE_CUBE,                 ///< The resource is a cube map.
++    FFX_API_RESOURCE_TYPE_TEXTURE3D,                    ///< The resource is a 3-dimensional texture.
++};
++
++enum FfxApiBackbufferTransferFunction
++{
++    FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB,
++    FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ,
++    FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB
++};
++
++/// A structure encapsulating a 2-dimensional point, using 32bit unsigned integers.
++struct FfxApiDimensions2D
++{
++    uint32_t width;  ///< The width of a 2-dimensional range.
++    uint32_t height; ///< The height of a 2-dimensional range.
++};
++
++/// A structure encapsulating a 2-dimensional set of floating point coordinates.
++struct FfxApiFloatCoords2D
++{
++    float x; ///< The x coordinate of a 2-dimensional point.
++    float y; ///< The y coordinate of a 2-dimensional point.
++};
++
++/// A structure encapsulating a 2-dimensional rect.
++struct FfxApiRect2D
++{
++    int32_t left;
++    int32_t top;
++    int32_t width;
++    int32_t height;
++};
++
++/// A structure describing a resource.
++///
++/// @ingroup SDKTypes
++struct FfxApiResourceDescription
++{
++    uint32_t     type;      ///< The type of the resource.
++    uint32_t     format;    ///< The surface format.
++    union {
++        uint32_t width;     ///< The width of the texture resource.
++        uint32_t size;      ///< The size of the buffer resource.
++    };
++
++    union {
++        uint32_t height;    ///< The height of the texture resource.
++        uint32_t stride;    ///< The stride of the buffer resource.
++    };
++
++    union {
++        uint32_t depth;     ///< The depth of the texture resource.
++        uint32_t alignment; ///< The alignment of the buffer resource.
++    };
++
++    uint32_t     mipCount;  ///< Number of mips (or 0 for full mipchain).
++    uint32_t     flags;     ///< A set of resource flags.
++    uint32_t     usage;     ///< Resource usage flags.
++};
++
++struct FfxApiResource
++{
++    void* resource;
++    struct FfxApiResourceDescription description;
++    uint32_t state;
++};
++
++//struct definition matches FfxEffectMemoryUsage
++typedef struct FfxApiEffectMemoryUsage
++{
++    uint64_t totalUsageInBytes;
++    uint64_t aliasableUsageInBytes;
++} FfxApiEffectMemoryUsage;
++
++/*
++Tuning varianceFactor and safetyMarginInMs Tips:
++Calculation of frame pacing algorithm's next target timestamp: 
++target frametime delta = average Frametime - (variance * varianceFactor) - safetyMarginInMs
++
++Default Tuning uses safetyMarginInMs==0.1ms and varianceFactor==0.1.
++Say Tuning set A uses safetyMarginInMs==0.75ms, and varianceFactor==0.1.
++Say Tuning Set B uses safetyMarginInMs==0.01ms and varianceFactor==0.3.
++
++Example #1 - Actual Game Cutscene. Game's framerate after FG ON during camera pan from normal (19ms avg frametime) to complex (37ms avg frametime over 1 sec) and back to normal scene complexity (19ms avg frametime).
++After the panning is done, 
++- Default Tuning now gets stuck at targeting ~33ms after panning to a complex scene. GPU utilization significantly lower in this case.
++- Tuning Set B and Tuning Set A are able to recover close to ~19ms because of these 2 tuning result in lower "target frametime delta" than Default Tuning. 
++
++However, larger varianceFactor or safetyMarginInMs results in higher variance. As seen in Example #2 bellow.
++
++Example #2 - FFX_API_FSR sample. Set app fps cap to 33.33ms. Use OCAT to capture 10s at default camera position.
++FSR 3.1.0 FG msbetweenpresents ping-pong between 16.552 (5th-percentile) and 16.832 (95th-percentile). Variance is 0.01116.
++Tuning set A FG msbetweenpresents ping-pong between 15.901 (5th-percentile) and 17.500 (95th-percentile). Variance is 0.057674.
++Tuning Set B FG msbetweenpresents ping-pong between 16.589 (5th-percentile) and 16.971 (95th-percentile). Variance is 0.014452.
++
++| FG output Frames timestamp | n | n+1    | n+2   | n+3    | frame delta n+1 to n+2 | frame delta n+2 to n+3 |
++| -------------------------- | - | ------ | ----- | ------ | ---------------------- | ---------------------- |
++| App real frame presents    | 0 |        | 33.33 |        |                        |                        |
++| Default Tuning             | 0 | 16.552 | 33.33 | 49.882 | 16.778                 | 16.552                 |
++| Tuning Set A               | 0 | 15.901 | 33.33 | 49.231 | 17.429                 | 15.901                 |
++| Tuning Set B               | 0 | 16.589 | 33.33 | 49.919 | 16.741                 | 16.589                 |
++
++Analysis of table data in words:
++Ignoring the cost of FI,
++"Tuning set A"'s "target frametime delta" of 15.901 results in larger frame to frame delta (or in other words larger variance) vs Default tuning.
++"Tuning set B"'s "target frametime delta" of 16.589 results in a bit larger frame to frame delta (or in other words a bit larger variance) vs Default tuning.
++
++TLDR:
++If your game when using FG, frame rate is running at unexpectly low frame rate, after gradual transition from rendering complex to easy scene complexity, you could try setting "Tuning Set B" to recover lost FPS at cost of a bit higher variance.
++
++*/
++
++//struct definition matches FfxSwapchainFramePacingTuning
++typedef struct FfxApiSwapchainFramePacingTuning
++{
++    float safetyMarginInMs; // in Millisecond. Default is 0.1ms
++    float varianceFactor; // valid range [0.0,1.0]. Default is 0.1
++    bool     allowHybridSpin; //Allows pacing spinlock to sleep. Default is false.
++    uint32_t hybridSpinTime;  //How long to spin if allowHybridSpin is true. Measured in timer resolution units. Not recommended to go below 2. Will result in frequent overshoots. Default is 2.
++    bool     allowWaitForSingleObjectOnFence; //Allows WaitForSingleObject instead of spinning for fence value. Default is false.
++} FfxApiSwapchainFramePacingTuning;
+diff --git a/thirdparty/fidelityfx-api/include/ffx_api/ffx_upscale.h b/thirdparty/fidelityfx-api/include/ffx_api/ffx_upscale.h
+new file mode 100644
+index 0000000..e581b47
+--- /dev/null
++++ b/thirdparty/fidelityfx-api/include/ffx_api/ffx_upscale.h
+@@ -0,0 +1,188 @@
++// This file is part of the FidelityFX SDK.
++//
++// Copyright (C) 2024 Advanced Micro Devices, Inc.
++// 
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files(the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions :
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#pragma once
++#include "ffx_api.h"
++#include "ffx_api_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum FfxApiUpscaleQualityMode
++{
++    FFX_UPSCALE_QUALITY_MODE_NATIVEAA          = 0, ///< Perform upscaling with a per-dimension upscaling ratio of 1.0x.
++    FFX_UPSCALE_QUALITY_MODE_QUALITY           = 1, ///< Perform upscaling with a per-dimension upscaling ratio of 1.5x.
++    FFX_UPSCALE_QUALITY_MODE_BALANCED          = 2, ///< Perform upscaling with a per-dimension upscaling ratio of 1.7x.
++    FFX_UPSCALE_QUALITY_MODE_PERFORMANCE       = 3, ///< Perform upscaling with a per-dimension upscaling ratio of 2.0x.
++    FFX_UPSCALE_QUALITY_MODE_ULTRA_PERFORMANCE = 4  ///< Perform upscaling with a per-dimension upscaling ratio of 3.0x.
++};
++
++enum FfxApiCreateContextUpscaleFlags
++{
++    FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE                 = (1<<0), ///< A bit indicating if the input color data provided is using a high-dynamic range.
++    FFX_UPSCALE_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS  = (1<<1), ///< A bit indicating if the motion vectors are rendered at display resolution.
++    FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION = (1<<2), ///< A bit indicating that the motion vectors have the jittering pattern applied to them.
++    FFX_UPSCALE_ENABLE_DEPTH_INVERTED                     = (1<<3), ///< A bit indicating that the input depth buffer data provided is inverted [1..0].
++    FFX_UPSCALE_ENABLE_DEPTH_INFINITE                     = (1<<4), ///< A bit indicating that the input depth buffer data provided is using an infinite far plane.
++    FFX_UPSCALE_ENABLE_AUTO_EXPOSURE                      = (1<<5), ///< A bit indicating if automatic exposure should be applied to input color data.
++    FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION                 = (1<<6), ///< A bit indicating that the application uses dynamic resolution scaling.
++    FFX_UPSCALE_ENABLE_DEBUG_CHECKING                     = (1<<7), ///< A bit indicating that the runtime should check some API values and report issues.
++    FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE              = (1<<8), ///< A bit indicating that the color resource contains perceptual (gamma corrected) colors
++};
++
++enum FfxApiDispatchFsrUpscaleFlags
++{
++    FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW                    = (1 << 0),  ///< A bit indicating that the output resource will contain debug views with relevant information.   
++    FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB              = (1 << 1),  ///< A bit indicating that the input color resource contains perceptual sRGB colors
++    FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ                = (1 << 2),  ///< A bit indicating that the input color resource contains perceptual PQ colors
++};
++
++enum FfxApiDispatchUpscaleAutoreactiveFlags
++{
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP        = (1<<0),
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_INVERSETONEMAP = (1<<1),
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD      = (1<<2),
++    FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX   = (1<<3),
++};
++
++#define FFX_API_EFFECT_ID_UPSCALE 0x00010000u
++
++#define FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE 0x00010000u
++struct ffxCreateContextDescUpscale
++{
++    ffxCreateContextDescHeader header;
++    uint32_t                   flags;           ///< Zero or a combination of values from FfxApiCreateContextFsrFlags.
++    struct FfxApiDimensions2D  maxRenderSize;   ///< The maximum size that rendering will be performed at.
++    struct FfxApiDimensions2D  maxUpscaleSize;  ///< The size of the presentation resolution targeted by the upscaling process.
++    ffxApiMessage              fpMessage;       ///< A pointer to a function that can receive messages from the runtime. May be null.
++};
++
++#define FFX_API_DISPATCH_DESC_TYPE_UPSCALE 0x00010001u
++struct ffxDispatchDescUpscale
++{
++    ffxDispatchDescHeader      header;
++    void*                      commandList;                ///< Command list to record upscaling rendering commands into.
++    struct FfxApiResource      color;                      ///< Color buffer for the current frame (at render resolution).
++    struct FfxApiResource      depth;                      ///< 32bit depth values for the current frame (at render resolution).
++    struct FfxApiResource      motionVectors;              ///< 2-dimensional motion vectors (at render resolution if <c><i>FFX_FSR_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS</i></c> is not set).
++    struct FfxApiResource      exposure;                   ///< Optional resource containing a 1x1 exposure value.
++    struct FfxApiResource      reactive;                   ///< Optional resource containing alpha value of reactive objects in the scene.
++    struct FfxApiResource      transparencyAndComposition; ///< Optional resource containing alpha value of special objects in the scene.
++    struct FfxApiResource      output;                     ///< Output color buffer for the current frame (at presentation resolution).
++    struct FfxApiFloatCoords2D jitterOffset;               ///< The subpixel jitter offset applied to the camera.
++    struct FfxApiFloatCoords2D motionVectorScale;          ///< The scale factor to apply to motion vectors.
++    struct FfxApiDimensions2D  renderSize;                 ///< The resolution that was used for rendering the input resources.
++    struct FfxApiDimensions2D  upscaleSize;                ///< The resolution that the upscaler will upscale to (optional, assumed maxUpscaleSize otherwise).
++    bool                       enableSharpening;           ///< Enable an additional sharpening pass.
++    float                      sharpness;                  ///< The sharpness value between 0 and 1, where 0 is no additional sharpness and 1 is maximum additional sharpness.
++    float                      frameTimeDelta;             ///< The time elapsed since the last frame (expressed in milliseconds).
++    float                      preExposure;                ///< The pre exposure value (must be > 0.0f)
++    bool                       reset;                      ///< A boolean value which when set to true, indicates the camera has moved discontinuously.
++    float                      cameraNear;                 ///< The distance to the near plane of the camera.
++    float                      cameraFar;                  ///< The distance to the far plane of the camera.
++    float                      cameraFovAngleVertical;     ///< The camera angle field of view in the vertical direction (expressed in radians).
++    float                      viewSpaceToMetersFactor;    ///< The scale factor to convert view space units to meters
++    uint32_t                   flags;                      ///< Zero or a combination of values from FfxApiDispatchFsrUpscaleFlags.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETUPSCALERATIOFROMQUALITYMODE 0x00010002u
++struct ffxQueryDescUpscaleGetUpscaleRatioFromQualityMode
++{
++    ffxQueryDescHeader header;
++    uint32_t           qualityMode;      ///< The desired quality mode for FSR upscaling.
++    float*             pOutUpscaleRatio; ///< A pointer to a <c>float</c> which will hold the upscaling the per-dimension upscaling ratio.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETRENDERRESOLUTIONFROMQUALITYMODE 0x00010003u
++struct ffxQueryDescUpscaleGetRenderResolutionFromQualityMode
++{
++    ffxQueryDescHeader header;
++    uint32_t           displayWidth;     ///< The target display resolution width.
++    uint32_t           displayHeight;    ///< The target display resolution height.
++    uint32_t           qualityMode;      ///< The desired quality mode for FSR upscaling.
++    uint32_t*          pOutRenderWidth;  ///< A pointer to a <c>uint32_t</c> which will hold the calculated render resolution width.
++    uint32_t*          pOutRenderHeight; ///< A pointer to a <c>uint32_t</c> which will hold the calculated render resolution height.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTERPHASECOUNT 0x00010004u
++struct ffxQueryDescUpscaleGetJitterPhaseCount
++{
++    ffxQueryDescHeader header;
++    uint32_t           renderWidth;    ///< The render resolution width.
++    uint32_t           displayWidth;   ///< The output resolution width.
++    int32_t*           pOutPhaseCount; ///< A pointer to a <c>int32_t</c> which will hold the jitter phase count for the scaling factor between <c><i>renderWidth</i></c> and <c><i>displayWidth</i></c>.
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTEROFFSET 0x00010005u
++struct ffxQueryDescUpscaleGetJitterOffset
++{
++    ffxQueryDescHeader header;
++    int32_t            index;      ///< The index within the jitter sequence.
++    int32_t            phaseCount; ///< The length of jitter phase. See <c><i>ffxQueryDescFsrGetJitterPhaseCount</i></c>.
++    float*             pOutX;      ///< A pointer to a <c>float</c> which will contain the subpixel jitter offset for the x dimension.
++    float*             pOutY;      ///< A pointer to a <c>float</c> which will contain the subpixel jitter offset for the y dimension.
++};
++
++#define FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK 0x00010006u
++struct ffxDispatchDescUpscaleGenerateReactiveMask
++{
++    ffxDispatchDescHeader     header;
++    void*                     commandList;      ///< The <c><i>FfxCommandList</i></c> to record FSRUPSCALE rendering commands into.
++    struct FfxApiResource     colorOpaqueOnly;  ///< A <c><i>FfxResource</i></c> containing the opaque only color buffer for the current frame (at render resolution).
++    struct FfxApiResource     colorPreUpscale;  ///< A <c><i>FfxResource</i></c> containing the opaque+translucent color buffer for the current frame (at render resolution).
++    struct FfxApiResource     outReactive;      ///< A <c><i>FfxResource</i></c> containing the surface to generate the reactive mask into.
++    struct FfxApiDimensions2D renderSize;       ///< The resolution that was used for rendering the input resources.
++    float                     scale;            ///< A value to scale the output
++    float                     cutoffThreshold;  ///< A threshold value to generate a binary reactive mask
++    float                     binaryValue;      ///< A value to set for the binary reactive mask
++    uint32_t                  flags;            ///< Flags to determine how to generate the reactive mask
++};
++
++#define FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE 0x00010007u
++struct ffxConfigureDescUpscaleKeyValue
++{
++    ffxConfigureDescHeader  header;
++    uint64_t                key;        ///< Configuration key, member of the FfxApiConfigureUpscaleKey enumeration.
++    uint64_t                u64;        ///< Integer value or enum value to set.
++    void*                   ptr;        ///< Pointer to set or pointer to value to set.
++};
++
++enum FfxApiConfigureUpscaleKey
++{
++    FFX_API_CONFIGURE_UPSCALE_KEY_FVELOCITYFACTOR = 0, //Override constant buffer fVelocityFactor. The float value is casted from void * ptr. Value of 0.0f can improve temporal stability of bright pixels. Default value is 1.0f. Value is clamped to [0.0f, 1.0f].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FREACTIVENESSSCALE = 1, //Override constant buffer fReactivenessScale. The float value is casted from void * ptr. Meant for development purpose to test if writing a larger value to reactive mask, reduces ghosting. Default value is 1.0f. Value is clamped to [0.0f, +infinity].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FSHADINGCHANGESCALE = 2, //Override fShadingChangeScale. Increasing this scales fsr3.1 computed shading change value at read to have higher reactiveness. Default value is 1.0f. Value is clamped to [0.0f, +infinity].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FACCUMULATIONADDEDPERFRAME = 3, // Override constant buffer fAccumulationAddedPerFrame. Corresponds to amount of accumulation added per frame at pixel coordinate where disocclusion occured or when reactive mask value is > 0.0f. Decreasing this and drawing the ghosting object (IE no mv) to reactive mask with value close to 1.0f can decrease temporal ghosting. Decreasing this value could result in more thin feature pixels flickering. Default value is 0.333. Value is clamped to [0.0f, 1.0f].
++    FFX_API_CONFIGURE_UPSCALE_KEY_FMINDISOCCLUSIONACCUMULATION = 4, //Override constant buffer fMinDisocclusionAccumulation. Increasing this value may reduce white pixel temporal flickering around swaying thin objects that are disoccluding one another often. Too high value may increase ghosting. A sufficiently negative value means for pixel coordinate at frame N that is disoccluded, add fAccumulationAddedPerFrame starting at frame N+2. Default value is -0.333. Value is clamped to [-1.0f, 1.0f].
++};
++
++#define FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE 0x00010008u
++struct ffxQueryDescUpscaleGetGPUMemoryUsage
++{
++    ffxQueryDescHeader header;
++    struct FfxApiEffectMemoryUsage* gpuMemoryUsageUpscaler;
++};
++
++#ifdef __cplusplus
++}
++#endif

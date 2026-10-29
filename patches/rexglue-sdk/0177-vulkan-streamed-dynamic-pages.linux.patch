@@ -1,0 +1,42 @@
+The Vulkan half of 0134: uploads through CopyPagesForUpload, ends the guest frame for the streamed page set
+and streams vertex fetches (after 0171, which makes every draw request them).
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 43bf855..aa33abf 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2245,6 +2245,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     REXGPU_ERROR("XELOG_GPU PRESENT: NO PRESENTER");
+     return;
+   }
++  if (shared_memory_) {
++    shared_memory_->OnGuestFrameEnd();
++  }
+ 
+   // In case the swap command is the only one in the frame.
+   if (!BeginSubmission(true)) {
+@@ -4023,7 +4026,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+         // shared memory has nothing bound (undefined without residencyNonResidentStrict).
+         vfetch_request_size = 4096;
+       }
+-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size)) {
++      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_request_size, true)) {
+         REXGPU_ERROR(
+             "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
+             "memory",
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 6788214..912caab 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -301,9 +301,8 @@ bool VulkanSharedMemory::UploadRanges(
+         break;
+       }
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+-      std::memcpy(upload_buffer_mapping,
+-                  memory().TranslatePhysical(upload_range_start << page_size_log2()),
+-                  upload_buffer_size);
++      CopyPagesForUpload(upload_range_start, uint32_t(upload_buffer_size >> page_size_log2()),
++                         upload_buffer_mapping);
+       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,

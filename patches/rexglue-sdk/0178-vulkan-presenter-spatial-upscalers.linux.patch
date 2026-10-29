@@ -1,0 +1,117 @@
+The Vulkan half of 0127: AMD FSR 1 (EASU and RCAS) and CAS in the Vulkan presenter without the FidelityFX
+SDK. Their shaders are the SDK's prebuilt SPIR-V and use only push constants, so no newer Vulkan headers
+or loader are needed.
+
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index 56ee43b..abdea6b 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -230,12 +230,10 @@ class VulkanPresenter final : public Presenter {
+ 
+   enum GuestOutputPaintPipelineLayoutIndex : size_t {
+     kGuestOutputPaintPipelineLayoutIndexBilinear,
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+     kGuestOutputPaintPipelineLayoutIndexCasSharpen,
+     kGuestOutputPaintPipelineLayoutIndexCasResample,
+     kGuestOutputPaintPipelineLayoutIndexFsrEasu,
+     kGuestOutputPaintPipelineLayoutIndexFsrRcas,
+-#endif
+ 
+     kGuestOutputPaintPipelineLayoutCount,
+   };
+@@ -246,7 +244,6 @@ class VulkanPresenter final : public Presenter {
+       case GuestOutputPaintEffect::kBilinear:
+       case GuestOutputPaintEffect::kBilinearDither:
+         return kGuestOutputPaintPipelineLayoutIndexBilinear;
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+       case GuestOutputPaintEffect::kCasSharpen:
+       case GuestOutputPaintEffect::kCasSharpenDither:
+         return kGuestOutputPaintPipelineLayoutIndexCasSharpen;
+@@ -258,7 +255,6 @@ class VulkanPresenter final : public Presenter {
+       case GuestOutputPaintEffect::kFsrRcas:
+       case GuestOutputPaintEffect::kFsrRcasDither:
+         return kGuestOutputPaintPipelineLayoutIndexFsrRcas;
+-#endif
+       default:
+         assert_unhandled_case(effect);
+         return kGuestOutputPaintPipelineLayoutCount;
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 3396ec7..7a2fcc5 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -109,7 +109,6 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL FfxVkGetDeviceProcAddrCompat(VkDevice d
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_ps.h"
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_sharpen_dither_ps.h"
+@@ -117,7 +116,6 @@ namespace shaders {
+ #include "../shaders/vulkan_spirv/guest_output_ffx_fsr_easu_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_fsr_rcas_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_fsr_rcas_ps.h"
+-#endif
+ #include "../shaders/vulkan_spirv/guest_output_triangle_strip_rect_vs.h"
+ }  // namespace shaders
+ 
+@@ -2030,19 +2028,16 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+           uint32_t effect_constants_size = 0;
+           union {
+             BilinearConstants bilinear;
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+             CasSharpenConstants cas_sharpen;
+             CasResampleConstants cas_resample;
+             FsrEasuConstants fsr_easu;
+             FsrRcasConstants fsr_rcas;
+-#endif
+           } effect_constants;
+           switch (guest_output_paint_pipeline_layout_index) {
+             case kGuestOutputPaintPipelineLayoutIndexBilinear: {
+               effect_constants_size = sizeof(effect_constants.bilinear);
+               effect_constants.bilinear.Initialize(guest_output_flow, i);
+             } break;
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+             case kGuestOutputPaintPipelineLayoutIndexCasSharpen: {
+               effect_constants_size = sizeof(effect_constants.cas_sharpen);
+               effect_constants.cas_sharpen.Initialize(guest_output_flow, i,
+@@ -2061,7 +2056,6 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+               effect_constants_size = sizeof(effect_constants.fsr_rcas);
+               effect_constants.fsr_rcas.Initialize(guest_output_flow, i, guest_output_paint_config);
+             } break;
+-#endif
+             default:
+               break;
+           }
+@@ -2337,7 +2331,6 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+       case kGuestOutputPaintPipelineLayoutIndexBilinear:
+         guest_output_paint_push_constant_range_ffx.size = sizeof(BilinearConstants);
+         break;
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+       case kGuestOutputPaintPipelineLayoutIndexCasSharpen:
+         guest_output_paint_push_constant_range_ffx.size = sizeof(CasSharpenConstants);
+         break;
+@@ -2350,7 +2343,6 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+       case kGuestOutputPaintPipelineLayoutIndexFsrRcas:
+         guest_output_paint_push_constant_range_ffx.size = sizeof(FsrRcasConstants);
+         break;
+-#endif
+       default:
+         assert_unhandled_case(GuestOutputPaintPipelineLayoutIndex(i));
+         continue;
+@@ -2392,7 +2384,6 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+         shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_dither_ps);
+         shader_module_create_info.pCode = shaders::guest_output_bilinear_dither_ps;
+         break;
+-#if defined(REX_HAS_FIDELITYFX_SDK)
+       case GuestOutputPaintEffect::kCasSharpen:
+         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_cas_sharpen_ps);
+         shader_module_create_info.pCode = shaders::guest_output_ffx_cas_sharpen_ps;
+@@ -2423,7 +2414,6 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_fsr_rcas_dither_ps);
+         shader_module_create_info.pCode = shaders::guest_output_ffx_fsr_rcas_dither_ps;
+         break;
+-#endif
+       default:
+         // Not supported by this implementation.
+         continue;

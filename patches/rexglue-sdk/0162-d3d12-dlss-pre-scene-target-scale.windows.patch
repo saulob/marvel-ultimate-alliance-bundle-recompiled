@@ -1,0 +1,2944 @@
+With DLSS (0161), the surfaces the game draws into before its 3D scene in a frame, such as shadow maps, are drawn at
+the smallest whole resolution scale that keeps the scene's detail instead of the full one: 2x for Performance at a 4x
+render resolution, 3x for Quality and Balanced. A surface is a pitch and a sample count, so a pass's color and depth
+targets go together; it qualifies after three frames that drew it before the scene and never after it, and no draw
+after the scene samples a texture resolved from it (a later resolve to the same memory replaces that texture). It
+stays at the full scale for the session once one does. Changes apply between frames only. Its draws get the host
+viewport and scissor scaled about the EDRAM origin like the scene's, without jitter, and at each of its resolves
+scene_edram_stretch copies the resolve rectangle from the EDRAM, each sample from the nearest smaller-scale pixel, into
+a buffer the size of the EDRAM at the same addresses (the DLSS staging buffer, made that big), which Resolve copies
+from instead of the EDRAM (copy_source); clears still go to the EDRAM. Every format, sample count and depth works,
+as the copy is raw. Nothing after the scene changes scale: post-processing, the HUD, menus and the presenter keep the
+full Render resolution. The log gets the scale domains when DLSS starts, the surfaces drawn smaller or kept whenever
+that changes, and the GPU targets line shows each target's host size at the scale its draws used.
+d3d12_dlss_pre_scene_scale (on) turns it off. Builds on 0161.
+
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 260f39c..bf47950 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -383,7 +383,7 @@ class D3D12CommandProcessor : public CommandProcessor {
+                                   uint32_t normalized_color_mask);
+   bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
+                       ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
+-  bool IssueCopy_ReadbackResolvePath();
++  bool IssueCopy_ReadbackResolvePath(ID3D12Resource* copy_source);
+   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
+   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
+ 
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index 5f94866..9d436a2 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -74,10 +74,11 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+ 
+   // Performs the resolve to a shared memory area according to the current
+   // register values, and also clears the render targets if needed. Must be in a
+-  // frame for calling.
++  // frame for calling. A copy_source laid out like the EDRAM (in the non-pixel-shader resource state) is copied from
++  // instead of the EDRAM, which is still what gets cleared.
+   bool Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
+                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
+-               uint32_t& written_length_out);
++               uint32_t& written_length_out, ID3D12Resource* copy_source = nullptr);
+ 
+   // The copying part of a resolve, from source_buffer laid out like the EDRAM (in the non-pixel-shader resource
+   // state) instead of the EDRAM when it's not null.
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index 3af1ffc..5c9873a 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -47,6 +47,171 @@ inline ResolveRect ResolveRectFor(uint32_t base_tiles, uint32_t original_base, u
+   return rect;
+ }
+ 
++// ResolveRectFor for a resolve of any format: 64bpp resolves count their base and pitch in 40-sample half-tiles.
++inline ResolveRect SurfaceRectFor(uint32_t base_tiles, uint32_t original_base, uint32_t pitch_tiles, bool is_64bpp,
++                                  uint32_t sample_count_log2_x, uint32_t sample_count_log2_y,
++                                  uint32_t edram_offset_x_div_8, uint32_t edram_offset_y_div_8, uint32_t width_div_8,
++                                  uint32_t height_div_8) {
++  const uint32_t shift = uint32_t(is_64bpp);
++  return ResolveRectFor(original_base + (((base_tiles - original_base) & (kTileCount - 1)) >> shift), original_base,
++                        pitch_tiles >> shift, sample_count_log2_x, sample_count_log2_y, edram_offset_x_div_8,
++                        edram_offset_y_div_8, width_div_8, height_div_8, 0, 0);
++}
++
++// What scene_edram_stretch.cs.hlsl needs to stretch a resolve rectangle of a surface drawn at a smaller scale.
++struct StretchLayout {
++  uint32_t base_dwords = 0;
++  uint32_t pitch_dwords = 0;
++  // 0: 32bpp color, 1: 64bpp color, 2: depth.
++  uint32_t layout = 0;
++  // Host pixels from the surface's origin.
++  uint32_t rect_origin[2] = {};
++  uint32_t rect_size[2] = {};
++};
++
++inline StretchLayout StretchLayoutFor(uint32_t base_tiles, uint32_t original_base, uint32_t pitch_tiles, bool depth,
++                                      bool is_64bpp, uint32_t sample_count_log2_x, uint32_t sample_count_log2_y,
++                                      uint32_t edram_offset_x_div_8, uint32_t edram_offset_y_div_8,
++                                      uint32_t width_div_8, uint32_t height_div_8, uint32_t scale_x,
++                                      uint32_t scale_y) {
++  const ResolveRect rect =
++      SurfaceRectFor(base_tiles, original_base, pitch_tiles, is_64bpp && !depth, sample_count_log2_x,
++                     sample_count_log2_y, edram_offset_x_div_8, edram_offset_y_div_8, width_div_8, height_div_8);
++  const uint32_t tile_dwords = kTileWidthSamples * scale_x * kTileHeightSamples * scale_y;
++  StretchLayout layout;
++  layout.base_dwords = original_base * tile_dwords;
++  layout.pitch_dwords = std::max(pitch_tiles, uint32_t(1)) * tile_dwords;
++  layout.layout = depth ? 2 : uint32_t(is_64bpp);
++  layout.rect_origin[0] = uint32_t(rect.edram_x) * scale_x;
++  layout.rect_origin[1] = uint32_t(rect.edram_y) * scale_y;
++  layout.rect_size[0] = rect.width * scale_x;
++  layout.rect_size[1] = rect.height * scale_y;
++  return layout;
++}
++
++// scene_edram_stretch.cs.hlsl's SampleAddress: the EDRAM dword of a sample, in samples from the surface's origin.
++inline uint32_t StretchSampleAddress(const StretchLayout& layout, uint32_t scale_x, uint32_t scale_y,
++                                     uint32_t sample_x, uint32_t sample_y) {
++  const uint32_t tile_width = kTileWidthSamples * scale_x, tile_height = kTileHeightSamples * scale_y;
++  const uint32_t tile_dwords = tile_width * tile_height;
++  uint32_t offset;
++  if (layout.layout == 1) {
++    const uint32_t half_width = tile_width >> 1;
++    offset = sample_y / tile_height * layout.pitch_dwords + sample_x / half_width * tile_dwords +
++             sample_y % tile_height * tile_width + sample_x % half_width * 2;
++  } else {
++    uint32_t in_x = sample_x % tile_width;
++    if (layout.layout == 2) {
++      in_x = in_x >= tile_width / 2 ? in_x - tile_width / 2 : in_x + tile_width / 2;
++    }
++    offset = sample_y / tile_height * layout.pitch_dwords + sample_x / tile_width * tile_dwords +
++             sample_y % tile_height * tile_width + in_x;
++  }
++  const uint32_t address = layout.base_dwords + offset;
++  const uint32_t edram_dwords = kTileCount * tile_dwords;
++  return address >= edram_dwords ? address - edram_dwords : address;
++}
++
++// The whole resolution scale the targets drawn before the scene use with DLSS: the smallest one with at least the
++// scene's detail, or output_scale when that leaves nothing to save.
++inline uint32_t PreSceneScale(uint32_t render_size, uint32_t guest_size, uint32_t output_scale) {
++  if (!guest_size) {
++    return output_scale;
++  }
++  return std::clamp((render_size + guest_size - 1) / guest_size, uint32_t(1), std::max(output_scale, uint32_t(1)));
++}
++
++// The host pixel of a draw at scale holding what the full-scale host pixel shows: each guest pixel covers scale instead
++// of output_scale host pixels, from the EDRAM origin (scene_edram_stretch.cs.hlsl).
++inline uint32_t ReducedPixel(uint32_t pixel, uint32_t scale, uint32_t output_scale) {
++  return pixel * scale / output_scale;
++}
++
++// Surfaces the game draws into before its 3D scene in a frame, such as shadow maps, whose textures nothing samples
++// after the scene: only the scene uses them, and DLSS renders it smaller, so they're drawn at PreSceneScale. A surface
++// is a pitch and a sample count, which the color and depth targets of a pass share. Changes take effect between
++// frames only, so all draws and resolves of a surface in a frame agree.
++class PreSceneTargets {
++ public:
++  static constexpr uint32_t kFramesToReduce = 3;
++  static constexpr size_t kMaxSurfaces = 32;
++
++  struct Surface {
++    uint32_t key = 0;
++    uint32_t frames_before = 0;
++    bool drawn_before = false;
++    bool drawn_after = false;
++    bool sampled_after = false;
++    bool reduced = false;
++    // Drawn into or sampled after the scene once: stays at the output scale.
++    bool kept = false;
++  };
++
++  static uint32_t Key(uint32_t surface_pitch, uint32_t msaa_samples_log2) {
++    return surface_pitch | msaa_samples_log2 << 16;
++  }
++  static uint32_t Pitch(uint32_t key) { return key & 0xFFFF; }
++  static uint32_t SamplesLog2(uint32_t key) { return key >> 16; }
++
++  // A draw that isn't part of the scene.
++  void NoteDraw(uint32_t key, bool after_scene) {
++    if (Surface* surface = Find(key, true)) {
++      (after_scene ? surface->drawn_after : surface->drawn_before) = true;
++    }
++  }
++  // A draw after the scene sampled a texture resolved from the surface.
++  void NoteSampledAfterScene(uint32_t key) {
++    if (Surface* surface = Find(key, false)) {
++      surface->sampled_after = true;
++    }
++  }
++  // Only frames that drew the scene tell what comes before it. Returns whether a surface changed.
++  bool EndFrame(bool scene_drawn, uint32_t scene_key) {
++    bool changed = false;
++    for (Surface& surface : surfaces_) {
++      if (scene_drawn) {
++        const bool was_reduced = surface.reduced;
++        if (surface.key == scene_key || Pitch(surface.key) == 0 || surface.drawn_after || surface.sampled_after) {
++          changed |= !surface.kept;
++          surface.kept = true;
++          surface.reduced = false;
++        } else if (surface.drawn_before && !surface.kept && ++surface.frames_before >= kFramesToReduce) {
++          surface.reduced = true;
++        }
++        changed |= surface.reduced != was_reduced;
++      }
++      surface.drawn_before = surface.drawn_after = surface.sampled_after = false;
++    }
++    return changed;
++  }
++  bool IsReduced(uint32_t key) const {
++    for (const Surface& surface : surfaces_) {
++      if (surface.key == key) {
++        return surface.reduced;
++      }
++    }
++    return false;
++  }
++  const std::vector<Surface>& surfaces() const { return surfaces_; }
++
++ private:
++  Surface* Find(uint32_t key, bool add) {
++    for (Surface& surface : surfaces_) {
++      if (surface.key == key) {
++        return &surface;
++      }
++    }
++    if (!add || surfaces_.size() >= kMaxSurfaces) {
++      return nullptr;
++    }
++    surfaces_.push_back({});
++    surfaces_.back().key = key;
++    return &surfaces_.back();
++  }
++
++  std::vector<Surface> surfaces_;
++};
++
+ // Render pixels of a resolve: where scaled draws put it in the EDRAM, and where it goes in the composed scene.
+ struct CaptureRegion {
+   int32_t source_x = 0;
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index 2ed5acd..5fbd9a2 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -33,7 +33,9 @@ class D3D12TextureCache;
+ // color and depth are copied out of the EDRAM and the game's texture gets them stretched to full size; when the scene
+ // is done, camera motion vectors are computed from the depth and the object-to-clip matrices of draws with static
+ // vertex shaders, DLSS runs, and its output replaces the textures with the scene's final content, so everything the
+-// game draws from them afterwards (post-processing, HUD, menus) keeps the full resolution.
++// game draws from them afterwards (post-processing, HUD, menus) keeps the full resolution. Surfaces drawn only before
++// the scene in a frame, such as shadow maps, are drawn at the smallest whole resolution scale that keeps the scene's
++// detail, and their resolves copy them stretched to full size.
+ class SceneUpscaler {
+  public:
+   SceneUpscaler(D3D12CommandProcessor& command_processor, D3D12RenderTargetCache& render_target_cache,
+@@ -56,9 +58,10 @@ class SceneUpscaler {
+   };
+   // Before a draw's state is set: finishes a resolved scene first when the draw is not part of it.
+   DrawAdjustment BeginDraw(const RegisterFile& regs, xenos::EdramMode edram_mode, const Shader& vertex_shader,
+-                           bool pixel_shader_writes_color, uint32_t index_base, uint32_t index_count);
+-  // Around the render target cache's resolve.
+-  void BeforeResolve(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info);
++                           const Shader* pixel_shader, uint32_t index_base, uint32_t index_count);
++  // Around the render target cache's resolve, which copies from the buffer BeforeResolve returns instead of the EDRAM
++  // when it isn't null.
++  ID3D12Resource* BeforeResolve(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info);
+   void AfterResolve();
+   // Before a swap, which ends a frame.
+   void BeforeSwap();
+@@ -78,6 +81,13 @@ class SceneUpscaler {
+     bool depth = false;
+   };
+ 
++  // A texture a resolve of a surface drawn outside the scene wrote, in guest physical memory.
++  struct OtherResolve {
++    uint32_t key = 0;
++    uint32_t address_begin = 0;
++    uint32_t address_end = 0;
++  };
++
+   enum RootParameter : UINT {
+     kRootParameterConstants,
+     kRootParameterSource0,
+@@ -98,6 +108,13 @@ class SceneUpscaler {
+   void ReleaseResources();
+   void DisableForSession(const std::string& reason);
+   bool IsSceneDraw(const RegisterFile& regs, xenos::EdramMode edram_mode, bool pixel_shader_writes_color) const;
++  void NoteOtherDraw(const RegisterFile& regs, const Shader& vertex_shader, const Shader* pixel_shader,
++                     DrawAdjustment& adjustment);
++  void NoteSampledAfterScene(const RegisterFile& regs, const Shader& shader);
++  void NoteResolveDest(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info, uint32_t key,
++                       bool other);
++  ID3D12Resource* StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info);
++  void LogPreSceneTargets() const;
+   void NoteDirectTransform(const RegisterFile& regs, const Shader& vertex_shader, uint32_t index_base,
+                            uint32_t index_count);
+   std::optional<scene::Matrix> EstimateCameraReprojection(uint32_t& matched_out, uint32_t& agreeing_out) const;
+@@ -140,6 +157,7 @@ class SceneUpscaler {
+   ID3D12PipelineState* capture_pipeline_ = nullptr;
+   ID3D12PipelineState* motion_pipeline_ = nullptr;
+   ID3D12PipelineState* encode_pipeline_ = nullptr;
++  ID3D12PipelineState* stretch_pipeline_ = nullptr;
+ 
+   ID3D12Resource* color_ = nullptr;
+   D3D12_RESOURCE_STATES color_state_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+@@ -164,6 +182,15 @@ class SceneUpscaler {
+   Feature feature_;
+   bool feature_recreate_ = true;
+ 
++  // Surfaces drawn before the scene: their scale, and whether this frame draws the reduced ones at it.
++  uint32_t pre_scene_scale_x_ = 1;
++  uint32_t pre_scene_scale_y_ = 1;
++  bool pre_scene_frame_ = false;
++  scene::PreSceneTargets pre_scene_targets_;
++  std::vector<OtherResolve> other_resolves_;
++  size_t other_resolves_next_ = 0;
++  uint32_t scene_key_ = 0;
++
+   // Per frame.
+   std::optional<Surface> surface_;
+   std::unordered_map<uint64_t, uint32_t> candidate_draws_;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index f4aa680..b5b6e8d 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -101,6 +101,9 @@ struct GpuTargetStats {
+   uint32_t height = 0;
+   uint32_t draws = 0;
+   uint64_t pixels = 0;
++  // Of the resolution scale, what the last draw's viewport used.
++  float viewport_scale_x = 1.0f;
++  float viewport_scale_y = 1.0f;
+ };
+ 
+ struct GpuResolveStats {
+@@ -123,6 +126,7 @@ struct GpuWorkSummary {
+   uint32_t copies = 0;
+   std::array<GpuTargetStats, 16> targets{};
+   size_t target_count = 0;
++  GpuTargetStats* last_draw_target = nullptr;
+   uint32_t untracked_draws = 0;
+   std::array<GpuResolveStats, 8> resolves{};
+   size_t resolve_count = 0;
+@@ -286,6 +290,24 @@ void NoteGpuWorkDraw(const RegisterFile& regs, xenos::EdramMode edram_mode) {
+   target->height = std::max(target->height, height);
+   ++target->draws;
+   target->pixels += uint64_t(width) * height;
++  summary.last_draw_target = target;
++}
++
++void NoteGpuWorkDrawScale(float viewport_scale_x, float viewport_scale_y) {
++  if (GpuTargetStats* target = std::exchange(g_gpu_work_summary.last_draw_target, nullptr)) {
++    target->viewport_scale_x = viewport_scale_x;
++    target->viewport_scale_y = viewport_scale_y;
++  }
++}
++
++std::string HostScaleText(float scale_x, float scale_y) {
++  char text[32];
++  if (scale_x == scale_y) {
++    std::snprintf(text, sizeof(text), "%.3gx", scale_x);
++  } else {
++    std::snprintf(text, sizeof(text), "%.3gx%.3g", scale_x, scale_y);
++  }
++  return text;
+ }
+ 
+ void NoteGpuWorkResolve(const RegisterFile& regs) {
+@@ -321,8 +343,11 @@ std::string GpuTargetsText(GpuWorkSummary& summary, double swaps, uint32_t scale
+             std::to_string(target.format) + " " + std::to_string(target.msaa) + "x base " +
+             std::to_string(target.base) + " pitch " + std::to_string(target.pitch) + ": " +
+             SizeText(target.width, target.height) + " guest -> " +
+-            SizeText(target.width * scale_x, target.height * scale_y) + " host, " + draws + " draws/swap, " +
+-            std::to_string(total ? target.pixels * 100 / total : 0) + "% of pixels";
++            SizeText(uint32_t(std::lround(target.width * scale_x * target.viewport_scale_x)),
++                     uint32_t(std::lround(target.height * scale_y * target.viewport_scale_y))) +
++            " host at " +
++            HostScaleText(scale_x * target.viewport_scale_x, scale_y * target.viewport_scale_y) + ", " + draws +
++            " draws/swap, " + std::to_string(total ? target.pixels * 100 / total : 0) + "% of pixels";
+   }
+   if (summary.untracked_draws) {
+     text += "; " + std::to_string(summary.untracked_draws) + " draws on untracked targets";
+@@ -3031,8 +3056,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+ 
+   const SceneUpscaler::DrawAdjustment scene_adjustment = scene_upscaler_->BeginDraw(
+-      regs, edram_mode, *vertex_shader, pixel_shader != nullptr,
++      regs, edram_mode, *vertex_shader, pixel_shader,
+       index_buffer_info ? index_buffer_info->guest_base : 0, index_count);
++  if (edram_mode == xenos::EdramMode::kColorDepth || edram_mode == xenos::EdramMode::kDepthOnly) {
++    NoteGpuWorkDrawScale(scene_adjustment.scale_x, scene_adjustment.scale_y);
++  }
+ 
+   // Process primitives.
+   PrimitiveProcessor::ProcessingResult primitive_processing_result;
+@@ -3666,13 +3694,14 @@ bool D3D12CommandProcessor::IssueCopy() {
+   if (!BeginSubmission(true)) {
+     return false;
+   }
++  ID3D12Resource* copy_source = nullptr;
+   if (scene_upscaler_->enabled()) {
+     draw_util::ResolveInfo resolve_info;
+     const bool fixed_16_truncated = render_target_cache_->IsFixed16TruncatedToMinus1To1();
+     if (draw_util::GetResolveInfo(*register_file_, *memory_, texture_cache_->draw_resolution_scale_x(),
+                                   texture_cache_->draw_resolution_scale_y(), fixed_16_truncated,
+                                   fixed_16_truncated, resolve_info)) {
+-      scene_upscaler_->BeforeResolve(*register_file_, resolve_info);
++      copy_source = scene_upscaler_->BeforeResolve(*register_file_, resolve_info);
+     }
+   }
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
+@@ -3680,18 +3709,18 @@ bool D3D12CommandProcessor::IssueCopy() {
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+     uint32_t written_address, written_length;
+     resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                             written_address, written_length);
++                                             written_address, written_length, copy_source);
+   } else {
+-    resolved = IssueCopy_ReadbackResolvePath();
++    resolved = IssueCopy_ReadbackResolvePath(copy_source);
+   }
+   scene_upscaler_->AfterResolve();
+   return resolved;
+ }
+ 
+-bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
++bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath(ID3D12Resource* copy_source) {
+   uint32_t written_address, written_length;
+   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
+-                                     written_length)) {
++                                     written_length, copy_source)) {
+     return false;
+   }
+ 
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index 3227d75..ec4411b 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -1432,7 +1432,8 @@ void D3D12RenderTargetCache::WriteResolveSourceSRVDescriptor(
+ 
+ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
+                                      D3D12TextureCache& texture_cache,
+-                                     uint32_t& written_address_out, uint32_t& written_length_out) {
++                                     uint32_t& written_address_out, uint32_t& written_length_out,
++                                     ID3D12Resource* copy_source) {
+   written_address_out = 0;
+   written_length_out = 0;
+ 
+@@ -1454,7 +1455,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+   // Copying.
+   bool copied = false;
+   if (resolve_info.copy_dest_extent_length) {
+-    if (!CopyResolveToMemory(resolve_info, shared_memory, texture_cache, nullptr, written_address_out,
++    if (!CopyResolveToMemory(resolve_info, shared_memory, texture_cache, copy_source, written_address_out,
+                              written_length_out, copied)) {
+       return false;
+     }
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index c278bec..17f2b2d 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -33,11 +33,16 @@ REXCVAR_DEFINE_STRING(d3d12_dlss_bridge, "", "GPU/D3D12",
+ REXCVAR_DEFINE_STRING(d3d12_dlss_data_path, "", "GPU/D3D12",
+                       "Writable folder for NVIDIA NGX's files; empty uses the DLSS bridge's folder")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_scale, true, "GPU/D3D12",
++                    "With DLSS, draw the targets drawn only before the 3D scene, such as shadow maps, at the scene's "
++                    "resolution scale instead of the full one")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::d3d12 {
+ 
+ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/scene_capture_cs.h"
++#include "../shaders/bytecode/d3d12_5_1/scene_edram_stretch_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/scene_encode_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/scene_motion_cs.h"
+ }  // namespace shaders
+@@ -49,6 +54,8 @@ namespace {
+ constexpr uint32_t kSceneSurfaceMinDraws = 20;
+ constexpr size_t kMaxTrackedMatrices = 2048;
+ constexpr size_t kMaxReprojectionSamples = 256;
++constexpr size_t kMaxOtherResolves = 16;
++constexpr uint32_t kPhysicalAddressMask = 0x1FFFFFFF;
+ constexpr uint32_t kEdramTileWidth = xenos::kEdramTileWidthSamples;
+ constexpr uint32_t kEdramTileHeight = xenos::kEdramTileHeightSamples;
+ 
+@@ -90,6 +97,21 @@ struct EncodeConstants {
+   uint32_t depth_is_float24;
+ };
+ 
++struct StretchConstants {
++  uint32_t base_dwords;
++  uint32_t pitch_dwords;
++  uint32_t edram_size_dwords;
++  uint32_t layout;
++  uint32_t tile_width;
++  uint32_t tile_height;
++  uint32_t sample_count_log2_x;
++  uint32_t sample_count_log2_y;
++  uint32_t rect_origin[2];
++  uint32_t rect_size[2];
++  uint32_t draw_scale[2];
++  uint32_t output_scale[2];
++};
++
+ struct EvaluateArgs {
+   bool create;
+   RexDlssFeatureDesc feature_desc;
+@@ -125,6 +147,15 @@ uint32_t VideoModeDimension(const char* name, uint32_t fallback) {
+   return value > 0 ? uint32_t(value) : fallback;
+ }
+ 
++std::string ScaleText(double x, double y) {
++  return x == y ? fmt::format("{:.3g}x", x) : fmt::format("{:.3g}x{:.3g}", x, y);
++}
++
++std::string SurfaceText(uint32_t key) {
++  return fmt::format("pitch {} {}x MSAA", scene::PreSceneTargets::Pitch(key),
++                     1u << scene::PreSceneTargets::SamplesLog2(key));
++}
++
+ uint64_t Mix(uint64_t hash, uint64_t value) {
+   hash ^= value + 0x9E3779B97F4A7C15ull + (hash << 6) + (hash >> 2);
+   return hash;
+@@ -207,8 +238,10 @@ bool SceneUpscaler::Initialize(uint32_t draw_resolution_scale_x, uint32_t draw_r
+                                                               sizeof(shaders::scene_motion_cs), root_signature_);
+     encode_pipeline_ = ui::d3d12::util::CreateComputePipeline(device, shaders::scene_encode_cs,
+                                                               sizeof(shaders::scene_encode_cs), root_signature_);
++    stretch_pipeline_ = ui::d3d12::util::CreateComputePipeline(
++        device, shaders::scene_edram_stretch_cs, sizeof(shaders::scene_edram_stretch_cs), root_signature_);
+   }
+-  if (!root_signature_ || !capture_pipeline_ || !motion_pipeline_ || !encode_pipeline_) {
++  if (!root_signature_ || !capture_pipeline_ || !motion_pipeline_ || !encode_pipeline_ || !stretch_pipeline_) {
+     REXGPU_ERROR("DLSS: off, its compute pipelines can't be created - the scene renders without it");
+     Shutdown();
+     return true;
+@@ -224,6 +257,7 @@ void SceneUpscaler::Shutdown() {
+     feature_.handle = nullptr;
+   }
+   ReleaseResources();
++  ui::d3d12::util::ReleaseAndNull(stretch_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(encode_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(motion_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(capture_pipeline_);
+@@ -239,6 +273,7 @@ void SceneUpscaler::DisableForSession(const std::string& reason) {
+   }
+   disabled_ = true;
+   runtime_ready_ = false;
++  pre_scene_frame_ = false;
+ }
+ 
+ bool SceneUpscaler::EnsureRuntime() {
+@@ -268,6 +303,11 @@ bool SceneUpscaler::EnsureRuntime() {
+   }
+   const float ratio = float(output_width_) / float(render_width_);
+   jitter_phases_ = std::clamp(uint32_t(std::ceil(8.0f * ratio * ratio)), uint32_t(8), uint32_t(72));
++  const bool pre_scene_scale = REXCVAR_GET(d3d12_dlss_pre_scene_scale);
++  pre_scene_scale_x_ =
++      pre_scene_scale ? scene::PreSceneScale(render_width_, guest_width_, resolution_scale_x_) : resolution_scale_x_;
++  pre_scene_scale_y_ =
++      pre_scene_scale ? scene::PreSceneScale(render_height_, guest_height_, resolution_scale_y_) : resolution_scale_y_;
+   if (!EnsureResources()) {
+     DisableForSession("its textures can't be created");
+     return false;
+@@ -282,6 +322,17 @@ bool SceneUpscaler::EnsureRuntime() {
+       optimal_.min_render_width, optimal_.min_render_height, optimal_.max_render_width, optimal_.max_render_height,
+       render_width_, render_height_, jitter_phases_,
+       REXCVAR_GET(d3d12_dlss_preset) ? std::to_string(REXCVAR_GET(d3d12_dlss_preset)) : std::string("default"));
++  std::string pre_scene_text = ScaleText(pre_scene_scale_x_, pre_scene_scale_y_);
++  if (pre_scene_scale_x_ == resolution_scale_x_ && pre_scene_scale_y_ == resolution_scale_y_) {
++    pre_scene_text += pre_scene_scale ? " (no smaller whole scale keeps the scene's detail)"
++                                      : " (d3d12_dlss_pre_scene_scale off)";
++  }
++  REXGPU_INFO("DLSS: scale domains | output, HUD and menus {}x{} ({}) | scene {}x{} ({}) | targets drawn before the "
++              "scene {}",
++              output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_), render_width_,
++              render_height_,
++              ScaleText(double(render_width_) / double(guest_width_), double(render_height_) / double(guest_height_)),
++              pre_scene_text);
+   return true;
+ }
+ 
+@@ -307,8 +358,11 @@ bool SceneUpscaler::EnsureResources() {
+   const uint32_t staging_rows = (guest_height_ + kEdramTileHeight - 1) / kEdramTileHeight;
+   const uint64_t tile_bytes = uint64_t(kEdramTileWidth * resolution_scale_x_) *
+                               (kEdramTileHeight * resolution_scale_y_) * sizeof(uint32_t);
++  // Stretched pre-scene resolves sit at their EDRAM addresses.
++  const bool pre_scene_reduced = pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_;
++  const uint32_t staging_tiles = pre_scene_reduced ? xenos::kEdramTileCount : staging_pitch_tiles_ * staging_rows;
+   D3D12_RESOURCE_DESC staging_desc;
+-  ui::d3d12::util::FillBufferResourceDesc(staging_desc, uint64_t(staging_pitch_tiles_) * staging_rows * tile_bytes,
++  ui::d3d12::util::FillBufferResourceDesc(staging_desc, uint64_t(staging_tiles) * tile_bytes,
+                                           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+   const bool created =
+       texture(color_, DXGI_FORMAT_R8G8B8A8_UNORM, render_width_, render_height_) &&
+@@ -355,12 +409,13 @@ std::array<float, 2> SceneUpscaler::JitterForFrame() const {
+ }
+ 
+ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs, xenos::EdramMode edram_mode,
+-                                                       const Shader& vertex_shader, bool pixel_shader_writes_color,
++                                                       const Shader& vertex_shader, const Shader* pixel_shader,
+                                                        uint32_t index_base, uint32_t index_count) {
+   DrawAdjustment adjustment;
+   if (!enabled_ || disabled_) {
+     return adjustment;
+   }
++  const bool pixel_shader_writes_color = pixel_shader != nullptr;
+   const bool scene = IsSceneDraw(regs, edram_mode, pixel_shader_writes_color);
+   if (!scene) {
+     if (scene_pending_) {
+@@ -381,12 +436,18 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+         ++candidate_draws_[key];
+       }
+     }
++    if (edram_mode == xenos::EdramMode::kColorDepth || edram_mode == xenos::EdramMode::kDepthOnly) {
++      NoteOtherDraw(regs, vertex_shader, pixel_shader, adjustment);
++    }
+     return adjustment;
+   }
+   if (!EnsureRuntime()) {
+     return adjustment;
+   }
+   scene_drawn_ = true;
++  const auto scene_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  scene_key_ =
++      scene::PreSceneTargets::Key(scene_surface_info.surface_pitch, uint32_t(scene_surface_info.msaa_samples));
+   color_fresh_ = depth_fresh_ = true;
+   if (edram_mode == xenos::EdramMode::kColorDepth && !viewport_known_) {
+     const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+@@ -415,6 +476,112 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+   return adjustment;
+ }
+ 
++void SceneUpscaler::NoteOtherDraw(const RegisterFile& regs, const Shader& vertex_shader, const Shader* pixel_shader,
++                                  DrawAdjustment& adjustment) {
++  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  const uint32_t key = scene::PreSceneTargets::Key(surface_info.surface_pitch, uint32_t(surface_info.msaa_samples));
++  pre_scene_targets_.NoteDraw(key, scene_drawn_);
++  if (scene_drawn_ && !other_resolves_.empty()) {
++    NoteSampledAfterScene(regs, vertex_shader);
++    if (pixel_shader) {
++      NoteSampledAfterScene(regs, *pixel_shader);
++    }
++  }
++  if (pre_scene_frame_ && pre_scene_targets_.IsReduced(key)) {
++    adjustment.scale_x = float(pre_scene_scale_x_) / float(resolution_scale_x_);
++    adjustment.scale_y = float(pre_scene_scale_y_) / float(resolution_scale_y_);
++  }
++}
++
++void SceneUpscaler::NoteSampledAfterScene(const RegisterFile& regs, const Shader& shader) {
++  for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
++    const uint32_t address = (regs.GetTextureFetch(binding.fetch_constant).base_address << 12) & kPhysicalAddressMask;
++    for (const OtherResolve& resolve : other_resolves_) {
++      if (address >= resolve.address_begin && address < resolve.address_end) {
++        pre_scene_targets_.NoteSampledAfterScene(resolve.key);
++      }
++    }
++  }
++}
++
++// A resolve into memory an earlier one of another surface wrote replaces that texture.
++void SceneUpscaler::NoteResolveDest(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info,
++                                    uint32_t key, bool other) {
++  OtherResolve resolve;
++  resolve.key = key;
++  resolve.address_begin =
++      std::min(regs[XE_GPU_REG_RB_COPY_DEST_BASE] & kPhysicalAddressMask, resolve_info.copy_dest_extent_start);
++  resolve.address_end = resolve_info.copy_dest_extent_start + resolve_info.copy_dest_extent_length;
++  std::erase_if(other_resolves_, [&](const OtherResolve& known) {
++    return known.key != key && known.address_begin < resolve.address_end &&
++           resolve.address_begin < known.address_end;
++  });
++  if (!other) {
++    return;
++  }
++  for (OtherResolve& known : other_resolves_) {
++    if (known.key == key && known.address_begin == resolve.address_begin) {
++      known.address_end = std::max(known.address_end, resolve.address_end);
++      return;
++    }
++  }
++  if (other_resolves_.size() < kMaxOtherResolves) {
++    other_resolves_.push_back(resolve);
++  } else {
++    other_resolves_[other_resolves_next_++ % kMaxOtherResolves] = resolve;
++  }
++}
++
++ID3D12Resource* SceneUpscaler::StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info) {
++  const bool depth = resolve_info.IsCopyingDepth();
++  const draw_util::ResolveEdramInfo& edram_info = depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
++  const bool is_64bpp = !depth && edram_info.format_is_64bpp;
++  const uint32_t log2_x = uint32_t(edram_info.msaa_samples >= xenos::MsaaSamples::k4X);
++  const uint32_t log2_y = uint32_t(edram_info.msaa_samples >= xenos::MsaaSamples::k2X);
++  const scene::StretchLayout layout = scene::StretchLayoutFor(
++      edram_info.base_tiles, depth ? resolve_info.depth_original_base : resolve_info.color_original_base,
++      edram_info.pitch_tiles, depth, is_64bpp, log2_x, log2_y, resolve_info.coordinate_info.edram_offset_x_div_8,
++      resolve_info.coordinate_info.edram_offset_y_div_8, resolve_info.coordinate_info.width_div_8,
++      resolve_info.height_div_8, resolution_scale_x_, resolution_scale_y_);
++  StretchConstants constants = {};
++  constants.base_dwords = layout.base_dwords;
++  constants.pitch_dwords = layout.pitch_dwords;
++  constants.layout = layout.layout;
++  constants.tile_width = kEdramTileWidth * resolution_scale_x_;
++  constants.tile_height = kEdramTileHeight * resolution_scale_y_;
++  constants.edram_size_dwords = xenos::kEdramTileCount * constants.tile_width * constants.tile_height;
++  constants.sample_count_log2_x = log2_x;
++  constants.sample_count_log2_y = log2_y;
++  std::copy(std::begin(layout.rect_origin), std::end(layout.rect_origin), constants.rect_origin);
++  std::copy(std::begin(layout.rect_size), std::end(layout.rect_size), constants.rect_size);
++  constants.draw_scale[0] = pre_scene_scale_x_;
++  constants.draw_scale[1] = pre_scene_scale_y_;
++  constants.output_scale[0] = resolution_scale_x_;
++  constants.output_scale[1] = resolution_scale_y_;
++  render_target_cache_.PrepareEdramBufferForComputeRead();
++  Transition(staging_, staging_state_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++  Dispatch(stretch_pipeline_, &constants, sizeof(constants) / sizeof(uint32_t), {nullptr, nullptr},
++           {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, {staging_, nullptr}, {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN},
++           constants.rect_size[0], constants.rect_size[1]);
++  Transition(staging_, staging_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++  return staging_;
++}
++
++void SceneUpscaler::LogPreSceneTargets() const {
++  std::string reduced, kept;
++  for (const scene::PreSceneTargets::Surface& surface : pre_scene_targets_.surfaces()) {
++    if (surface.key == scene_key_ || !scene::PreSceneTargets::Pitch(surface.key) ||
++        (!surface.reduced && !surface.kept)) {
++      continue;
++    }
++    std::string& list = surface.reduced ? reduced : kept;
++    list += (list.empty() ? "" : ", ") + SurfaceText(surface.key);
++  }
++  REXGPU_INFO("DLSS: targets drawn before the scene at {}: {} | kept at {} (drawn into or sampled after the scene): {}",
++              ScaleText(pre_scene_scale_x_, pre_scene_scale_y_), reduced.empty() ? "none" : reduced,
++              ScaleText(resolution_scale_x_, resolution_scale_y_), kept.empty() ? "none" : kept);
++}
++
+ void SceneUpscaler::NoteDirectTransform(const RegisterFile& regs, const Shader& vertex_shader, uint32_t index_base,
+                                         uint32_t index_count) {
+   auto analysis = direct_transforms_.find(vertex_shader.ucode_data_hash());
+@@ -516,18 +683,26 @@ void SceneUpscaler::Dispatch(ID3D12PipelineState* pipeline, const void* constant
+   command_list.D3DDispatch((width + 7) / 8, (height + 7) / 8, 1);
+ }
+ 
+-void SceneUpscaler::BeforeResolve(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info) {
++ID3D12Resource* SceneUpscaler::BeforeResolve(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info) {
+   resolving_.reset();
+   if (!runtime_ready_ || !surface_ || !resolve_info.copy_dest_extent_length) {
+-    return;
++    return nullptr;
++  }
++  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  const uint32_t key = scene::PreSceneTargets::Key(surface_info.surface_pitch, uint32_t(surface_info.msaa_samples));
++  if (pre_scene_frame_ && pre_scene_targets_.IsReduced(key)) {
++    NoteResolveDest(regs, resolve_info, key, true);
++    return StretchPreSceneResolve(resolve_info);
+   }
+   const bool depth = resolve_info.IsCopyingDepth();
+   const draw_util::ResolveEdramInfo& edram_info = depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+   const uint32_t original_base = depth ? resolve_info.depth_original_base : resolve_info.color_original_base;
+   if (edram_info.msaa_samples != surface_->msaa ||
+       original_base != (depth ? surface_->depth_base : surface_->color_base)) {
+-    return;
++    NoteResolveDest(regs, resolve_info, key, true);
++    return nullptr;
+   }
++  NoteResolveDest(regs, resolve_info, key, false);
+   const uint32_t log2_x = uint32_t(edram_info.msaa_samples >= xenos::MsaaSamples::k4X);
+   const uint32_t log2_y = uint32_t(edram_info.msaa_samples >= xenos::MsaaSamples::k2X);
+   int32_t window_x = 0;
+@@ -583,6 +758,7 @@ void SceneUpscaler::BeforeResolve(const RegisterFile& regs, const draw_util::Res
+   resolving_ = resolve;
+   scene_pending_ = true;
+   scene_captured_ |= !depth;
++  return nullptr;
+ }
+ 
+ void SceneUpscaler::AfterResolve() {
+@@ -865,6 +1041,11 @@ void SceneUpscaler::BeforeSwap() {
+     }
+   }
+   candidate_draws_.clear();
++  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_) && runtime_ready_) {
++    LogPreSceneTargets();
++  }
++  pre_scene_frame_ =
++      runtime_ready_ && (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
+   scene_drawn_previous_frame_ = scene_drawn_;
+   scene_drawn_ = false;
+   color_fresh_ = depth_fresh_ = false;
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/scene_edram_stretch_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/scene_edram_stretch_cs.h
+new file mode 100644
+index 0000000..8999706
+--- /dev/null
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/scene_edram_stretch_cs.h
+@@ -0,0 +1,2076 @@
++#if 0
++//
++// Generated by Microsoft (R) HLSL Shader Compiler 10.1
++//
++//
++// Buffer Definitions:
++//
++// cbuffer constants
++// {
++//
++//   uint base_dwords;                  // Offset:    0 Size:     4
++//   uint pitch_dwords;                 // Offset:    4 Size:     4
++//   uint edram_size_dwords;            // Offset:    8 Size:     4
++//   uint layout;                       // Offset:   12 Size:     4
++//   uint tile_width;                   // Offset:   16 Size:     4
++//   uint tile_height;                  // Offset:   20 Size:     4
++//   uint sample_count_log2_x;          // Offset:   24 Size:     4
++//   uint sample_count_log2_y;          // Offset:   28 Size:     4
++//   uint2 rect_origin;                 // Offset:   32 Size:     8
++//   uint2 rect_size;                   // Offset:   40 Size:     8
++//   uint2 draw_scale;                  // Offset:   48 Size:     8
++//   uint2 output_scale;                // Offset:   56 Size:     8
++//
++// }
++//
++//
++// Resource Bindings:
++//
++// Name                                 Type  Format         Dim      ID      HLSL Bind  Count
++// ------------------------------ ---------- ------- ----------- ------- -------------- ------
++// edram                             texture    byte         r/o      T0             t0      1
++// stretched                             UAV    byte         r/w      U0             u0      1
++// constants                         cbuffer      NA          NA     CB0            cb0      1
++//
++//
++//
++// Input signature:
++//
++// Name                 Index   Mask Register SysValue  Format   Used
++// -------------------- ----- ------ -------- -------- ------- ------
++// no Input
++//
++// Output signature:
++//
++// Name                 Index   Mask Register SysValue  Format   Used
++// -------------------- ----- ------ -------- -------- ------- ------
++// no Output
++cs_5_1
++dcl_globalFlags refactoringAllowed
++dcl_constantbuffer CB0[0:0][4], immediateIndexed, space=0
++dcl_resource_raw T0[0:0], space=0
++dcl_uav_raw U0[0:0], space=0
++dcl_input vThreadID.xy
++dcl_temps 6
++dcl_thread_group 8, 8, 1
++uge r0.xy, vThreadID.xyxx, CB0[0][2].zwzz
++or r0.x, r0.y, r0.x
++if_nz r0.x
++  ret
++endif
++iadd r0.xy, vThreadID.xyxx, CB0[0][2].xyxx
++imul null, r0.zw, r0.xxxy, CB0[0][3].xxxy
++udiv r0.zw, null, r0.zzzw, CB0[0][3].zzzw
++ishl r1.xyzw, l(1, 1, 1, 1), CB0[0][1].zwzw
++uge r2.xyzw, l(0, 0, 1, 0), r1.zwzw
++or r2.xy, r2.ywyy, r2.xzxx
++if_z r2.x
++  ishl r2.xz, r0.xxyx, CB0[0][1].zzwz
++  ushr r3.x, CB0[0][1].x, l(1)
++  mov r3.y, CB0[0][1].y
++  udiv r3.zw, null, r2.xxxz, r3.xxxy
++  imad r4.xy, -r3.zwzz, r3.xyxx, r2.xzxx
++  imul null, r2.w, CB0[0][1].y, CB0[0][1].x
++  imul null, r3.z, r2.w, r3.z
++  imad r3.z, r3.w, CB0[0][0].y, r3.z
++  imad r3.z, r4.y, CB0[0][1].x, r3.z
++  ishl r3.w, r4.x, l(1)
++  iadd r3.z, r3.w, r3.z
++  ieq r4.xy, CB0[0][0].wwww, l(1, 2, 0, 0)
++  udiv r4.zw, null, r2.xxxz, CB0[0][1].xxxy
++  imad r2.xz, -r4.zzwz, CB0[0][1].xxyx, r2.xxzx
++  if_nz r4.y
++    uge r3.w, r2.x, r3.x
++    iadd r5.x, -r3.x, r2.x
++    iadd r5.y, r3.x, r2.x
++    movc r2.x, r3.w, r5.x, r5.y
++  endif
++  imul null, r3.w, r2.w, r4.z
++  imad r3.w, r4.w, CB0[0][0].y, r3.w
++  imad r2.z, r2.z, CB0[0][1].x, r3.w
++  iadd r2.x, r2.x, r2.z
++  movc r2.x, r4.x, r3.z, r2.x
++  iadd r2.x, r2.x, CB0[0][0].x
++  uge r2.z, r2.x, CB0[0][0].z
++  iadd r3.z, r2.x, -CB0[0][0].z
++  movc r2.x, r2.z, r3.z, r2.x
++  ishl r3.zw, r0.zzzw, CB0[0][1].zzzw
++  udiv r4.zw, null, r3.zzzw, r3.xxxy
++  imad r5.xy, -r4.zwzz, r3.xyxx, r3.zwzz
++  imul null, r2.z, r2.w, r4.z
++  imad r2.z, r4.w, CB0[0][0].y, r2.z
++  imad r2.z, r5.y, CB0[0][1].x, r2.z
++  ishl r3.y, r5.x, l(1)
++  iadd r2.z, r2.z, r3.y
++  udiv r4.zw, null, r3.zzzw, CB0[0][1].xxxy
++  imad r3.yz, -r4.zzwz, CB0[0][1].xxyx, r3.zzwz
++  if_nz r4.y
++    uge r3.w, r3.y, r3.x
++    iadd r4.y, -r3.x, r3.y
++    iadd r3.x, r3.x, r3.y
++    movc r3.y, r3.w, r4.y, r3.x
++  endif
++  imul null, r2.w, r2.w, r4.z
++  imad r2.w, r4.w, CB0[0][0].y, r2.w
++  imad r2.w, r3.z, CB0[0][1].x, r2.w
++  iadd r2.w, r3.y, r2.w
++  movc r2.z, r4.x, r2.z, r2.w
++  iadd r2.z, r2.z, CB0[0][0].x
++  uge r2.w, r2.z, CB0[0][0].z
++  iadd r3.x, r2.z, -CB0[0][0].z
++  movc r2.z, r2.w, r3.x, r2.z
++  if_nz r4.x
++    ishl r2.w, r2.x, l(2)
++    ishl r3.x, r2.z, l(2)
++    ld_raw r3.xy, r3.x, T0[0].xyxx
++    store_raw U0[0].xy, r2.w, r3.xyxx
++  else
++    ishl r2.xz, r2.xxzx, l(2, 0, 2, 0)
++    ld_raw r2.z, r2.z, T0[0].xxxx
++    store_raw U0[0].x, r2.x, r2.z
++  endif
++endif
++if_z r2.y
++  ishl r2.xy, r0.xyxx, CB0[0][1].zwzz
++  iadd r2.xy, r2.xyxx, l(1, 0, 0, 0)
++  ushr r3.x, CB0[0][1].x, l(1)
++  mov r3.y, CB0[0][1].y
++  udiv r2.zw, null, r2.xxxy, r3.xxxy
++  imad r3.zw, -r2.zzzw, r3.xxxy, r2.xxxy
++  imul null, r4.x, CB0[0][1].y, CB0[0][1].x
++  imul null, r2.z, r2.z, r4.x
++  imad r2.z, r2.w, CB0[0][0].y, r2.z
++  imad r2.z, r3.w, CB0[0][1].x, r2.z
++  ishl r2.w, r3.z, l(1)
++  iadd r2.z, r2.w, r2.z
++  ieq r3.zw, CB0[0][0].wwww, l(0, 0, 1, 2)
++  udiv r4.yz, null, r2.xxyx, CB0[0][1].xxyx
++  imad r2.xy, -r4.yzyy, CB0[0][1].xyxx, r2.xyxx
++  if_nz r3.w
++    uge r2.w, r2.x, r3.x
++    iadd r4.w, -r3.x, r2.x
++    iadd r5.x, r3.x, r2.x
++    movc r2.x, r2.w, r4.w, r5.x
++  endif
++  imul null, r2.w, r4.x, r4.y
++  imad r2.w, r4.z, CB0[0][0].y, r2.w
++  imad r2.y, r2.y, CB0[0][1].x, r2.w
++  iadd r2.x, r2.x, r2.y
++  movc r2.x, r3.z, r2.z, r2.x
++  iadd r2.x, r2.x, CB0[0][0].x
++  uge r2.y, r2.x, CB0[0][0].z
++  iadd r2.z, r2.x, -CB0[0][0].z
++  movc r2.x, r2.y, r2.z, r2.x
++  ishl r2.yz, r0.zzwz, CB0[0][1].zzwz
++  iadd r2.yz, r2.yyzy, l(0, 1, 0, 0)
++  udiv r4.yz, null, r2.yyzy, r3.xxyx
++  imad r5.xy, -r4.yzyy, r3.xyxx, r2.yzyy
++  imul null, r2.w, r4.x, r4.y
++  imad r2.w, r4.z, CB0[0][0].y, r2.w
++  imad r2.w, r5.y, CB0[0][1].x, r2.w
++  ishl r3.y, r5.x, l(1)
++  iadd r2.w, r2.w, r3.y
++  udiv r4.yz, null, r2.yyzy, CB0[0][1].xxyx
++  imad r2.yz, -r4.yyzy, CB0[0][1].xxyx, r2.yyzy
++  if_nz r3.w
++    uge r3.y, r2.y, r3.x
++    iadd r3.w, -r3.x, r2.y
++    iadd r3.x, r3.x, r2.y
++    movc r2.y, r3.y, r3.w, r3.x
++  endif
++  imul null, r3.x, r4.x, r4.y
++  imad r3.x, r4.z, CB0[0][0].y, r3.x
++  imad r2.z, r2.z, CB0[0][1].x, r3.x
++  iadd r2.y, r2.y, r2.z
++  movc r2.y, r3.z, r2.w, r2.y
++  iadd r2.y, r2.y, CB0[0][0].x
++  uge r2.z, r2.y, CB0[0][0].z
++  iadd r2.w, r2.y, -CB0[0][0].z
++  movc r2.y, r2.z, r2.w, r2.y
++  if_nz r3.z
++    ishl r2.zw, r2.xxxy, l(0, 0, 2, 2)
++    ld_raw r3.xy, r2.w, T0[0].xyxx
++    store_raw U0[0].xy, r2.z, r3.xyxx
++  else
++    ishl r2.xy, r2.xyxx, l(2, 2, 0, 0)
++    ld_raw r2.y, r2.y, T0[0].xxxx
++    store_raw U0[0].x, r2.x, r2.y
++  endif
++endif
++uge r1.xyzw, l(0, 1, 1, 1), r1.xyzw
++or r1.xy, r1.ywyy, r1.xzxx
++if_z r1.x
++  ishl r1.xz, r0.xxyx, CB0[0][1].zzwz
++  iadd r1.xz, r1.xxzx, l(0, 0, 1, 0)
++  ushr r2.x, CB0[0][1].x, l(1)
++  mov r2.y, CB0[0][1].y
++  udiv r2.zw, null, r1.xxxz, r2.xxxy
++  imad r3.xy, -r2.zwzz, r2.xyxx, r1.xzxx
++  imul null, r1.w, CB0[0][1].y, CB0[0][1].x
++  imul null, r2.z, r1.w, r2.z
++  imad r2.z, r2.w, CB0[0][0].y, r2.z
++  imad r2.z, r3.y, CB0[0][1].x, r2.z
++  ishl r2.w, r3.x, l(1)
++  iadd r2.z, r2.w, r2.z
++  ieq r3.xy, CB0[0][0].wwww, l(1, 2, 0, 0)
++  udiv r3.zw, null, r1.xxxz, CB0[0][1].xxxy
++  imad r1.xz, -r3.zzwz, CB0[0][1].xxyx, r1.xxzx
++  if_nz r3.y
++    uge r2.w, r1.x, r2.x
++    iadd r4.x, -r2.x, r1.x
++    iadd r4.y, r2.x, r1.x
++    movc r1.x, r2.w, r4.x, r4.y
++  endif
++  imul null, r2.w, r1.w, r3.z
++  imad r2.w, r3.w, CB0[0][0].y, r2.w
++  imad r1.z, r1.z, CB0[0][1].x, r2.w
++  iadd r1.x, r1.x, r1.z
++  movc r1.x, r3.x, r2.z, r1.x
++  iadd r1.x, r1.x, CB0[0][0].x
++  uge r1.z, r1.x, CB0[0][0].z
++  iadd r2.z, r1.x, -CB0[0][0].z
++  movc r1.x, r1.z, r2.z, r1.x
++  ishl r2.zw, r0.zzzw, CB0[0][1].zzzw
++  iadd r2.zw, r2.zzzw, l(0, 0, 0, 1)
++  udiv r3.zw, null, r2.zzzw, r2.xxxy
++  imad r4.xy, -r3.zwzz, r2.xyxx, r2.zwzz
++  imul null, r1.z, r1.w, r3.z
++  imad r1.z, r3.w, CB0[0][0].y, r1.z
++  imad r1.z, r4.y, CB0[0][1].x, r1.z
++  ishl r2.y, r4.x, l(1)
++  iadd r1.z, r1.z, r2.y
++  udiv r3.zw, null, r2.zzzw, CB0[0][1].xxxy
++  imad r2.yz, -r3.zzwz, CB0[0][1].xxyx, r2.zzwz
++  if_nz r3.y
++    uge r2.w, r2.y, r2.x
++    iadd r3.y, -r2.x, r2.y
++    iadd r2.x, r2.x, r2.y
++    movc r2.y, r2.w, r3.y, r2.x
++  endif
++  imul null, r1.w, r1.w, r3.z
++  imad r1.w, r3.w, CB0[0][0].y, r1.w
++  imad r1.w, r2.z, CB0[0][1].x, r1.w
++  iadd r1.w, r2.y, r1.w
++  movc r1.z, r3.x, r1.z, r1.w
++  iadd r1.z, r1.z, CB0[0][0].x
++  uge r1.w, r1.z, CB0[0][0].z
++  iadd r2.x, r1.z, -CB0[0][0].z
++  movc r1.z, r1.w, r2.x, r1.z
++  if_nz r3.x
++    ishl r1.w, r1.x, l(2)
++    ishl r2.x, r1.z, l(2)
++    ld_raw r2.xy, r2.x, T0[0].xyxx
++    store_raw U0[0].xy, r1.w, r2.xyxx
++  else
++    ishl r1.xz, r1.xxzx, l(2, 0, 2, 0)
++    ld_raw r1.z, r1.z, T0[0].xxxx
++    store_raw U0[0].x, r1.x, r1.z
++  endif
++endif
++if_z r1.y
++  ishl r0.xy, r0.xyxx, CB0[0][1].zwzz
++  iadd r0.xy, r0.xyxx, l(1, 1, 0, 0)
++  ushr r1.x, CB0[0][1].x, l(1)
++  mov r1.y, CB0[0][1].y
++  udiv r1.zw, null, r0.xxxy, r1.xxxy
++  imad r2.xy, -r1.zwzz, r1.xyxx, r0.xyxx
++  imul null, r2.z, CB0[0][1].y, CB0[0][1].x
++  imul null, r1.z, r1.z, r2.z
++  imad r1.z, r1.w, CB0[0][0].y, r1.z
++  imad r1.z, r2.y, CB0[0][1].x, r1.z
++  ishl r1.w, r2.x, l(1)
++  iadd r1.z, r1.w, r1.z
++  ieq r2.xy, CB0[0][0].wwww, l(1, 2, 0, 0)
++  udiv r3.xy, null, r0.xyxx, CB0[0][1].xyxx
++  imad r0.xy, -r3.xyxx, CB0[0][1].xyxx, r0.xyxx
++  if_nz r2.y
++    uge r1.w, r0.x, r1.x
++    iadd r2.w, -r1.x, r0.x
++    iadd r3.z, r1.x, r0.x
++    movc r0.x, r1.w, r2.w, r3.z
++  endif
++  imul null, r1.w, r2.z, r3.x
++  imad r1.w, r3.y, CB0[0][0].y, r1.w
++  imad r0.y, r0.y, CB0[0][1].x, r1.w
++  iadd r0.x, r0.x, r0.y
++  movc r0.x, r2.x, r1.z, r0.x
++  iadd r0.x, r0.x, CB0[0][0].x
++  uge r0.y, r0.x, CB0[0][0].z
++  iadd r1.z, r0.x, -CB0[0][0].z
++  movc r0.x, r0.y, r1.z, r0.x
++  ishl r0.yz, r0.zzwz, CB0[0][1].zzwz
++  iadd r0.yz, r0.yyzy, l(0, 1, 1, 0)
++  udiv r1.zw, null, r0.yyyz, r1.xxxy
++  imad r3.xy, -r1.zwzz, r1.xyxx, r0.yzyy
++  imul null, r0.w, r2.z, r1.z
++  imad r0.w, r1.w, CB0[0][0].y, r0.w
++  imad r0.w, r3.y, CB0[0][1].x, r0.w
++  ishl r1.y, r3.x, l(1)
++  iadd r0.w, r0.w, r1.y
++  udiv r1.yz, null, r0.yyzy, CB0[0][1].xxyx
++  imad r0.yz, -r1.yyzy, CB0[0][1].xxyx, r0.yyzy
++  if_nz r2.y
++    uge r1.w, r0.y, r1.x
++    iadd r2.y, -r1.x, r0.y
++    iadd r1.x, r1.x, r0.y
++    movc r0.y, r1.w, r2.y, r1.x
++  endif
++  imul null, r1.x, r2.z, r1.y
++  imad r1.x, r1.z, CB0[0][0].y, r1.x
++  imad r0.z, r0.z, CB0[0][1].x, r1.x
++  iadd r0.y, r0.y, r0.z
++  movc r0.y, r2.x, r0.w, r0.y
++  iadd r0.y, r0.y, CB0[0][0].x
++  uge r0.z, r0.y, CB0[0][0].z
++  iadd r0.w, r0.y, -CB0[0][0].z
++  movc r0.y, r0.z, r0.w, r0.y
++  if_nz r2.x
++    ishl r0.zw, r0.xxxy, l(0, 0, 2, 2)
++    ld_raw r1.xy, r0.w, T0[0].xyxx
++    store_raw U0[0].xy, r0.z, r1.xyxx
++  else
++    ishl r0.xy, r0.xyxx, l(2, 2, 0, 0)
++    ld_raw r0.y, r0.y, T0[0].xxxx
++    store_raw U0[0].x, r0.x, r0.y
++  endif
++endif
++ret
++// Approximately 282 instruction slots used
++#endif
++
++const BYTE scene_edram_stretch_cs[] =
++{
++     68,  88,  66,  67,  33,  27,
++    205, 145,  10,  59, 167,  92,
++     80, 250, 198, 183, 165,  61,
++    255, 255,   1,   0,   0,   0,
++    156,  40,   0,   0,   5,   0,
++      0,   0,  52,   0,   0,   0,
++     36,   4,   0,   0,  52,   4,
++      0,   0,  68,   4,   0,   0,
++      0,  40,   0,   0,  82,  68,
++     69,  70, 232,   3,   0,   0,
++      1,   0,   0,   0, 208,   0,
++      0,   0,   3,   0,   0,   0,
++     60,   0,   0,   0,   1,   5,
++     83,  67,   0, 133,   0,   0,
++    190,   3,   0,   0,  19,  19,
++     68,  37,  60,   0,   0,   0,
++     24,   0,   0,   0,  40,   0,
++      0,   0,  40,   0,   0,   0,
++     36,   0,   0,   0,  12,   0,
++      0,   0,   0,   0,   0,   0,
++    180,   0,   0,   0,   7,   0,
++      0,   0,   6,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0, 186,   0,
++      0,   0,   8,   0,   0,   0,
++      6,   0,   0,   0,   1,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 196,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++    101, 100, 114,  97, 109,   0,
++    115, 116, 114, 101, 116,  99,
++    104, 101, 100,   0,  99, 111,
++    110, 115, 116,  97, 110, 116,
++    115,   0, 171, 171, 196,   0,
++      0,   0,  12,   0,   0,   0,
++    232,   0,   0,   0,  64,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0, 200,   2,
++      0,   0,   0,   0,   0,   0,
++      4,   0,   0,   0,   2,   0,
++      0,   0, 220,   2,   0,   0,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0,   0,   3,   0,   0,
++      4,   0,   0,   0,   4,   0,
++      0,   0,   2,   0,   0,   0,
++    220,   2,   0,   0,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++     13,   3,   0,   0,   8,   0,
++      0,   0,   4,   0,   0,   0,
++      2,   0,   0,   0, 220,   2,
++      0,   0,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0,  31,   3,
++      0,   0,  12,   0,   0,   0,
++      4,   0,   0,   0,   2,   0,
++      0,   0, 220,   2,   0,   0,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0,  38,   3,   0,   0,
++     16,   0,   0,   0,   4,   0,
++      0,   0,   2,   0,   0,   0,
++    220,   2,   0,   0,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++     49,   3,   0,   0,  20,   0,
++      0,   0,   4,   0,   0,   0,
++      2,   0,   0,   0, 220,   2,
++      0,   0,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0,  61,   3,
++      0,   0,  24,   0,   0,   0,
++      4,   0,   0,   0,   2,   0,
++      0,   0, 220,   2,   0,   0,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0,  81,   3,   0,   0,
++     28,   0,   0,   0,   4,   0,
++      0,   0,   2,   0,   0,   0,
++    220,   2,   0,   0,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    101,   3,   0,   0,  32,   0,
++      0,   0,   8,   0,   0,   0,
++      2,   0,   0,   0, 120,   3,
++      0,   0,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 156,   3,
++      0,   0,  40,   0,   0,   0,
++      8,   0,   0,   0,   2,   0,
++      0,   0, 120,   3,   0,   0,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0, 166,   3,   0,   0,
++     48,   0,   0,   0,   8,   0,
++      0,   0,   2,   0,   0,   0,
++    120,   3,   0,   0,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++    177,   3,   0,   0,  56,   0,
++      0,   0,   8,   0,   0,   0,
++      2,   0,   0,   0, 120,   3,
++      0,   0,   0,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0,  98,  97,
++    115, 101,  95, 100, 119, 111,
++    114, 100, 115,   0, 100, 119,
++    111, 114, 100,   0, 171, 171,
++      0,   0,  19,   0,   1,   0,
++      1,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 212,   2,   0,   0,
++    112, 105, 116,  99, 104,  95,
++    100, 119, 111, 114, 100, 115,
++      0, 101, 100, 114,  97, 109,
++     95, 115, 105, 122, 101,  95,
++    100, 119, 111, 114, 100, 115,
++      0, 108,  97, 121, 111, 117,
++    116,   0, 116, 105, 108, 101,
++     95, 119, 105, 100, 116, 104,
++      0, 116, 105, 108, 101,  95,
++    104, 101, 105, 103, 104, 116,
++      0, 115,  97, 109, 112, 108,
++    101,  95,  99, 111, 117, 110,
++    116,  95, 108, 111, 103,  50,
++     95, 120,   0, 115,  97, 109,
++    112, 108, 101,  95,  99, 111,
++    117, 110, 116,  95, 108, 111,
++    103,  50,  95, 121,   0, 114,
++    101,  99, 116,  95, 111, 114,
++    105, 103, 105, 110,   0, 117,
++    105, 110, 116,  50,   0, 171,
++      1,   0,  19,   0,   1,   0,
++      2,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 113,   3,   0,   0,
++    114, 101,  99, 116,  95, 115,
++    105, 122, 101,   0, 100, 114,
++     97, 119,  95, 115,  99,  97,
++    108, 101,   0, 111, 117, 116,
++    112, 117, 116,  95, 115,  99,
++     97, 108, 101,   0,  77, 105,
++     99, 114, 111, 115, 111, 102,
++    116,  32,  40,  82,  41,  32,
++     72,  76,  83,  76,  32,  83,
++    104,  97, 100, 101, 114,  32,
++     67, 111, 109, 112, 105, 108,
++    101, 114,  32,  49,  48,  46,
++     49,   0, 171, 171,  73,  83,
++     71,  78,   8,   0,   0,   0,
++      0,   0,   0,   0,   8,   0,
++      0,   0,  79,  83,  71,  78,
++      8,   0,   0,   0,   0,   0,
++      0,   0,   8,   0,   0,   0,
++     83,  72,  69,  88, 180,  35,
++      0,   0,  81,   0,   5,   0,
++    237,   8,   0,   0, 106,   8,
++      0,   1,  89,   0,   0,   7,
++     70, 142,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   4,   0,
++      0,   0,   0,   0,   0,   0,
++    161,   0,   0,   6,  70, 126,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++    157,   0,   0,   6,  70, 238,
++     49,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     95,   0,   0,   2,  50,   0,
++      2,   0, 104,   0,   0,   2,
++      6,   0,   0,   0, 155,   0,
++      0,   4,   8,   0,   0,   0,
++      8,   0,   0,   0,   1,   0,
++      0,   0,  80,   0,   0,   8,
++     50,   0,  16,   0,   0,   0,
++      0,   0,  70,   0,   2,   0,
++    230, 138,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      2,   0,   0,   0,  60,   0,
++      0,   7,  18,   0,  16,   0,
++      0,   0,   0,   0,  26,   0,
++     16,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   0,   0,
++      0,   0,  31,   0,   4,   3,
++     10,   0,  16,   0,   0,   0,
++      0,   0,  62,   0,   0,   1,
++     21,   0,   0,   1,  30,   0,
++      0,   8,  50,   0,  16,   0,
++      0,   0,   0,   0,  70,   0,
++      2,   0,  70, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   2,   0,   0,   0,
++     38,   0,   0,  10,   0, 208,
++      0,   0, 194,   0,  16,   0,
++      0,   0,   0,   0,   6,   4,
++     16,   0,   0,   0,   0,   0,
++      6, 132,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,  78,   0,
++      0,  10, 194,   0,  16,   0,
++      0,   0,   0,   0,   0, 208,
++      0,   0, 166,  14,  16,   0,
++      0,   0,   0,   0, 166, 142,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,
++      0,   0,  41,   0,   0,  12,
++    242,   0,  16,   0,   1,   0,
++      0,   0,   2,  64,   0,   0,
++      1,   0,   0,   0,   1,   0,
++      0,   0,   1,   0,   0,   0,
++      1,   0,   0,   0, 230, 142,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  80,   0,   0,  10,
++    242,   0,  16,   0,   2,   0,
++      0,   0,   2,  64,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0, 230,  14,
++     16,   0,   1,   0,   0,   0,
++     60,   0,   0,   7,  50,   0,
++     16,   0,   2,   0,   0,   0,
++    214,   5,  16,   0,   2,   0,
++      0,   0, 134,   0,  16,   0,
++      2,   0,   0,   0,  31,   0,
++      0,   3,  10,   0,  16,   0,
++      2,   0,   0,   0,  41,   0,
++      0,   9,  82,   0,  16,   0,
++      2,   0,   0,   0,   6,   1,
++     16,   0,   0,   0,   0,   0,
++    166, 139,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  85,   0,
++      0,   9,  18,   0,  16,   0,
++      3,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   1,  64,   0,   0,
++      1,   0,   0,   0,  54,   0,
++      0,   7,  34,   0,  16,   0,
++      3,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  78,   0,   0,   8,
++    194,   0,  16,   0,   3,   0,
++      0,   0,   0, 208,   0,   0,
++      6,   8,  16,   0,   2,   0,
++      0,   0,   6,   4,  16,   0,
++      3,   0,   0,   0,  35,   0,
++      0,  10,  50,   0,  16,   0,
++      4,   0,   0,   0, 230,  10,
++     16, 128,  65,   0,   0,   0,
++      3,   0,   0,   0,  70,   0,
++     16,   0,   3,   0,   0,   0,
++    134,   0,  16,   0,   2,   0,
++      0,   0,  38,   0,   0,  12,
++      0, 208,   0,   0, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  38,   0,   0,   8,
++      0, 208,   0,   0,  66,   0,
++     16,   0,   3,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      3,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      3,   0,   0,   0,  58,   0,
++     16,   0,   3,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  42,   0,
++     16,   0,   3,   0,   0,   0,
++     35,   0,   0,  11,  66,   0,
++     16,   0,   3,   0,   0,   0,
++     26,   0,  16,   0,   4,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   3,   0,
++      0,   0,  41,   0,   0,   7,
++    130,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      4,   0,   0,   0,   1,  64,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,   7,  66,   0,
++     16,   0,   3,   0,   0,   0,
++     58,   0,  16,   0,   3,   0,
++      0,   0,  42,   0,  16,   0,
++      3,   0,   0,   0,  32,   0,
++      0,  12,  50,   0,  16,   0,
++      4,   0,   0,   0, 246, 143,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   2,  64,   0,   0,
++      1,   0,   0,   0,   2,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  78,   0,
++      0,  10, 194,   0,  16,   0,
++      4,   0,   0,   0,   0, 208,
++      0,   0,   6,   8,  16,   0,
++      2,   0,   0,   0,   6, 132,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  35,   0,   0,  12,
++     82,   0,  16,   0,   2,   0,
++      0,   0, 166,  11,  16, 128,
++     65,   0,   0,   0,   4,   0,
++      0,   0,   6, 129,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++      6,   2,  16,   0,   2,   0,
++      0,   0,  31,   0,   4,   3,
++     26,   0,  16,   0,   4,   0,
++      0,   0,  80,   0,   0,   7,
++    130,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++     30,   0,   0,   8,  18,   0,
++     16,   0,   5,   0,   0,   0,
++     10,   0,  16, 128,  65,   0,
++      0,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  30,   0,   0,   7,
++     34,   0,  16,   0,   5,   0,
++      0,   0,  10,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      5,   0,   0,   0,  26,   0,
++     16,   0,   5,   0,   0,   0,
++     21,   0,   0,   1,  38,   0,
++      0,   8,   0, 208,   0,   0,
++    130,   0,  16,   0,   3,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   4,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   3,   0,   0,   0,
++     58,   0,  16,   0,   4,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   3,   0,
++      0,   0,  35,   0,   0,  11,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      3,   0,   0,   0,  30,   0,
++      0,   7,  18,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  55,   0,   0,   9,
++     18,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      4,   0,   0,   0,  42,   0,
++     16,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  30,   0,   0,   9,
++     18,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  80,   0,   0,   9,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  42, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  30,   0,   0,  10,
++     66,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  42, 128,
++     48, 128,  65,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     41,   0,   0,   9, 194,   0,
++     16,   0,   3,   0,   0,   0,
++    166,  14,  16,   0,   0,   0,
++      0,   0, 166, 142,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     78,   0,   0,   8, 194,   0,
++     16,   0,   4,   0,   0,   0,
++      0, 208,   0,   0, 166,  14,
++     16,   0,   3,   0,   0,   0,
++      6,   4,  16,   0,   3,   0,
++      0,   0,  35,   0,   0,  10,
++     50,   0,  16,   0,   5,   0,
++      0,   0, 230,  10,  16, 128,
++     65,   0,   0,   0,   4,   0,
++      0,   0,  70,   0,  16,   0,
++      3,   0,   0,   0, 230,  10,
++     16,   0,   3,   0,   0,   0,
++     38,   0,   0,   8,   0, 208,
++      0,   0,  66,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   4,   0,
++      0,   0,  35,   0,   0,  11,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  58,   0,  16,   0,
++      4,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      2,   0,   0,   0,  26,   0,
++     16,   0,   5,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     41,   0,   0,   7,  34,   0,
++     16,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   5,   0,
++      0,   0,   1,  64,   0,   0,
++      1,   0,   0,   0,  30,   0,
++      0,   7,  66,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   3,   0,
++      0,   0,  78,   0,   0,  10,
++    194,   0,  16,   0,   4,   0,
++      0,   0,   0, 208,   0,   0,
++    166,  14,  16,   0,   3,   0,
++      0,   0,   6, 132,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     35,   0,   0,  12,  98,   0,
++     16,   0,   3,   0,   0,   0,
++    166,  11,  16, 128,  65,   0,
++      0,   0,   4,   0,   0,   0,
++      6, 129,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0, 166,  11,
++     16,   0,   3,   0,   0,   0,
++     31,   0,   4,   3,  26,   0,
++     16,   0,   4,   0,   0,   0,
++     80,   0,   0,   7, 130,   0,
++     16,   0,   3,   0,   0,   0,
++     26,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      3,   0,   0,   0,  30,   0,
++      0,   8,  34,   0,  16,   0,
++      4,   0,   0,   0,  10,   0,
++     16, 128,  65,   0,   0,   0,
++      3,   0,   0,   0,  26,   0,
++     16,   0,   3,   0,   0,   0,
++     30,   0,   0,   7,  18,   0,
++     16,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   3,   0,
++      0,   0,  26,   0,  16,   0,
++      3,   0,   0,   0,  55,   0,
++      0,   9,  34,   0,  16,   0,
++      3,   0,   0,   0,  58,   0,
++     16,   0,   3,   0,   0,   0,
++     26,   0,  16,   0,   4,   0,
++      0,   0,  10,   0,  16,   0,
++      3,   0,   0,   0,  21,   0,
++      0,   1,  38,   0,   0,   8,
++      0, 208,   0,   0, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      4,   0,   0,   0,  35,   0,
++      0,  11, 130,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   4,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   3,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  30,   0,   0,   7,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      3,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     55,   0,   0,   9,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   4,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     30,   0,   0,   9,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     80,   0,   0,   9, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  42, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     30,   0,   0,  10,  18,   0,
++     16,   0,   3,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  42, 128,  48, 128,
++     65,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  55,   0,
++      0,   9,  66,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   3,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  31,   0,
++      4,   3,  10,   0,  16,   0,
++      4,   0,   0,   0,  41,   0,
++      0,   7, 130,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++      1,  64,   0,   0,   2,   0,
++      0,   0,  41,   0,   0,   7,
++     18,   0,  16,   0,   3,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,   1,  64,
++      0,   0,   2,   0,   0,   0,
++    165,   0,   0,   8,  50,   0,
++     16,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   3,   0,
++      0,   0,  70, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     50, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  70,   0,  16,   0,
++      3,   0,   0,   0,  18,   0,
++      0,   1,  41,   0,   0,  10,
++     82,   0,  16,   0,   2,   0,
++      0,   0,   6,   2,  16,   0,
++      2,   0,   0,   0,   2,  64,
++      0,   0,   2,   0,   0,   0,
++      0,   0,   0,   0,   2,   0,
++      0,   0,   0,   0,   0,   0,
++    165,   0,   0,   8,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,   6, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     18, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  21,   0,
++      0,   1,  21,   0,   0,   1,
++     31,   0,   0,   3,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     41,   0,   0,   9,  50,   0,
++     16,   0,   2,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0, 230, 138,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,  10,  50,   0,
++     16,   0,   2,   0,   0,   0,
++     70,   0,  16,   0,   2,   0,
++      0,   0,   2,  64,   0,   0,
++      1,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  85,   0,
++      0,   9,  18,   0,  16,   0,
++      3,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   1,  64,   0,   0,
++      1,   0,   0,   0,  54,   0,
++      0,   7,  34,   0,  16,   0,
++      3,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  78,   0,   0,   8,
++    194,   0,  16,   0,   2,   0,
++      0,   0,   0, 208,   0,   0,
++      6,   4,  16,   0,   2,   0,
++      0,   0,   6,   4,  16,   0,
++      3,   0,   0,   0,  35,   0,
++      0,  10, 194,   0,  16,   0,
++      3,   0,   0,   0, 166,  14,
++     16, 128,  65,   0,   0,   0,
++      2,   0,   0,   0,   6,   4,
++     16,   0,   3,   0,   0,   0,
++      6,   4,  16,   0,   2,   0,
++      0,   0,  38,   0,   0,  12,
++      0, 208,   0,   0,  18,   0,
++     16,   0,   4,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  38,   0,   0,   8,
++      0, 208,   0,   0,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      4,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     35,   0,   0,  11,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   3,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  41,   0,   0,   7,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      3,   0,   0,   0,   1,  64,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,   7,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  32,   0,
++      0,  12, 194,   0,  16,   0,
++      3,   0,   0,   0, 246, 143,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   2,  64,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++      2,   0,   0,   0,  78,   0,
++      0,  10,  98,   0,  16,   0,
++      4,   0,   0,   0,   0, 208,
++      0,   0,   6,   1,  16,   0,
++      2,   0,   0,   0,   6, 129,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  35,   0,   0,  12,
++     50,   0,  16,   0,   2,   0,
++      0,   0, 150,   5,  16, 128,
++     65,   0,   0,   0,   4,   0,
++      0,   0,  70, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     70,   0,  16,   0,   2,   0,
++      0,   0,  31,   0,   4,   3,
++     58,   0,  16,   0,   3,   0,
++      0,   0,  80,   0,   0,   7,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++     30,   0,   0,   8, 130,   0,
++     16,   0,   4,   0,   0,   0,
++     10,   0,  16, 128,  65,   0,
++      0,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  30,   0,   0,   7,
++     18,   0,  16,   0,   5,   0,
++      0,   0,  10,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  58,   0,  16,   0,
++      4,   0,   0,   0,  10,   0,
++     16,   0,   5,   0,   0,   0,
++     21,   0,   0,   1,  38,   0,
++      0,   8,   0, 208,   0,   0,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      4,   0,   0,   0,  26,   0,
++     16,   0,   4,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   4,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  35,   0,   0,  11,
++     34,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  30,   0,
++      0,   7,  18,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  55,   0,   0,   9,
++     18,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      3,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  30,   0,   0,   9,
++     18,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  80,   0,   0,   9,
++     34,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  42, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  30,   0,   0,  10,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  42, 128,
++     48, 128,  65,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     41,   0,   0,   9,  98,   0,
++     16,   0,   2,   0,   0,   0,
++    166,  11,  16,   0,   0,   0,
++      0,   0, 166, 139,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,  10,  98,   0,
++     16,   0,   2,   0,   0,   0,
++     86,   6,  16,   0,   2,   0,
++      0,   0,   2,  64,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  78,   0,
++      0,   8,  98,   0,  16,   0,
++      4,   0,   0,   0,   0, 208,
++      0,   0,  86,   6,  16,   0,
++      2,   0,   0,   0,   6,   1,
++     16,   0,   3,   0,   0,   0,
++     35,   0,   0,  10,  50,   0,
++     16,   0,   5,   0,   0,   0,
++    150,   5,  16, 128,  65,   0,
++      0,   0,   4,   0,   0,   0,
++     70,   0,  16,   0,   3,   0,
++      0,   0, 150,   5,  16,   0,
++      2,   0,   0,   0,  38,   0,
++      0,   8,   0, 208,   0,   0,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      4,   0,   0,   0,  26,   0,
++     16,   0,   4,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   4,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  35,   0,   0,  11,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      5,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  41,   0,
++      0,   7,  34,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16,   0,   5,   0,   0,   0,
++      1,  64,   0,   0,   1,   0,
++      0,   0,  30,   0,   0,   7,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  26,   0,
++     16,   0,   3,   0,   0,   0,
++     78,   0,   0,  10,  98,   0,
++     16,   0,   4,   0,   0,   0,
++      0, 208,   0,   0,  86,   6,
++     16,   0,   2,   0,   0,   0,
++      6, 129,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  35,   0,
++      0,  12,  98,   0,  16,   0,
++      2,   0,   0,   0,  86,   6,
++     16, 128,  65,   0,   0,   0,
++      4,   0,   0,   0,   6, 129,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  86,   6,  16,   0,
++      2,   0,   0,   0,  31,   0,
++      4,   3,  58,   0,  16,   0,
++      3,   0,   0,   0,  80,   0,
++      0,   7,  34,   0,  16,   0,
++      3,   0,   0,   0,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   3,   0,
++      0,   0,  30,   0,   0,   8,
++    130,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16, 128,
++     65,   0,   0,   0,   3,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,  30,   0,
++      0,   7,  18,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  55,   0,   0,   9,
++     34,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      3,   0,   0,   0,  58,   0,
++     16,   0,   3,   0,   0,   0,
++     10,   0,  16,   0,   3,   0,
++      0,   0,  21,   0,   0,   1,
++     38,   0,   0,   8,   0, 208,
++      0,   0,  18,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16,   0,   4,   0,   0,   0,
++     26,   0,  16,   0,   4,   0,
++      0,   0,  35,   0,   0,  11,
++     18,   0,  16,   0,   3,   0,
++      0,   0,  42,   0,  16,   0,
++      4,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      3,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++     30,   0,   0,   7,  34,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  55,   0,
++      0,   9,  34,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   3,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,  30,   0,
++      0,   9,  34,   0,  16,   0,
++      2,   0,   0,   0,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  80,   0,
++      0,   9,  66,   0,  16,   0,
++      2,   0,   0,   0,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     42, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  30,   0,
++      0,  10, 130,   0,  16,   0,
++      2,   0,   0,   0,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     42, 128,  48, 128,  65,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  55,   0,   0,   9,
++     34,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  31,   0,   4,   3,
++     42,   0,  16,   0,   3,   0,
++      0,   0,  41,   0,   0,  10,
++    194,   0,  16,   0,   2,   0,
++      0,   0,   6,   4,  16,   0,
++      2,   0,   0,   0,   2,  64,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   2,   0,
++      0,   0,   2,   0,   0,   0,
++    165,   0,   0,   8,  50,   0,
++     16,   0,   3,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  70, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     50, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  70,   0,  16,   0,
++      3,   0,   0,   0,  18,   0,
++      0,   1,  41,   0,   0,  10,
++     50,   0,  16,   0,   2,   0,
++      0,   0,  70,   0,  16,   0,
++      2,   0,   0,   0,   2,  64,
++      0,   0,   2,   0,   0,   0,
++      2,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++    165,   0,   0,   8,  34,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,   6, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     18, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,  21,   0,
++      0,   1,  21,   0,   0,   1,
++     80,   0,   0,  10, 242,   0,
++     16,   0,   1,   0,   0,   0,
++      2,  64,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++      1,   0,   0,   0,   1,   0,
++      0,   0,  70,  14,  16,   0,
++      1,   0,   0,   0,  60,   0,
++      0,   7,  50,   0,  16,   0,
++      1,   0,   0,   0, 214,   5,
++     16,   0,   1,   0,   0,   0,
++    134,   0,  16,   0,   1,   0,
++      0,   0,  31,   0,   0,   3,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  41,   0,   0,   9,
++     82,   0,  16,   0,   1,   0,
++      0,   0,   6,   1,  16,   0,
++      0,   0,   0,   0, 166, 139,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  30,   0,   0,  10,
++     82,   0,  16,   0,   1,   0,
++      0,   0,   6,   2,  16,   0,
++      1,   0,   0,   0,   2,  64,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   0,   0,   0,   0,
++     85,   0,   0,   9,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   1,  64,
++      0,   0,   1,   0,   0,   0,
++     54,   0,   0,   7,  34,   0,
++     16,   0,   2,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  78,   0,
++      0,   8, 194,   0,  16,   0,
++      2,   0,   0,   0,   0, 208,
++      0,   0,   6,   8,  16,   0,
++      1,   0,   0,   0,   6,   4,
++     16,   0,   2,   0,   0,   0,
++     35,   0,   0,  10,  50,   0,
++     16,   0,   3,   0,   0,   0,
++    230,  10,  16, 128,  65,   0,
++      0,   0,   2,   0,   0,   0,
++     70,   0,  16,   0,   2,   0,
++      0,   0, 134,   0,  16,   0,
++      1,   0,   0,   0,  38,   0,
++      0,  12,   0, 208,   0,   0,
++    130,   0,  16,   0,   1,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  38,   0,
++      0,   8,   0, 208,   0,   0,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  58,   0,  16,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     35,   0,   0,  11,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   2,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  35,   0,   0,  11,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      3,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  41,   0,
++      0,   7, 130,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++      1,  64,   0,   0,   1,   0,
++      0,   0,  30,   0,   0,   7,
++     66,   0,  16,   0,   2,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     32,   0,   0,  12,  50,   0,
++     16,   0,   3,   0,   0,   0,
++    246, 143,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   2,  64,
++      0,   0,   1,   0,   0,   0,
++      2,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     78,   0,   0,  10, 194,   0,
++     16,   0,   3,   0,   0,   0,
++      0, 208,   0,   0,   6,   8,
++     16,   0,   1,   0,   0,   0,
++      6, 132,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  35,   0,
++      0,  12,  82,   0,  16,   0,
++      1,   0,   0,   0, 166,  11,
++     16, 128,  65,   0,   0,   0,
++      3,   0,   0,   0,   6, 129,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   6,   2,  16,   0,
++      1,   0,   0,   0,  31,   0,
++      4,   3,  26,   0,  16,   0,
++      3,   0,   0,   0,  80,   0,
++      0,   7, 130,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  30,   0,   0,   8,
++     18,   0,  16,   0,   4,   0,
++      0,   0,  10,   0,  16, 128,
++     65,   0,   0,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      1,   0,   0,   0,  30,   0,
++      0,   7,  34,   0,  16,   0,
++      4,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  55,   0,   0,   9,
++     18,   0,  16,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   4,   0,   0,   0,
++     26,   0,  16,   0,   4,   0,
++      0,   0,  21,   0,   0,   1,
++     38,   0,   0,   8,   0, 208,
++      0,   0, 130,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   3,   0,
++      0,   0,  35,   0,   0,  11,
++    130,   0,  16,   0,   2,   0,
++      0,   0,  58,   0,  16,   0,
++      3,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   1,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     30,   0,   0,   7,  18,   0,
++     16,   0,   1,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  55,   0,
++      0,   9,  18,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      1,   0,   0,   0,  30,   0,
++      0,   9,  18,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  80,   0,
++      0,   9,  66,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     42, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  30,   0,
++      0,  10,  66,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     42, 128,  48, 128,  65,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  55,   0,   0,   9,
++     18,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  41,   0,   0,   9,
++    194,   0,  16,   0,   2,   0,
++      0,   0, 166,  14,  16,   0,
++      0,   0,   0,   0, 166, 142,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  30,   0,   0,  10,
++    194,   0,  16,   0,   2,   0,
++      0,   0, 166,  14,  16,   0,
++      2,   0,   0,   0,   2,  64,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     78,   0,   0,   8, 194,   0,
++     16,   0,   3,   0,   0,   0,
++      0, 208,   0,   0, 166,  14,
++     16,   0,   2,   0,   0,   0,
++      6,   4,  16,   0,   2,   0,
++      0,   0,  35,   0,   0,  10,
++     50,   0,  16,   0,   4,   0,
++      0,   0, 230,  10,  16, 128,
++     65,   0,   0,   0,   3,   0,
++      0,   0,  70,   0,  16,   0,
++      2,   0,   0,   0, 230,  10,
++     16,   0,   2,   0,   0,   0,
++     38,   0,   0,   8,   0, 208,
++      0,   0,  66,   0,  16,   0,
++      1,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   3,   0,
++      0,   0,  35,   0,   0,  11,
++     66,   0,  16,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      3,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      1,   0,   0,   0,  26,   0,
++     16,   0,   4,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   1,   0,   0,   0,
++     41,   0,   0,   7,  34,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   4,   0,
++      0,   0,   1,  64,   0,   0,
++      1,   0,   0,   0,  30,   0,
++      0,   7,  66,   0,  16,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   1,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  78,   0,   0,  10,
++    194,   0,  16,   0,   3,   0,
++      0,   0,   0, 208,   0,   0,
++    166,  14,  16,   0,   2,   0,
++      0,   0,   6, 132,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     35,   0,   0,  12,  98,   0,
++     16,   0,   2,   0,   0,   0,
++    166,  11,  16, 128,  65,   0,
++      0,   0,   3,   0,   0,   0,
++      6, 129,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0, 166,  11,
++     16,   0,   2,   0,   0,   0,
++     31,   0,   4,   3,  26,   0,
++     16,   0,   3,   0,   0,   0,
++     80,   0,   0,   7, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  30,   0,
++      0,   8,  34,   0,  16,   0,
++      3,   0,   0,   0,  10,   0,
++     16, 128,  65,   0,   0,   0,
++      2,   0,   0,   0,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     30,   0,   0,   7,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,  55,   0,
++      0,   9,  34,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  21,   0,
++      0,   1,  38,   0,   0,   8,
++      0, 208,   0,   0, 130,   0,
++     16,   0,   1,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      3,   0,   0,   0,  35,   0,
++      0,  11, 130,   0,  16,   0,
++      1,   0,   0,   0,  58,   0,
++     16,   0,   3,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   2,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  30,   0,   0,   7,
++    130,   0,  16,   0,   1,   0,
++      0,   0,  26,   0,  16,   0,
++      2,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     55,   0,   0,   9,  66,   0,
++     16,   0,   1,   0,   0,   0,
++     10,   0,  16,   0,   3,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     30,   0,   0,   9,  66,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     80,   0,   0,   9, 130,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,  42, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     30,   0,   0,  10,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,  42, 128,  48, 128,
++     65,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  55,   0,
++      0,   9,  66,   0,  16,   0,
++      1,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  31,   0,
++      4,   3,  10,   0,  16,   0,
++      3,   0,   0,   0,  41,   0,
++      0,   7, 130,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++      1,  64,   0,   0,   2,   0,
++      0,   0,  41,   0,   0,   7,
++     18,   0,  16,   0,   2,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,   1,  64,
++      0,   0,   2,   0,   0,   0,
++    165,   0,   0,   8,  50,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  70, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     50, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  70,   0,  16,   0,
++      2,   0,   0,   0,  18,   0,
++      0,   1,  41,   0,   0,  10,
++     82,   0,  16,   0,   1,   0,
++      0,   0,   6,   2,  16,   0,
++      1,   0,   0,   0,   2,  64,
++      0,   0,   2,   0,   0,   0,
++      0,   0,   0,   0,   2,   0,
++      0,   0,   0,   0,   0,   0,
++    165,   0,   0,   8,  66,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,   6, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     18, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  21,   0,
++      0,   1,  21,   0,   0,   1,
++     31,   0,   0,   3,  26,   0,
++     16,   0,   1,   0,   0,   0,
++     41,   0,   0,   9,  50,   0,
++     16,   0,   0,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0, 230, 138,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,  10,  50,   0,
++     16,   0,   0,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0,   2,  64,   0,   0,
++      1,   0,   0,   0,   1,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  85,   0,
++      0,   9,  18,   0,  16,   0,
++      1,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   1,  64,   0,   0,
++      1,   0,   0,   0,  54,   0,
++      0,   7,  34,   0,  16,   0,
++      1,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  78,   0,   0,   8,
++    194,   0,  16,   0,   1,   0,
++      0,   0,   0, 208,   0,   0,
++      6,   4,  16,   0,   0,   0,
++      0,   0,   6,   4,  16,   0,
++      1,   0,   0,   0,  35,   0,
++      0,  10,  50,   0,  16,   0,
++      2,   0,   0,   0, 230,  10,
++     16, 128,  65,   0,   0,   0,
++      1,   0,   0,   0,  70,   0,
++     16,   0,   1,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0,  38,   0,   0,  12,
++      0, 208,   0,   0,  66,   0,
++     16,   0,   2,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  38,   0,   0,   8,
++      0, 208,   0,   0,  66,   0,
++     16,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      1,   0,   0,   0,  58,   0,
++     16,   0,   1,   0,   0,   0,
++     26, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  42,   0,
++     16,   0,   1,   0,   0,   0,
++     35,   0,   0,  11,  66,   0,
++     16,   0,   1,   0,   0,   0,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  10, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     42,   0,  16,   0,   1,   0,
++      0,   0,  41,   0,   0,   7,
++    130,   0,  16,   0,   1,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,   1,  64,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,   7,  66,   0,
++     16,   0,   1,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  32,   0,
++      0,  12,  50,   0,  16,   0,
++      2,   0,   0,   0, 246, 143,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   2,  64,   0,   0,
++      1,   0,   0,   0,   2,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  78,   0,
++      0,  10,  50,   0,  16,   0,
++      3,   0,   0,   0,   0, 208,
++      0,   0,  70,   0,  16,   0,
++      0,   0,   0,   0,  70, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  35,   0,   0,  12,
++     50,   0,  16,   0,   0,   0,
++      0,   0,  70,   0,  16, 128,
++     65,   0,   0,   0,   3,   0,
++      0,   0,  70, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0,  31,   0,   4,   3,
++     26,   0,  16,   0,   2,   0,
++      0,   0,  80,   0,   0,   7,
++    130,   0,  16,   0,   1,   0,
++      0,   0,  10,   0,  16,   0,
++      0,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     30,   0,   0,   8, 130,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16, 128,  65,   0,
++      0,   0,   1,   0,   0,   0,
++     10,   0,  16,   0,   0,   0,
++      0,   0,  30,   0,   0,   7,
++     66,   0,  16,   0,   3,   0,
++      0,   0,  10,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   3,   0,   0,   0,
++     21,   0,   0,   1,  38,   0,
++      0,   8,   0, 208,   0,   0,
++    130,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   1,   0,   0,   0,
++     26,   0,  16,   0,   3,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  35,   0,   0,  11,
++     34,   0,  16,   0,   0,   0,
++      0,   0,  26,   0,  16,   0,
++      0,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      1,   0,   0,   0,  30,   0,
++      0,   7,  18,   0,  16,   0,
++      0,   0,   0,   0,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  55,   0,   0,   9,
++     18,   0,  16,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   1,   0,   0,   0,
++     10,   0,  16,   0,   0,   0,
++      0,   0,  30,   0,   0,   9,
++     18,   0,  16,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      0,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  80,   0,   0,   9,
++     34,   0,  16,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      0,   0,   0,   0,  42, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  30,   0,   0,  10,
++     66,   0,  16,   0,   1,   0,
++      0,   0,  10,   0,  16,   0,
++      0,   0,   0,   0,  42, 128,
++     48, 128,  65,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     55,   0,   0,   9,  18,   0,
++     16,   0,   0,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   0,   0,   0,   0,
++     41,   0,   0,   9,  98,   0,
++     16,   0,   0,   0,   0,   0,
++    166,  11,  16,   0,   0,   0,
++      0,   0, 166, 139,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     30,   0,   0,  10,  98,   0,
++     16,   0,   0,   0,   0,   0,
++     86,   6,  16,   0,   0,   0,
++      0,   0,   2,  64,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,  78,   0,
++      0,   8, 194,   0,  16,   0,
++      1,   0,   0,   0,   0, 208,
++      0,   0,  86,   9,  16,   0,
++      0,   0,   0,   0,   6,   4,
++     16,   0,   1,   0,   0,   0,
++     35,   0,   0,  10,  50,   0,
++     16,   0,   3,   0,   0,   0,
++    230,  10,  16, 128,  65,   0,
++      0,   0,   1,   0,   0,   0,
++     70,   0,  16,   0,   1,   0,
++      0,   0, 150,   5,  16,   0,
++      0,   0,   0,   0,  38,   0,
++      0,   8,   0, 208,   0,   0,
++    130,   0,  16,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      2,   0,   0,   0,  42,   0,
++     16,   0,   1,   0,   0,   0,
++     35,   0,   0,  11, 130,   0,
++     16,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   1,   0,
++      0,   0,  26, 128,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     58,   0,  16,   0,   0,   0,
++      0,   0,  35,   0,   0,  11,
++    130,   0,  16,   0,   0,   0,
++      0,   0,  26,   0,  16,   0,
++      3,   0,   0,   0,  10, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  58,   0,  16,   0,
++      0,   0,   0,   0,  41,   0,
++      0,   7,  34,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   3,   0,   0,   0,
++      1,  64,   0,   0,   1,   0,
++      0,   0,  30,   0,   0,   7,
++    130,   0,  16,   0,   0,   0,
++      0,   0,  58,   0,  16,   0,
++      0,   0,   0,   0,  26,   0,
++     16,   0,   1,   0,   0,   0,
++     78,   0,   0,  10,  98,   0,
++     16,   0,   1,   0,   0,   0,
++      0, 208,   0,   0,  86,   6,
++     16,   0,   0,   0,   0,   0,
++      6, 129,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  35,   0,
++      0,  12,  98,   0,  16,   0,
++      0,   0,   0,   0,  86,   6,
++     16, 128,  65,   0,   0,   0,
++      1,   0,   0,   0,   6, 129,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,
++      0,   0,  86,   6,  16,   0,
++      0,   0,   0,   0,  31,   0,
++      4,   3,  26,   0,  16,   0,
++      2,   0,   0,   0,  80,   0,
++      0,   7, 130,   0,  16,   0,
++      1,   0,   0,   0,  26,   0,
++     16,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  30,   0,   0,   8,
++     34,   0,  16,   0,   2,   0,
++      0,   0,  10,   0,  16, 128,
++     65,   0,   0,   0,   1,   0,
++      0,   0,  26,   0,  16,   0,
++      0,   0,   0,   0,  30,   0,
++      0,   7,  18,   0,  16,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  55,   0,   0,   9,
++     34,   0,  16,   0,   0,   0,
++      0,   0,  58,   0,  16,   0,
++      1,   0,   0,   0,  26,   0,
++     16,   0,   2,   0,   0,   0,
++     10,   0,  16,   0,   1,   0,
++      0,   0,  21,   0,   0,   1,
++     38,   0,   0,   8,   0, 208,
++      0,   0,  18,   0,  16,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   2,   0,   0,   0,
++     26,   0,  16,   0,   1,   0,
++      0,   0,  35,   0,   0,  11,
++     18,   0,  16,   0,   1,   0,
++      0,   0,  42,   0,  16,   0,
++      1,   0,   0,   0,  26, 128,
++     48,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      1,   0,   0,   0,  35,   0,
++      0,  11,  66,   0,  16,   0,
++      0,   0,   0,   0,  42,   0,
++     16,   0,   0,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  10,   0,
++     16,   0,   1,   0,   0,   0,
++     30,   0,   0,   7,  34,   0,
++     16,   0,   0,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      0,   0,   0,   0,  55,   0,
++      0,   9,  34,   0,  16,   0,
++      0,   0,   0,   0,  10,   0,
++     16,   0,   2,   0,   0,   0,
++     58,   0,  16,   0,   0,   0,
++      0,   0,  26,   0,  16,   0,
++      0,   0,   0,   0,  30,   0,
++      0,   9,  34,   0,  16,   0,
++      0,   0,   0,   0,  26,   0,
++     16,   0,   0,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  80,   0,
++      0,   9,  66,   0,  16,   0,
++      0,   0,   0,   0,  26,   0,
++     16,   0,   0,   0,   0,   0,
++     42, 128,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  30,   0,
++      0,  10, 130,   0,  16,   0,
++      0,   0,   0,   0,  26,   0,
++     16,   0,   0,   0,   0,   0,
++     42, 128,  48, 128,  65,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,  55,   0,   0,   9,
++     34,   0,  16,   0,   0,   0,
++      0,   0,  42,   0,  16,   0,
++      0,   0,   0,   0,  58,   0,
++     16,   0,   0,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  31,   0,   4,   3,
++     10,   0,  16,   0,   2,   0,
++      0,   0,  41,   0,   0,  10,
++    194,   0,  16,   0,   0,   0,
++      0,   0,   6,   4,  16,   0,
++      0,   0,   0,   0,   2,  64,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   2,   0,
++      0,   0,   2,   0,   0,   0,
++    165,   0,   0,   8,  50,   0,
++     16,   0,   1,   0,   0,   0,
++     58,   0,  16,   0,   0,   0,
++      0,   0,  70, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     50, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     42,   0,  16,   0,   0,   0,
++      0,   0,  70,   0,  16,   0,
++      1,   0,   0,   0,  18,   0,
++      0,   1,  41,   0,   0,  10,
++     50,   0,  16,   0,   0,   0,
++      0,   0,  70,   0,  16,   0,
++      0,   0,   0,   0,   2,  64,
++      0,   0,   2,   0,   0,   0,
++      2,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++    165,   0,   0,   8,  34,   0,
++     16,   0,   0,   0,   0,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,   6, 112,  32,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 166,   0,   0,   8,
++     18, 224,  33,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++     10,   0,  16,   0,   0,   0,
++      0,   0,  26,   0,  16,   0,
++      0,   0,   0,   0,  21,   0,
++      0,   1,  21,   0,   0,   1,
++     62,   0,   0,   1,  83,  84,
++     65,  84, 148,   0,   0,   0,
++     26,   1,   0,   0,   6,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,
++      0,   0, 155,   0,   0,   0,
++     43,   0,   0,   0,   6,   0,
++      0,   0,  17,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      8,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   4,   0,
++      0,   0,  24,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      8,   0,   0,   0
++};
+diff --git a/src/graphics/shaders/scene_edram_stretch.cs.hlsl b/src/graphics/shaders/scene_edram_stretch.cs.hlsl
+new file mode 100644
+index 0000000..12a7579
+--- /dev/null
++++ b/src/graphics/shaders/scene_edram_stretch.cs.hlsl
+@@ -0,0 +1,61 @@
++// Copies a resolve rectangle of a surface that draws filled at a smaller resolution scale from the EDRAM to a buffer
++// laid out like it, stretched to the full scale (each sample from the nearest smaller-scale pixel), at the same
++// addresses, for the resolve to copy from instead. From src/graphics/shaders, then without trailing spaces:
++//   fxc /nologo /T cs_5_1 /O3 /E main /Vn scene_edram_stretch_cs /Fh bytecode/d3d12_5_1/scene_edram_stretch_cs.h
++//       scene_edram_stretch.cs.hlsl
++
++#include "scene_upscaler.hlsli"
++
++cbuffer constants : register(b0) {
++  uint base_dwords;
++  uint pitch_dwords;
++  uint edram_size_dwords;
++  // 0: 32bpp color, 1: 64bpp color, 2: depth.
++  uint layout;
++
++  uint tile_width;
++  uint tile_height;
++  uint sample_count_log2_x;
++  uint sample_count_log2_y;
++
++  // Host pixels from the surface's origin.
++  uint2 rect_origin;
++  uint2 rect_size;
++
++  // Host pixels per guest pixel the draws used, and the resolution scale.
++  uint2 draw_scale;
++  uint2 output_scale;
++};
++
++ByteAddressBuffer edram : register(t0);
++RWByteAddressBuffer stretched : register(u0);
++
++uint SampleAddress(uint2 sample_position) {
++  uint offset = layout == 1u
++                    ? XeSceneEdram64bppSampleOffset(sample_position, tile_width, tile_height, pitch_dwords)
++                    : XeSceneEdramSampleOffset(sample_position, tile_width, tile_height, pitch_dwords, layout == 2u);
++  return XeSceneEdramWrap(base_dwords + offset, edram_size_dwords);
++}
++
++[numthreads(8, 8, 1)]
++void main(uint3 id : SV_DispatchThreadID) {
++  if (any(id.xy >= rect_size)) {
++    return;
++  }
++  uint2 sample_count_log2 = uint2(sample_count_log2_x, sample_count_log2_y);
++  uint2 pixel = rect_origin + id.xy;
++  uint2 source_pixel = pixel * draw_scale / output_scale;
++  [unroll] for (uint i = 0u; i < 4u; ++i) {
++    uint2 sample_index = uint2(i & 1u, i >> 1u);
++    if (any(sample_index >= (1u << sample_count_log2))) {
++      continue;
++    }
++    uint dest = SampleAddress((pixel << sample_count_log2) + sample_index);
++    uint source = SampleAddress((source_pixel << sample_count_log2) + sample_index);
++    if (layout == 1u) {
++      stretched.Store2(dest << 2u, edram.Load2(source << 2u));
++    } else {
++      stretched.Store(dest << 2u, edram.Load(source << 2u));
++    }
++  }
++}
+diff --git a/src/graphics/shaders/scene_upscaler.hlsli b/src/graphics/shaders/scene_upscaler.hlsli
+index 60bbacd..cd5cab3 100644
+--- a/src/graphics/shaders/scene_upscaler.hlsli
++++ b/src/graphics/shaders/scene_upscaler.hlsli
+@@ -14,6 +14,15 @@ uint XeSceneEdramSampleOffset(uint2 sample_position, uint tile_width, uint tile_
+   return tile.y * pitch_dwords + tile.x * (tile_width * tile_height) + in_tile.y * tile_width + in_tile.x;
+ }
+ 
++// 64bpp color: tile_width x tile_height dwords hold 40 x 16 samples (times the resolution scale) of 2 dwords each, and
++// pitch_dwords is twice the 32bpp one.
++uint XeSceneEdram64bppSampleOffset(uint2 sample_position, uint tile_width, uint tile_height, uint pitch_dwords) {
++  uint2 half_tile = uint2(tile_width >> 1, tile_height);
++  uint2 tile = sample_position / half_tile;
++  uint2 in_tile = sample_position - tile * half_tile;
++  return tile.y * pitch_dwords + tile.x * (tile_width * tile_height) + in_tile.y * tile_width + in_tile.x * 2u;
++}
++
+ uint XeSceneEdramWrap(uint address, uint edram_size_dwords) {
+   return address >= edram_size_dwords ? address - edram_size_dwords : address;
+ }

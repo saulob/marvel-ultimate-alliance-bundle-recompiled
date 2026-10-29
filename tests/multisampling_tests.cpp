@@ -63,14 +63,19 @@ void TestPathDecidesTheChoice() {
   CHECK(mua::HostRenderTargetsUsed("rov", false));
   CHECK(mua::HostRenderTargetsUsed("rtv", true));
   CHECK(mua::HostRenderTargetsUsed("", true));
+  CHECK(!mua::HostRenderTargetsUsed("fsi", true));
+  CHECK(mua::HostRenderTargetsUsed("fsi", false));
+  CHECK(mua::HostRenderTargetsUsed("fbo", true));
 }
 
 void TestRovIsFixed() {
   std::printf("under ROV the choice is not applied and the logs say so\n");
   for (bool compatibility : {false, true}) {
     CHECK(!mua::Native2xMsaaToApply(false, compatibility).has_value());
-    CHECK(mua::MsaaLauncherText(false, compatibility) == "ROV (fixed)");
-    CHECK(mua::MsaaRuntimeText(false, compatibility) == "2x as 4x (ROV, fixed)");
+    CHECK(mua::MsaaLauncherText(false, compatibility, "ROV") == "ROV (fixed)");
+    CHECK(mua::MsaaRuntimeText(false, compatibility, "ROV") == "2x as 4x (ROV, fixed)");
+    CHECK(mua::MsaaLauncherText(false, compatibility, "FSI") == "FSI (fixed)");
+    CHECK(mua::MsaaRuntimeText(false, compatibility, "FSI") == "2x as 4x (FSI, fixed)");
   }
   CHECK(mua::Native2xMsaaToApply(true, false) == std::optional<bool>(true));
   CHECK(mua::Native2xMsaaToApply(true, true) == std::optional<bool>(false));
@@ -78,12 +83,14 @@ void TestRovIsFixed() {
 
 void TestHostRenderTargetsLogTheChoice() {
   std::printf("with host render targets the logs follow the choice\n");
-  CHECK(mua::MsaaLauncherText(true, false) == "2x MSAA");
-  CHECK(mua::MsaaLauncherText(true, true) == "4x MSAA (Compatibility)");
-  CHECK(mua::MsaaRuntimeText(true, false) == "2x native (host render targets)");
-  CHECK(mua::MsaaRuntimeText(true, true) == "2x as 4x (host render targets, compatibility)");
-  CHECK(mua::MsaaRuntimeText(true, false) != mua::MsaaRuntimeText(true, true));
-  CHECK(mua::MsaaRuntimeText(true, true) != mua::MsaaRuntimeText(false, true));
+  for (const char* edram : {"ROV", "FSI"}) {
+    CHECK(mua::MsaaLauncherText(true, false, edram) == "2x MSAA");
+    CHECK(mua::MsaaLauncherText(true, true, edram) == "4x MSAA (Compatibility)");
+    CHECK(mua::MsaaRuntimeText(true, false, edram) == "2x native (host render targets)");
+    CHECK(mua::MsaaRuntimeText(true, true, edram) == "2x as 4x (host render targets, compatibility)");
+    CHECK(mua::MsaaRuntimeText(true, false, edram) != mua::MsaaRuntimeText(true, true, edram));
+    CHECK(mua::MsaaRuntimeText(true, true, edram) != mua::MsaaRuntimeText(false, true, edram));
+  }
 }
 
 void TestSetting() {
@@ -96,8 +103,8 @@ void TestSetting() {
   CHECK(Has(settings, "  ApplyMultisampling();\n}") || Has(settings, "  ApplyMultisampling();\r\n}"));
   CHECK(Has(settings, "rex::cvar::SetFlagByName(\"native_2x_msaa\""));
   CHECK(Has(settings, "Native2xMsaaToApply(HostRenderTargetsActive(), REXCVAR_GET(mua_msaa_compatibility))"));
-  CHECK(Has(settings, "diagnostics.graphics.msaa = MsaaRuntimeText(host_render_targets, msaa_compatibility);"));
-  CHECK(Has(settings, "MsaaLauncherText(host_render_targets, msaa_compatibility)"));
+  CHECK(Has(settings, "MsaaRuntimeText(host_render_targets, msaa_compatibility, kBackendSettings.pixel_shader_edram)"));
+  CHECK(Has(settings, "MsaaLauncherText(host_render_targets, msaa_compatibility, kBackendSettings.pixel_shader_edram)"));
   CHECK(!Has(settings, "setting unused"));
   CHECK(!Has(settings, "settings.GetBool(\"mua_msaa_compatibility\", false) ? \"4x"));
 
@@ -107,7 +114,9 @@ void TestSetting() {
   const std::size_t gate = launcher.find("if (MultisamplingApplies()) {");
   const std::size_t row = launcher.find("ui.Toggle(\"Multisampling\"");
   CHECK(gate != std::string::npos && row != std::string::npos && gate < row);
-  CHECK(Has(launcher, "rex::cvar::GetFlagByName(\"render_target_path_d3d12\")"));
+  CHECK(Has(launcher, "rex::cvar::GetFlagByName(kBackendSettings.render_target_path)"));
+  CHECK(Has(settings, "rex::cvar::GetFlagByName(kBackendSettings.render_target_path)"));
+  CHECK(!Has(launcher, "\"render_target_path_d3d12\"") && !Has(settings, "\"render_target_path_d3d12\""));
 
   // Old settings.toml values stay valid, and the hidden row never asks for a new process.
   const std::size_t window_keys = settings.find("const std::vector<std::string> kWindowKeys");
@@ -117,6 +126,7 @@ void TestSetting() {
 
   const std::string shipped = ReadSource("../config/marvel_ultimate_alliance.toml");
   CHECK(Has(shipped, "render_target_path_d3d12 = \"rov\""));
+  CHECK(Has(shipped, "render_target_path_vulkan = \"fsi\""));
   CHECK(!Has(shipped, "native_2x_msaa"));
 
   const std::string app = ReadSource("marvel_ultimate_alliance_app.h");

@@ -48,6 +48,10 @@ mua_add_test(launcher_quit_tests headless)
 mua_add_test(launcher_header_art_tests headless)
 mua_add_test(multisampling_tests headless)
 mua_add_test(frame_limiter_tests headless SOURCES src/frame_wait.cpp)
+mua_add_test(guest_atomics_tests headless
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
+mua_add_test(guest_semaphore_tests headless
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(guest_map_tests headless
     DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(skip_intro_tests headless
@@ -66,11 +70,29 @@ mua_add_test(d3d12_async_submission_tests headless)
 mua_add_test(d3d12_sampler_memo_tests headless)
 mua_add_test(render_scale_tests headless)
 mua_add_test(upscaling_tests headless)
+if(TARGET mua_dlss_bridge)
+    mua_add_test(dlss_bridge_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp
+        DEFINES MUA_DLSS_BRIDGE_DLL="$<TARGET_FILE:mua_dlss_bridge>")
+    add_dependencies(mua_dlss_bridge_tests mua_dlss_bridge)
+else()
+    mua_add_test(dlss_bridge_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
+endif()
+mua_add_test(fsr3_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
+mua_add_test(scene_profile_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 if(WIN32)
     mua_add_test(d3d12_copy_validation_tests headless LIBS d3d12 dxgi)
+    # The staged SDK source: scene_layout.h (patches/rexglue-sdk/0161 to 0166) before a runtime build installs it,
+    # and the renderer's own depth conversion.
+    mua_add_test(scene_upscaler_math_tests headless
+        SOURCES out/rexglue-sdk-src/src/graphics/xenos.cpp out/rexglue-sdk-src/src/core/math_msvc.cpp
+            src/game_definition.cpp src/game_profile.cpp)
+    target_include_directories(mua_scene_upscaler_math_tests BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/out/rexglue-sdk-src/include")
 endif()
-mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp)
+mua_add_test(frame_pacing_tests headless SOURCES src/frame_wait.cpp
+    DEFINES MUA_GENERATED_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/generated")
 mua_add_test(keyboard_tests headless)
+mua_add_test(cheat_session_tests headless)
 mua_add_test(relaunch_tests headless)
 mua_add_test(launcher_handoff_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 mua_add_test(lifecycle_tests headless)
@@ -79,7 +101,7 @@ mua_add_test(skip_intro_notice_tests headless SOURCES src/game_definition.cpp sr
 mua_add_test(achievements_overlay_tests headless SOURCES src/game_definition.cpp src/game_profile.cpp)
 mua_add_test(log_path_tests headless SOURCES src/log_path.cpp)
 mua_add_test(diagnostics_tests headless SOURCES src/diagnostics.cpp)
-mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12)
+mua_add_test(graphics_adapter_tests headless SOURCES src/graphics_adapters.cpp LIBS trg::launcher dxgi d3d12 ${CMAKE_DL_LIBS})
 mua_add_test(crash_report_tests headless SOURCES src/crash_report.cpp LIBS shell32 DEFINES ${MUA_TEST_BUILD_DEFINES})
 mua_add_test(user_data_tests headless SOURCES src/user_data.cpp)
 mua_add_test(port_version_tests headless SOURCES src/port_version.cpp
@@ -161,6 +183,7 @@ mua_add_test(vmsum_tests runtime LIBS rex::runtime
     DEFINES MUA_GENERATED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold"
             MUA_PCH_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/generated/mua1-gold/marvel_ultimate_alliance_pch.h")
 mua_add_test(shutdown_order_tests runtime LIBS rex::runtime)
+mua_add_test(guest_interrupt_lock_tests runtime LIBS rex::runtime)
 mua_add_test(title_thread_shutdown_tests runtime LIBS rex::runtime)
 mua_add_test(filesystem_mapping_tests runtime LIBS rex::runtime)
 mua_add_test(settings_tests runtime
@@ -168,5 +191,5 @@ mua_add_test(settings_tests runtime
             src/game_profile.cpp src/graphics_adapters.cpp src/input_summary.cpp src/log_filter.cpp
             src/active_log.cpp src/log_path.cpp src/platform.cpp src/port_version.cpp src/session_log.cpp src/system_info.cpp
             src/xex_identity.cpp
-    LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization
+    LIBS rex::runtime trg::launcher dxgi d3d12 shell32 shcore synchronization ${CMAKE_DL_LIBS}
     DEFINES ${MUA_TEST_BUILD_DEFINES})

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -120,6 +121,54 @@ void TestMua2GameSpeedAtEveryRate() {
   for (const int rate : {60, 90, 120, 144, 165, 240, kFrameRateUnlimited}) {
     CHECK(PresentModeFor(rate, policy) == PresentMode::kImmediate);
   }
+}
+
+// The game clock's own 10 ms floor adds 10 ms for every faster frame, so 150 FPS played 15 game seconds in 10; the hook
+// at 0x827ECCB0 (sub_827ECB38) replaces that floor in f0 before the fsubs/fsel that apply it.
+void TestMua2ClockStepFloor() {
+  std::printf("MUA 2's clock step floor keeps game time at real time above 100 FPS\n");
+  constexpr double kGameClockFloor = 0.01;
+  CHECK(std::fabs(GameSecondsPlayed(1.0 / 150.0, 10.0, kGameClockFloor) - 15.0) < 1e-6);
+  for (const int presented : {120, 144, 165, 240, 1000}) {
+    CHECK(std::fabs(GameSecondsPlayed(1.0 / presented, 10.0, kMua2WorldDeltaMin) - 10.0) < 1e-9);
+  }
+
+  std::string pacing = ReadSource("frame_pacing.cpp");
+  std::erase(pacing, '\r');
+  CHECK(Has(pacing, "void mua_clock_step_floor_mua2(PPCRegister& floor) {\n"
+                    "  floor.f64 = double(float(mua::kMua2WorldDeltaMin));\n}"));
+  std::string overrides = ReadSource("../config/mua2/overrides.toml");
+  std::erase(overrides, '\r');
+  CHECK(Has(overrides, "address = 0x827ECCB0\nname = \"mua_clock_step_floor_mua2\"\nregisters = [\"f0\"]\n"
+                       "after_instruction = false\n"));
+  for (const char* other : {"../config/mua1/overrides.toml", "../config/mua1-gold/overrides.toml"}) {
+    CHECK(!Has(ReadSource(other), "mua_clock_step_floor"));
+  }
+
+#ifdef MUA_GENERATED_ROOT
+  std::string body;
+  for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(MUA_GENERATED_ROOT) / "mua2")) {
+    if (entry.path().filename().string().find("_recomp.") == std::string::npos) {
+      continue;
+    }
+    std::ifstream in(entry.path(), std::ios::binary);
+    const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const size_t start = source.find("DEFINE_REX_FUNC(sub_827ECB38) {");
+    if (start != std::string::npos) {
+      body = source.substr(start, source.find("\n}\n", start) - start);
+      break;
+    }
+  }
+  const size_t load = body.find("// lfs f0,21840(r11)");
+  const size_t floor = body.find("// fsubs f11,f1,f0", load);
+  const size_t hook = body.find("mua_clock_step_floor_mua2(ctx.f0);", floor);
+  const size_t apply = body.find("ctx.f11.f64 = double(float(ctx.f1.f64 - ctx.f0.f64));", floor);
+  const size_t select = body.find("// fsel f10,f11,f1,f0", floor);
+  const size_t ceiling = body.find("// lfs f0,4(r9)", select);
+  CHECK(load != std::string::npos && floor != std::string::npos && select != std::string::npos &&
+        ceiling != std::string::npos);
+  CHECK(hook != std::string::npos && hook < apply && apply < select);
+#endif
 }
 
 void TestLimiterCadence() {
@@ -238,18 +287,19 @@ void TestWiring() {
   CHECK(pacing.find("#if defined(MUA_RUNTIME_MUA1) || defined(MUA_RUNTIME_MUA1_GOLD)") == std::string::npos);
   CHECK(Has(counters, "rex::perf::IncrementCounter(CounterId::kGuestUpdates, 1);"));
   const std::string watchdog = ReadSource("hang_watchdog.cpp");
-  CHECK(Has(watchdog, "std::thread(SampleHitches, static_cast<HWND>(native_window)).detach();"));
+  CHECK(Has(watchdog, "std::thread(run, \"Hitch sampler\", SampleHitches, static_cast<HWND>(native_window)).detach();"));
   CHECK(Has(watchdog, "kHitchSampleAfter = std::chrono::milliseconds(150)"));
   CHECK(Has(watchdog, "kHitchStackAfter = std::chrono::milliseconds(500)"));
   CHECK(Has(watchdog, "Hitch sample: {} ms open | top {} | guest {}"));
   // The hitch sampler runs in every game program, never in the launcher; no profiler is left behind.
-  const size_t sampler = watchdog.find("std::thread(SampleHitches");
+  const size_t sampler = watchdog.find("std::thread(run, \"Hitch sampler\", SampleHitches");
   CHECK(sampler != std::string::npos && watchdog.rfind("#if MUA_HAS_RECOMPILED_CODE", sampler) + 40 > sampler);
   CHECK(!Has(watchdog, "MUA_RUNTIME_MUA1"));
   CHECK(!Has(watchdog, "ProfileRenderThread"));
   CHECK(!Has(watchdog, "DEBUG_SAULO"));
   // Without a PDB a frame still names its module and offset.
-  CHECK(Has(watchdog, "fmt::format(\"{}+0x{:X}\", Utf8(module.ModuleName), address - module.BaseOfImage)"));
+  CHECK(Has(watchdog, "LogText(module.ModuleName)"));
+  CHECK(Has(watchdog, "fmt::format(\"{}+0x{:X}\", module_name, address - module.BaseOfImage)"));
   // Everything goes to the session log: no hang_N.txt or hitch_stacks_N.txt.
   CHECK(!Has(watchdog, "ofstream"));
   CHECK(!Has(watchdog, "hang_\""));
@@ -262,6 +312,7 @@ int main() {
   TestWorldDelta();
   TestGameSpeedAtEveryRate();
   TestMua2GameSpeedAtEveryRate();
+  TestMua2ClockStepFloor();
   TestLimiterCadence();
   TestReport();
   TestWiring();

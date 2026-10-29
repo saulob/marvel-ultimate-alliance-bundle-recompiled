@@ -1,0 +1,197 @@
+The Vulkan half of 0120/0121 for the host render target path (GPUs without fragment shader interlock):
+a rectangle-list draw that fully overwrites a render target skips the transfer of its previous contents
+inside the overwritten rectangle. Vulkan render targets start undefined, so the stencil of a depth-only
+overwrite is always transferred whole and 0121's stencil bit tracking has nothing to save here.
+
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 34f7033..fd361bb 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -793,12 +793,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // be null / empty in case there's nothing to do for them.
+   // resolve_clear_rectangle is expected to be provided by
+   // PrepareHostRenderTargetsResolveClear which should do all the needed size
+-  // bound checks.
++  // bound checks. Without clear values, the rectangle is an area a draw replaces entirely, only
++  // transferred around. It's applied to the render targets of cutout_render_targets (bit 0 is
++  // depth); with depth_only_cutout, to the depth of the depth render target but not the stencil.
+   void PerformTransfersAndResolveClears(
+       uint32_t render_target_count, RenderTarget* const* render_targets,
+       const std::vector<Transfer>* render_target_transfers,
+       const uint64_t* render_target_resolve_clear_values = nullptr,
+-      const Transfer::Rectangle* resolve_clear_rectangle = nullptr);
++      const Transfer::Rectangle* resolve_clear_rectangle = nullptr,
++      uint32_t cutout_render_targets = UINT32_MAX, bool depth_only_cutout = false);
+ 
+   VkPipeline GetDumpPipeline(DumpPipelineKey key);
+   VkPipeline GetDirectResolvePipeline(DirectResolvePipelineKey key);
+@@ -862,6 +865,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   // Temporary storage for PerformTransfersAndResolveClears.
+   std::vector<TransferInvocation> current_transfer_invocations_;
++  // Temporary storage for the transfers remaining after a draw replaces part of the destinations.
++  std::vector<Transfer> draw_overwrite_transfers_[1 + xenos::kMaxColorRenderTargets];
+ 
+   // Temporary storage for DumpRenderTargets.
+   std::vector<ResolveCopyDumpRectangle> dump_rectangles_;
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 7d3791b..ecd3212 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1433,11 +1433,62 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+ 
+   switch (GetPath()) {
+     case Path::kHostRenderTargets: {
++      constexpr uint32_t kRenderTargetCount = 1 + xenos::kMaxColorRenderTargets;
+       RenderTarget* const* depth_and_color_render_targets =
+           last_update_accumulated_render_targets();
+-
+-      PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+-                                       depth_and_color_render_targets, last_update_transfers());
++      const std::vector<Transfer>* transfers = last_update_transfers();
++      bool any_transfers = false;
++      for (uint32_t i = 0; i < kRenderTargetCount; ++i) {
++        any_transfers |= !transfers[i].empty();
++      }
++      Transfer::Rectangle overwrite_rectangle = {};
++      uint32_t overwritten = 0;
++      bool overwritten_depth_only = false;
++      if (any_transfers) {
++        // The pixel shader isn't used outside the color and depth mode.
++        const Shader* pixel_shader =
++            register_file().Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kColorDepth
++                ? command_processor_.active_pixel_shader()
++                : nullptr;
++        overwritten = GetDrawOverwrittenRenderTargets(
++            normalized_depth_control, normalized_color_mask, vertex_shader, pixel_shader,
++            overwrite_rectangle, overwritten_depth_only);
++        // With the stencil written by the transfer shader, the depth can't be skipped alone.
++        overwritten_depth_only &=
++            !command_processor_.GetVulkanDevice()->extensions().ext_EXT_shader_stencil_export;
++      }
++      if (overwritten || overwritten_depth_only) {
++        uint32_t cutout_render_targets = overwritten | uint32_t(overwritten_depth_only);
++        for (uint32_t i = 0; i < kRenderTargetCount; ++i) {
++          std::vector<Transfer>& kept_transfers = draw_overwrite_transfers_[i];
++          kept_transfers.clear();
++          const RenderTarget* render_target = depth_and_color_render_targets[i];
++          if (!render_target) {
++            continue;
++          }
++          if (!(cutout_render_targets & (uint32_t(1) << i))) {
++            kept_transfers = transfers[i];
++            continue;
++          }
++          RenderTargetKey key = render_target->key();
++          for (const Transfer& transfer : transfers[i]) {
++            Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
++            // The stencil of a depth-only overwrite is transferred whole: Vulkan render targets
++            // start undefined, so any of its bits may be set.
++            if (transfer.GetRectangles(key.base_tiles, key.GetPitchTiles(), key.msaa_samples,
++                                       key.Is64bpp(), rectangles, &overwrite_rectangle) ||
++                (overwritten_depth_only && i == 0)) {
++              kept_transfers.push_back(transfer);
++            }
++          }
++        }
++        PerformTransfersAndResolveClears(kRenderTargetCount, depth_and_color_render_targets,
++                                         draw_overwrite_transfers_, nullptr, &overwrite_rectangle,
++                                         cutout_render_targets, overwritten_depth_only);
++      } else {
++        PerformTransfersAndResolveClears(kRenderTargetCount, depth_and_color_render_targets,
++                                         transfers);
++      }
+ 
+       if (depth_and_color_render_targets[0]) {
+         render_pass_key.depth_and_color_used |= 1 << 0;
+@@ -4596,8 +4647,17 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     uint32_t render_target_count, RenderTarget* const* render_targets,
+     const std::vector<Transfer>* render_target_transfers,
+     const uint64_t* render_target_resolve_clear_values,
+-    const Transfer::Rectangle* resolve_clear_rectangle) {
++    const Transfer::Rectangle* resolve_clear_rectangle, uint32_t cutout_render_targets,
++    bool depth_only_cutout) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
++  auto get_cutout = [&](uint32_t render_target_index,
++                        bool stencil) -> const Transfer::Rectangle* {
++    if (!(cutout_render_targets & (uint32_t(1) << render_target_index)) ||
++        (stencil && depth_only_cutout)) {
++      return nullptr;
++    }
++    return resolve_clear_rectangle;
++  };
+ 
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   uint64_t current_submission = command_processor_.GetCurrentSubmission();
+@@ -4682,8 +4742,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       Transfer::Rectangle transfer_rectangles[Transfer::kMaxRectanglesWithCutout];
+       uint32_t transfer_rectangle_count = transfer.GetRectangles(
+           dest_rt_key.base_tiles, dest_rt_key.pitch_tiles_at_32bpp, dest_rt_key.msaa_samples, false,
+-          transfer_rectangles, resolve_clear_rectangle);
+-      assert_not_zero(transfer_rectangle_count);
++          transfer_rectangles, get_cutout(i, false));
+       HostDepthStoreRectangleConstant host_depth_store_rectangle_constant;
+       for (uint32_t j = 0; j < transfer_rectangle_count; ++j) {
+         uint32_t group_count_x, group_count_y;
+@@ -4941,7 +5000,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+                                                : TransferMode::kColorToStencilBit;
+             stencil_clear_rectangle_count += transfer.GetRectangles(
+                 dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-                nullptr, resolve_clear_rectangle);
++                nullptr, get_cutout(i, true));
+           } else {
+             if (dest_rt_key.is_depth) {
+               if (host_depth_source_vulkan_rt) {
+@@ -5027,7 +5086,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+           Transfer::Rectangle transfer_stencil_clear_rectangles[Transfer::kMaxRectanglesWithCutout];
+           uint32_t transfer_stencil_clear_rectangle_count = transfer.GetRectangles(
+               dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-              transfer_stencil_clear_rectangles, resolve_clear_rectangle);
++              transfer_stencil_clear_rectangles, get_cutout(i, true));
+           for (uint32_t j = 0; j < transfer_stencil_clear_rectangle_count; ++j) {
+             const Transfer::Rectangle& stencil_clear_rectangle =
+                 transfer_stencil_clear_rectangles[j];
+@@ -5071,11 +5130,14 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       for (auto it = current_transfer_invocations_.cbegin();
+            it != current_transfer_invocations_.cend(); ++it) {
+         const TransferInvocation& transfer_invocation_first = *it;
++        const Transfer::Rectangle* invocation_cutout = get_cutout(
++            i, kTransferModes[size_t(transfer_invocation_first.shader_key.mode)].output ==
++                   TransferOutput::kStencilBit);
+         // Will be merging transfers from the same source into one mesh.
+         auto it_merged_first = it, it_merged_last = it;
+         uint32_t transfer_rectangle_count = transfer_invocation_first.transfer.GetRectangles(
+             dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-            nullptr, resolve_clear_rectangle);
++            nullptr, invocation_cutout);
+         for (auto it_merge = std::next(it_merged_first);
+              it_merge != current_transfer_invocations_.cend(); ++it_merge) {
+           if (!transfer_invocation_first.CanBeMergedIntoOneDraw(*it_merge)) {
+@@ -5083,12 +5145,15 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+           }
+           transfer_rectangle_count += it_merge->transfer.GetRectangles(
+               dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-              nullptr, resolve_clear_rectangle);
++              nullptr, invocation_cutout);
+           it_merged_last = it_merge;
+         }
+-        assert_not_zero(transfer_rectangle_count);
+         // Skip the merged transfers in the subsequent iterations.
+         it = it_merged_last;
++        if (!transfer_rectangle_count) {
++          // Entirely inside what the draw replaces.
++          continue;
++        }
+ 
+         assert_not_null(it->transfer.source);
+         auto& source_vulkan_rt = *static_cast<VulkanRenderTarget*>(it->transfer.source);
+@@ -5122,8 +5187,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+           Transfer::Rectangle transfer_invocation_rectangles[Transfer::kMaxRectanglesWithCutout];
+           uint32_t transfer_invocation_rectangle_count = it_merged->transfer.GetRectangles(
+               dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+-              transfer_invocation_rectangles, resolve_clear_rectangle);
+-          assert_not_zero(transfer_invocation_rectangle_count);
++              transfer_invocation_rectangles, invocation_cutout);
+           for (uint32_t j = 0; j < transfer_invocation_rectangle_count; ++j) {
+             const Transfer::Rectangle& transfer_rectangle = transfer_invocation_rectangles[j];
+             float transfer_rectangle_x0 = -1.0f + transfer_rectangle.x_pixels * pixels_to_ndc_x;

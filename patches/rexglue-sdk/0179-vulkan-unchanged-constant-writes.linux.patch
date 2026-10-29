@@ -1,0 +1,129 @@
+The Vulkan half of 0087: float, bool, loop and fetch constants rewritten with the values they already hold
+keep the uploaded constant buffers and texture bindings (gpu_skip_unchanged_constant_writes, on by
+default).
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index aa33abf..7b6798b 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -69,10 +69,27 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(gpu_skip_unchanged_constant_writes, true, "GPU",
++                    "Keep the uploaded constant buffers and texture bindings when the game rewrites "
++                    "float, bool, loop or fetch constants with the values they have")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
+ 
++// Returns whether any stored value changed; branch-free so it vectorizes like memory::copy_and_swap.
++bool StoreSwappedRegisters(uint32_t* __restrict dest, const uint32_t* __restrict src,
++                           uint32_t count) {
++  uint32_t difference = 0;
++  for (uint32_t i = 0; i < count; ++i) {
++    uint32_t value = rex::byte_swap(src[i]);
++    difference |= dest[i] ^ value;
++    dest[i] = value;
++  }
++  return difference != 0;
++}
++
+ // glslang default built-in resource limits.
+ constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
+     /* .maxLights = */ 32,
+@@ -2091,10 +2108,13 @@ void VulkanCommandProcessor::ShutdownContext() {
+ }
+ 
+ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
++  // A constant rewritten with its current value leaves everything derived from it valid.
++  bool unchanged = index < RegisterFile::kRegisterCount && register_file_->values[index] == value &&
++                   REXCVAR_GET(gpu_skip_unchanged_constant_writes);
+   CommandProcessor::WriteRegister(index, value);
+ 
+   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+-    if (frame_open_) {
++    if (frame_open_ && !unchanged) {
+       uint32_t float_constant_index = (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+       if (float_constant_index >= 256) {
+         float_constant_index -= 256;
+@@ -2113,15 +2133,19 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+     }
+   } else if (index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
+              index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
++    if (!unchanged) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
++    }
+   } else if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+              index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
+-    if (texture_cache_) {
+-      texture_cache_->TextureFetchConstantWritten((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) /
+-                                                  6);
++    if (!unchanged) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
++      if (texture_cache_) {
++        texture_cache_->TextureFetchConstantWritten(
++            (index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6);
++      }
+     }
+   }
+ }
+@@ -2159,9 +2183,15 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
+     return (usage_map[last_word] & last_mask) != 0;
+   };
+ 
++  // A range rewritten with its current values leaves everything derived from it valid.
++  bool skip_unchanged = REXCVAR_GET(gpu_skip_unchanged_constant_writes);
++
+   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
++    if (!StoreSwappedRegisters(register_file_->values + start_index, base, num_registers) &&
++        skip_unchanged) {
++      return;
++    }
+     if (frame_open_) {
+       uint32_t first_float_constant = (start_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+       uint32_t last_float_constant = (end_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+@@ -2189,21 +2219,25 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
+ 
+   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
+-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
++    if (StoreSwappedRegisters(register_file_->values + start_index, base, num_registers) ||
++        !skip_unchanged) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
++    }
+     return;
+   }
+ 
+   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
+     uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+     uint32_t last_fetch_dword = end_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+-    if (texture_cache_) {
+-      texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
++    if (StoreSwappedRegisters(register_file_->values + start_index, base, num_registers) ||
++        !skip_unchanged) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
++      if (texture_cache_) {
++        texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
++      }
+     }
+     return;
+   }

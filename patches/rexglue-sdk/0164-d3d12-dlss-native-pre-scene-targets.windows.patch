@@ -1,0 +1,317 @@
+With DLSS Performance or Ultra Performance, the pre-scene targets of 0162 that the scene's own draws sample (a texture
+resolved from them bound by scene draws in three frames) are drawn at the game's own scale, 1x, instead of the scene's:
+the smallest they can be without going below the original. The others stay at the scene's scale, and one drawn into
+or sampled after the scene stays at the full one for the session, as before. Their resolves stretch them back to the
+full size the same way, and their depth bias keeps the game's own slope scale (the command processor takes it from
+the draw's adjustment). d3d12_dlss_pre_scene_native (on) turns it off. Builds on 0163.
+
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index bf47950..98744e5 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -380,7 +380,8 @@ class D3D12CommandProcessor : public CommandProcessor {
+                                   const draw_util::ViewportInfo& viewport_info,
+                                   uint32_t used_texture_mask,
+                                   reg::RB_DEPTHCONTROL normalized_depth_control,
+-                                  uint32_t normalized_color_mask);
++                                  uint32_t normalized_color_mask,
++                                  float depth_bias_resolution_scale = 0.0f);
+   bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
+                       ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
+   bool IssueCopy_ReadbackResolvePath(ID3D12Resource* copy_source);
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index 83ecee9..a2dd44a 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -145,6 +145,10 @@ class PreSceneTargets {
+     bool reduced = false;
+     // Drawn into or sampled after the scene once: stays at the output scale.
+     bool kept = false;
++    bool sampled_by_scene = false;
++    uint32_t frames_sampled_by_scene = 0;
++    // Reduced, and sampled by the scene's draws in kFramesToReduce frames: only an input of the scene.
++    bool native = false;
+   };
+ 
+   static uint32_t Key(uint32_t surface_pitch, uint32_t msaa_samples_log2) {
+@@ -165,25 +169,48 @@ class PreSceneTargets {
+       surface->sampled_after = true;
+     }
+   }
+-  // Only frames that drew the scene tell what comes before it. Returns whether a surface changed.
+-  bool EndFrame(bool scene_drawn, uint32_t scene_key) {
++  // A scene draw sampled a texture resolved from the surface.
++  void NoteSampledByScene(uint32_t key) {
++    if (Surface* surface = Find(key, false)) {
++      surface->sampled_by_scene = true;
++    }
++  }
++  // Only frames that drew the scene tell what comes before it. native_allowed lets reduced surfaces that only the
++  // scene samples go to the native scale. Returns whether a surface changed.
++  bool EndFrame(bool scene_drawn, uint32_t scene_key, bool native_allowed = false) {
+     bool changed = false;
++    awaiting_scene_sampling_ = false;
+     for (Surface& surface : surfaces_) {
+       if (scene_drawn) {
+-        const bool was_reduced = surface.reduced;
++        const bool was_reduced = surface.reduced, was_native = surface.native;
+         if (surface.key == scene_key || Pitch(surface.key) == 0 || surface.drawn_after || surface.sampled_after) {
+           changed |= !surface.kept;
+           surface.kept = true;
+-          surface.reduced = false;
++          surface.reduced = surface.native = false;
+         } else if (surface.drawn_before && !surface.kept && ++surface.frames_before >= kFramesToReduce) {
+           surface.reduced = true;
+         }
+-        changed |= surface.reduced != was_reduced;
++        if (surface.reduced && surface.sampled_by_scene) {
++          ++surface.frames_sampled_by_scene;
++        }
++        surface.native |= native_allowed && surface.reduced && surface.frames_sampled_by_scene >= kFramesToReduce;
++        changed |= surface.reduced != was_reduced || surface.native != was_native;
+       }
+-      surface.drawn_before = surface.drawn_after = surface.sampled_after = false;
++      awaiting_scene_sampling_ |= native_allowed && surface.reduced && !surface.native;
++      surface.drawn_before = surface.drawn_after = surface.sampled_after = surface.sampled_by_scene = false;
+     }
+     return changed;
+   }
++  bool IsNative(uint32_t key) const {
++    for (const Surface& surface : surfaces_) {
++      if (surface.key == key) {
++        return surface.native;
++      }
++    }
++    return false;
++  }
++  // Whether a reduced surface may still go native, so scene draws' textures are worth checking.
++  bool AwaitsSceneSampling() const { return awaiting_scene_sampling_; }
+   bool IsReduced(uint32_t key) const {
+     for (const Surface& surface : surfaces_) {
+       if (surface.key == key) {
+@@ -210,6 +237,7 @@ class PreSceneTargets {
+   }
+ 
+   std::vector<Surface> surfaces_;
++  bool awaiting_scene_sampling_ = false;
+ };
+ 
+ // Render pixels of a resolve: where scaled draws put it in the EDRAM, and where it goes in the composed scene.
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index 9a2c584..a49caaa 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -55,6 +55,8 @@ class SceneUpscaler {
+     // In render pixels: added to where the draw lands.
+     float jitter_x = 0.0f;
+     float jitter_y = 0.0f;
++    // The resolution scale the depth bias's slope uses; 0 for the draw resolution scale.
++    float depth_bias_resolution_scale = 0.0f;
+   };
+   // Before a draw's state is set: finishes a resolved scene first when the draw is not part of it.
+   DrawAdjustment BeginDraw(const RegisterFile& regs, xenos::EdramMode edram_mode, const Shader& vertex_shader,
+@@ -111,9 +113,12 @@ class SceneUpscaler {
+   void NoteOtherDraw(const RegisterFile& regs, const Shader& vertex_shader, const Shader* pixel_shader,
+                      DrawAdjustment& adjustment);
+   void NoteSampledAfterScene(const RegisterFile& regs, const Shader& shader);
++  void NoteSampledByScene(const RegisterFile& regs, const Shader& shader);
++  uint32_t PreSceneScaleX(uint32_t key) const;
++  uint32_t PreSceneScaleY(uint32_t key) const;
+   void NoteResolveDest(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info, uint32_t key,
+                        bool other);
+-  ID3D12Resource* StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info);
++  ID3D12Resource* StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info, uint32_t key);
+   void LogPreSceneTargets() const;
+   void NoteDirectTransform(const RegisterFile& regs, const Shader& vertex_shader, uint32_t index_base,
+                            uint32_t index_count);
+@@ -186,6 +191,8 @@ class SceneUpscaler {
+   uint32_t pre_scene_scale_x_ = 1;
+   uint32_t pre_scene_scale_y_ = 1;
+   bool pre_scene_frame_ = false;
++  // Performance modes draw the surfaces only the scene samples at the game's own scale.
++  bool pre_scene_native_ = false;
+   scene::PreSceneTargets pre_scene_targets_;
+   std::vector<OtherResolve> other_resolves_;
+   size_t other_resolves_next_ = 0;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index b5b6e8d..f9c7bec 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -3222,7 +3222,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+                              primitive_processing_result.line_loop_closing_index,
+                              primitive_processing_result.host_shader_index_endian,
+                              constants_viewport_info, used_texture_mask, normalized_depth_control,
+-                             normalized_color_mask);
++                             normalized_color_mask, scene_adjustment.depth_bias_resolution_scale);
+ 
+   // Update constant buffers, descriptors and root parameters.
+   if (!UpdateBindings(vertex_shader, pixel_shader, root_signature, memexport_used)) {
+@@ -4647,7 +4647,7 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
+     bool shared_memory_is_uav, bool primitive_polygonal, uint32_t line_loop_closing_index,
+     xenos::Endian index_endian, const draw_util::ViewportInfo& viewport_info,
+     uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
+-    uint32_t normalized_color_mask) {
++    uint32_t normalized_color_mask, float depth_bias_resolution_scale) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -5005,8 +5005,10 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
+     // reverted (slope only along the scaled axis), thus max. More bias is
+     // better than less bias, because less bias means Z fighting with the
+     // background is more likely.
+-    float poly_offset_scale_factor = xenos::kPolygonOffsetScaleSubpixelUnit *
+-                                     std::max(draw_resolution_scale_x, draw_resolution_scale_y);
++    float poly_offset_scale_factor =
++        xenos::kPolygonOffsetScaleSubpixelUnit *
++        (depth_bias_resolution_scale > 0.0f ? depth_bias_resolution_scale
++                                            : float(std::max(draw_resolution_scale_x, draw_resolution_scale_y)));
+     poly_offset_front_scale *= poly_offset_scale_factor;
+     poly_offset_back_scale *= poly_offset_scale_factor;
+     dirty |= system_constants_.edram_poly_offset_front_scale != poly_offset_front_scale;
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index 08c63fc..1e2fed2 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -37,6 +37,10 @@ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_scale, true, "GPU/D3D12",
+                     "With DLSS, draw the targets drawn only before the 3D scene, such as shadow maps, at the scene's "
+                     "resolution scale instead of the full one")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_native, true, "GPU/D3D12",
++                    "With DLSS Performance or Ultra Performance, draw the targets drawn before the 3D scene that only "
++                    "the scene samples at the game's own resolution")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::d3d12 {
+ 
+@@ -308,6 +312,10 @@ bool SceneUpscaler::EnsureRuntime() {
+       pre_scene_scale ? scene::PreSceneScale(render_width_, guest_width_, resolution_scale_x_) : resolution_scale_x_;
+   pre_scene_scale_y_ =
+       pre_scene_scale ? scene::PreSceneScale(render_height_, guest_height_, resolution_scale_y_) : resolution_scale_y_;
++  pre_scene_native_ = REXCVAR_GET(d3d12_dlss_pre_scene_native) &&
++                      (quality_ == REX_DLSS_QUALITY_PERFORMANCE || quality_ == REX_DLSS_QUALITY_ULTRA_PERFORMANCE) &&
++                      (pre_scene_scale_x_ > 1 || pre_scene_scale_y_ > 1) &&
++                      (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
+   if (!EnsureResources()) {
+     DisableForSession("its textures can't be created");
+     return false;
+@@ -327,6 +335,9 @@ bool SceneUpscaler::EnsureRuntime() {
+     pre_scene_text += pre_scene_scale ? " (no smaller whole scale keeps the scene's detail)"
+                                       : " (d3d12_dlss_pre_scene_scale off)";
+   }
++  if (pre_scene_native_) {
++    pre_scene_text += ", 1x for those only the scene samples";
++  }
+   REXGPU_INFO("DLSS: scale domains | output, HUD and menus {}x{} ({}) | scene {}x{} ({}) | targets drawn before the "
+               "scene {}",
+               output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_), render_width_,
+@@ -473,6 +484,12 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+   const std::array<float, 2> jitter = JitterForFrame();
+   adjustment.jitter_x = jitter[0];
+   adjustment.jitter_y = jitter[1];
++  if (pre_scene_targets_.AwaitsSceneSampling() && !other_resolves_.empty()) {
++    NoteSampledByScene(regs, vertex_shader);
++    if (pixel_shader) {
++      NoteSampledByScene(regs, *pixel_shader);
++    }
++  }
+   return adjustment;
+ }
+ 
+@@ -488,8 +505,31 @@ void SceneUpscaler::NoteOtherDraw(const RegisterFile& regs, const Shader& vertex
+     }
+   }
+   if (pre_scene_frame_ && pre_scene_targets_.IsReduced(key)) {
+-    adjustment.scale_x = float(pre_scene_scale_x_) / float(resolution_scale_x_);
+-    adjustment.scale_y = float(pre_scene_scale_y_) / float(resolution_scale_y_);
++    adjustment.scale_x = float(PreSceneScaleX(key)) / float(resolution_scale_x_);
++    adjustment.scale_y = float(PreSceneScaleY(key)) / float(resolution_scale_y_);
++    // The game's own depth bias for a target drawn at its own resolution.
++    if (pre_scene_targets_.IsNative(key)) {
++      adjustment.depth_bias_resolution_scale = 1.0f;
++    }
++  }
++}
++
++uint32_t SceneUpscaler::PreSceneScaleX(uint32_t key) const {
++  return pre_scene_native_ && pre_scene_targets_.IsNative(key) ? 1 : pre_scene_scale_x_;
++}
++
++uint32_t SceneUpscaler::PreSceneScaleY(uint32_t key) const {
++  return pre_scene_native_ && pre_scene_targets_.IsNative(key) ? 1 : pre_scene_scale_y_;
++}
++
++void SceneUpscaler::NoteSampledByScene(const RegisterFile& regs, const Shader& shader) {
++  for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
++    const uint32_t address = (regs.GetTextureFetch(binding.fetch_constant).base_address << 12) & kPhysicalAddressMask;
++    for (const OtherResolve& resolve : other_resolves_) {
++      if (address >= resolve.address_begin && address < resolve.address_end) {
++        pre_scene_targets_.NoteSampledByScene(resolve.key);
++      }
++    }
+   }
+ }
+ 
+@@ -532,7 +572,7 @@ void SceneUpscaler::NoteResolveDest(const RegisterFile& regs, const draw_util::R
+   }
+ }
+ 
+-ID3D12Resource* SceneUpscaler::StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info) {
++ID3D12Resource* SceneUpscaler::StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info, uint32_t key) {
+   const bool depth = resolve_info.IsCopyingDepth();
+   const draw_util::ResolveEdramInfo& edram_info = depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+   const bool is_64bpp = !depth && edram_info.format_is_64bpp;
+@@ -554,8 +594,8 @@ ID3D12Resource* SceneUpscaler::StretchPreSceneResolve(const draw_util::ResolveIn
+   constants.sample_count_log2_y = log2_y;
+   std::copy(std::begin(layout.rect_origin), std::end(layout.rect_origin), constants.rect_origin);
+   std::copy(std::begin(layout.rect_size), std::end(layout.rect_size), constants.rect_size);
+-  constants.draw_scale[0] = pre_scene_scale_x_;
+-  constants.draw_scale[1] = pre_scene_scale_y_;
++  constants.draw_scale[0] = PreSceneScaleX(key);
++  constants.draw_scale[1] = PreSceneScaleY(key);
+   constants.output_scale[0] = resolution_scale_x_;
+   constants.output_scale[1] = resolution_scale_y_;
+   render_target_cache_.PrepareEdramBufferForComputeRead();
+@@ -568,18 +608,20 @@ ID3D12Resource* SceneUpscaler::StretchPreSceneResolve(const draw_util::ResolveIn
+ }
+ 
+ void SceneUpscaler::LogPreSceneTargets() const {
+-  std::string reduced, kept;
++  std::string native, reduced, kept;
+   for (const scene::PreSceneTargets::Surface& surface : pre_scene_targets_.surfaces()) {
+     if (surface.key == scene_key_ || !scene::PreSceneTargets::Pitch(surface.key) ||
+         (!surface.reduced && !surface.kept)) {
+       continue;
+     }
+-    std::string& list = surface.reduced ? reduced : kept;
++    std::string& list = pre_scene_native_ && surface.native ? native : surface.reduced ? reduced : kept;
+     list += (list.empty() ? "" : ", ") + SurfaceText(surface.key);
+   }
+-  REXGPU_INFO("DLSS: targets drawn before the scene at {}: {} | kept at {} (drawn into or sampled after the scene): {}",
+-              ScaleText(pre_scene_scale_x_, pre_scene_scale_y_), reduced.empty() ? "none" : reduced,
+-              ScaleText(resolution_scale_x_, resolution_scale_y_), kept.empty() ? "none" : kept);
++  REXGPU_INFO("DLSS: targets drawn before the scene at 1x (sampled only by the scene): {} | at {}: {} | kept at {} "
++              "(drawn into or sampled after the scene): {}",
++              native.empty() ? "none" : native, ScaleText(pre_scene_scale_x_, pre_scene_scale_y_),
++              reduced.empty() ? "none" : reduced, ScaleText(resolution_scale_x_, resolution_scale_y_),
++              kept.empty() ? "none" : kept);
+ }
+ 
+ void SceneUpscaler::NoteDirectTransform(const RegisterFile& regs, const Shader& vertex_shader, uint32_t index_base,
+@@ -692,7 +734,7 @@ ID3D12Resource* SceneUpscaler::BeforeResolve(const RegisterFile& regs, const dra
+   const uint32_t key = scene::PreSceneTargets::Key(surface_info.surface_pitch, uint32_t(surface_info.msaa_samples));
+   if (pre_scene_frame_ && pre_scene_targets_.IsReduced(key)) {
+     NoteResolveDest(regs, resolve_info, key, true);
+-    return StretchPreSceneResolve(resolve_info);
++    return StretchPreSceneResolve(resolve_info, key);
+   }
+   const bool depth = resolve_info.IsCopyingDepth();
+   const draw_util::ResolveEdramInfo& edram_info = depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+@@ -1040,7 +1082,7 @@ void SceneUpscaler::BeforeSwap() {
+     }
+   }
+   candidate_draws_.clear();
+-  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_) && runtime_ready_) {
++  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_, pre_scene_native_) && runtime_ready_) {
+     LogPreSceneTargets();
+   }
+   pre_scene_frame_ =

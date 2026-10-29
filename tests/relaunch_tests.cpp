@@ -48,7 +48,7 @@ void TestWiring() {
 
   const std::string app = ReadFile(std::string(MUA_SRC_DIR) + "/marvel_ultimate_alliance_app.h");
   CHECK(!Has(app, "RelaunchSelf"));
-  CHECK(Has(app, "mua::RelaunchExecutable(executable, L\"--mua_skip_launcher=true\")"));
+  CHECK(Has(app, "mua::RelaunchExecutable(program, L\"--mua_skip_launcher=true\")"));
   CHECK(Has(app, "mua::HideNativeWindow(window()->GetNativeWindowHandle())"));
   CHECK(Has(app, "std::_Exit(0);"));  // the launcher leaves once the game's program is started
 }

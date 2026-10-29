@@ -2,21 +2,26 @@
 
 #include <charconv>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+struct IDXGIAdapter1;
+
 namespace mua {
 
-// A DXGI adapter that can create a Direct3D 12 device. `index` is the one ReXGlue's d3d12_adapter takes.
+// A graphics card the runtime can use: a DXGI adapter that can create a Direct3D 12 device, or a Vulkan device.
+// `index` is the one ReXGlue's d3d12_adapter or vulkan_device takes.
 struct GraphicsAdapter {
   int index;
   std::string name;
 };
 
-// Windows: the hardware adapters in the order ReXGlue counts them for d3d12_adapter. Empty elsewhere.
+// The hardware graphics cards: on Windows in the order ReXGlue counts them for d3d12_adapter, on Linux in the order its
+// Vulkan provider prefers them.
 std::vector<GraphicsAdapter> ListGraphicsAdapters();
 
 struct GraphicsAdapterDetails {
@@ -27,13 +32,18 @@ struct GraphicsAdapterDetails {
   bool known = false;
 };
 
-// Windows: the adapter ReXGlue's d3d12_adapter selection will use for `configured_index` (-1 automatic, -2 WARP).
-// Mirrors the runtime's enumeration, so the effective GPU is the one actually picked.
+// The graphics card the runtime will use for `configured_index` (-1 automatic; -2 WARP on Windows). Mirrors the
+// runtime's enumeration, so the effective GPU is the one actually picked.
 GraphicsAdapterDetails EffectiveGraphicsAdapter(int configured_index);
 
-// Windows: whether the adapter ReXGlue selects for `configured_index` (-1 automatic, -2 WARP) supports rasterizer-ordered
-// views, which the EDRAM in pixel shaders path (render_target_path_d3d12 = "rov") needs. False elsewhere.
-bool RasterizerOrderedViewsSupported(int configured_index);
+// Windows: calls `use` with that adapter and returns true; false when there is none, and elsewhere.
+bool WithEffectiveGraphicsAdapter(int configured_index,
+                                  const std::function<void(IDXGIAdapter1*, const GraphicsAdapterDetails&)>& use);
+
+// Whether the graphics card ReXGlue selects for `configured_index` (-1 automatic, -2 WARP on Windows) can emulate the
+// EDRAM in pixel shaders: rasterizer-ordered views for render_target_path_d3d12 = "rov", fragment shader interlock for
+// render_target_path_vulkan = "fsi".
+bool PixelShaderEdramSupported(int configured_index);
 
 // The adapter index a mua_graphics_adapter value names; empty for anything that is not an index, such as the retired
 // "auto".

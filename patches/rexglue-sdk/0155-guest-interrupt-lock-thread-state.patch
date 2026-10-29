@@ -1,0 +1,137 @@
+The recompiler's guest interrupt lock keeps each thread's interrupt state in that thread. Every mfmsr took and released
+the global critical region only to read a process-wide count, and every mtmsrd r13 section changed that count with
+two atomic read-modify-writes. mfmsr now reads the calling thread's own depth without a lock and returns the same
+value (0x8000 outside a section, 0 inside), while mtmsrd r13 still enters the global critical region and the next
+mtmsrd still leaves it, so the exclusion against other guest threads and host code holding the region is unchanged.
+The generated code calls rexruntime for all three, so every module is generated and compiled again.
+
+diff --git a/include/rex/thread/mutex.h b/include/rex/thread/mutex.h
+--- a/include/rex/thread/mutex.h
++++ b/include/rex/thread/mutex.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <mutex>
+ 
+ namespace rex::thread {
+@@ -82,4 +83,10 @@ class global_critical_region {
+   }
+ };
+ 
++// Recompiled code disables guest interrupts (mtmsrd r13) by entering the global critical region and enables them by
++// leaving it. Only the calling thread changes its own interrupt state, so reading it (mfmsr) takes no lock.
++uint64_t GuestInterruptMsr();
++void EnterGuestInterruptLock();
++void LeaveGuestInterruptLock();
++
+ }  // namespace rex::thread
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -532,26 +532,6 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+ // Interrupt Locks
+ //=============================================================================
+ 
+-inline std::atomic<i32>& ppc_global_lock_count_() {
+-  static std::atomic<i32> count{0};
+-  return count;
+-}
+-
+-#define REX_CHECK_GLOBAL_LOCK()                                        \
+-  ([&]() -> u64 {                                                      \
+-    auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
+-    return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
+-  }())
+-
+-#define REX_ENTER_GLOBAL_LOCK()                          \
+-  do {                                                   \
+-    rex::thread::global_critical_region::mutex().lock(); \
+-    ppc_global_lock_count_().fetch_add(1);               \
+-  } while (0)
+-
+-#define REX_LEAVE_GLOBAL_LOCK()                                                           \
+-  do {                                                                                    \
+-    auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
+-    assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+-    rex::thread::global_critical_region::mutex().unlock();                                \
+-  } while (0)
++#define REX_CHECK_GLOBAL_LOCK() rex::thread::GuestInterruptMsr()
++#define REX_ENTER_GLOBAL_LOCK() rex::thread::EnterGuestInterruptLock()
++#define REX_LEAVE_GLOBAL_LOCK() rex::thread::LeaveGuestInterruptLock()
+diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
+--- a/resources/templates/test/ppc_config_h.inja
++++ b/resources/templates/test/ppc_config_h.inja
+@@ -167,27 +167,7 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+ // Interrupt Locks
+ //=============================================================================
+ 
+-inline std::atomic<i32>& ppc_global_lock_count_() {
+-  static std::atomic<i32> count{0};
+-  return count;
+-}
+-
+-#define REX_CHECK_GLOBAL_LOCK()                                        \
+-  ([&]() -> u64 {                                                      \
+-    auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
+-    return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
+-  }())
+-
+-#define REX_ENTER_GLOBAL_LOCK()                          \
+-  do {                                                   \
+-    rex::thread::global_critical_region::mutex().lock(); \
+-    ppc_global_lock_count_().fetch_add(1);               \
+-  } while (0)
+-
+-#define REX_LEAVE_GLOBAL_LOCK()                                                           \
+-  do {                                                                                    \
+-    auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
+-    assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+-    rex::thread::global_critical_region::mutex().unlock();                                \
+-  } while (0)
++#define REX_CHECK_GLOBAL_LOCK() rex::thread::GuestInterruptMsr()
++#define REX_ENTER_GLOBAL_LOCK() rex::thread::EnterGuestInterruptLock()
++#define REX_LEAVE_GLOBAL_LOCK() rex::thread::LeaveGuestInterruptLock()
+ 
+diff --git a/src/core/mutex.cpp b/src/core/mutex.cpp
+--- a/src/core/mutex.cpp
++++ b/src/core/mutex.cpp
+@@ -9,13 +9,37 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/assert.h>
+ #include <rex/thread/mutex.h>
+ 
+ namespace rex::thread {
+ 
++namespace {
++
++constexpr uint64_t kMsrExternalInterruptEnable = 0x8000;
++
++thread_local int32_t guest_interrupt_lock_depth = 0;
++
++}  // namespace
++
+ std::recursive_mutex& global_critical_region::mutex() {
+   static std::recursive_mutex global_mutex;
+   return global_mutex;
+ }
+ 
++uint64_t GuestInterruptMsr() {
++  return guest_interrupt_lock_depth ? 0 : kMsrExternalInterruptEnable;
++}
++
++void EnterGuestInterruptLock() {
++  global_critical_region::mutex().lock();
++  ++guest_interrupt_lock_depth;
++}
++
++void LeaveGuestInterruptLock() {
++  assert_true(guest_interrupt_lock_depth > 0);
++  --guest_interrupt_lock_depth;
++  global_critical_region::mutex().unlock();
++}
++
+ }  // namespace rex::thread

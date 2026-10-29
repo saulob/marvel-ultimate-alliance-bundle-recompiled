@@ -1,0 +1,1208 @@
+Marvel Ultimate Alliance 2's scene profile for the scene upscaler of 0161 to 0167. MUA2 draws its 3D scene into one
+surface that fits the EDRAM at 2x MSAA: color base 0 (k_8_8_8_8) and depth base 1034 (D24FS8, depth 1 near), pitch
+1040, 1040x624 guest pixels; its 1280x720 composite is a pitch 880 surface that also starts at color base 0. The mua2
+profile pins that surface (PinnedSceneSurface): only draws and resolves at its pitch are the scene's; the scene's own
+size, not the video mode's, sizes the upscaler's output (1040x624 times the resolution scale), which the game's
+composite then brings to the framebuffer; and the pass's last resolve must be the whole surface, which gets the output,
+while the full-scene copy before it, which a 3D draw of the scene reads, keeps the scene's input stretched. Its sky is
+drawn after the scene's depth resolve, into the depth range below the scene's, past the scene's infinite far plane, so
+depth is taken at each resolve, the scene's viewport is the one with the widest depth range, and scene_motion clamps
+depths to a range that takes the sky's as infinitely far (unbounded for other profiles, which leaves their motion
+vectors as they were; the bytecode is fxc's, through d3dcompiler_47's D3DCompile with /O3's flag). Targets drawn before
+the scene, such as shadow maps, stay at the full scale, and the upscaler turns off when the scene's draws hold no camera
+projection for 600 frames. mua1 and mua1-gold leave all of it off, so both games are unchanged.
+
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index a35a6bb..632a740 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cfloat>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
+@@ -290,7 +291,8 @@ inline StagingPlacement StagingPlacementFor(uint32_t screen_x, uint32_t screen_y
+ // Which planes of the scene surface a resolve copies into the DLSS input. Color: at each resolve after scene draws,
+ // before a resolve clears it, so the last one wins. Depth: once between depth clears, at the first resolve after draws
+ // wrote it (or after any scene draw in a frame that writes none): MUA1 resolves each tile twice, and the draws between
+-// cover the whole tile with depth at the clear value.
++// cover the whole tile with depth at the clear value. A renderer whose draws keep writing depth after its first
++// resolve takes depth at each resolve instead, so the last one wins as for color.
+ class ScenePlanes {
+  public:
+   static constexpr uint32_t kColor = 1;
+@@ -302,8 +304,9 @@ class ScenePlanes {
+     depth_written_in_frame_ |= writes_depth;
+   }
+   // Marks what it returns as taken.
+-  uint32_t Take(bool depth_resolve) {
+-    const bool depth = !depth_taken_ && (depth_written_ || !depth_written_in_frame_);
++  uint32_t Take(bool depth_resolve, bool depth_at_each_resolve = false) {
++    const bool depth =
++        (depth_at_each_resolve || !depth_taken_) && (depth_written_ || !depth_written_in_frame_);
+     depth_taken_ |= depth;
+     return (!depth_resolve && color_drawn_ ? kColor : 0) | (depth ? kDepth : 0);
+   }
+@@ -499,10 +502,12 @@ inline std::optional<Matrix> EstimateCameraReprojection(const std::vector<std::p
+ }
+ 
+ // scene_motion.cs.hlsl for one pixel: where its surface was in the previous frame minus where it is, in render pixels.
+-// viewport is the guest's x scale, x offset, y scale, y offset, z scale, z offset.
++// viewport is the guest's x scale, x offset, y scale, y offset, z scale, z offset; depth is clamped to depth_range.
+ inline std::array<float, 2> CameraMotion(const Matrix& clip_to_previous_clip, const std::array<float, 6>& viewport,
+                                          const std::array<float, 2>& render_scale, const std::array<float, 2>& jitter,
+-                                         uint32_t x, uint32_t y, float depth) {
++                                         uint32_t x, uint32_t y, float depth,
++                                         const std::array<float, 2>& depth_range = {-FLT_MAX, FLT_MAX}) {
++  depth = std::clamp(depth, depth_range[0], depth_range[1]);
+   const double render_x = x + 0.5 - jitter[0], render_y = y + 0.5 - jitter[1];
+   const double clip[4] = {(render_x / render_scale[0] - viewport[1]) / viewport[0],
+                           (render_y / render_scale[1] - viewport[3]) / viewport[2],
+@@ -573,6 +578,8 @@ struct CameraProjection {
+   double near_depth = 0.0;
+   double far_depth = 0.0;
+   double fov_y = 0.0;
++  // The depth buffer value at an infinite view depth.
++  double infinity_depth = 0.0;
+ };
+ 
+ // From an object-to-clip matrix whose clip w is the view depth and whose clip z mixes the w row with a constant, as a
+@@ -608,6 +615,7 @@ inline std::optional<CameraProjection> CameraProjectionFor(const Matrix& m, doub
+   const double y[3] = {m[4] - y_along_w * w[0], m[5] - y_along_w * w[1], m[6] - y_along_w * w[2]};
+   const double focal = std::sqrt((y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) / w_length_squared);
+   projection.fov_y = focal > 0.0 ? 2.0 * std::atan(1.0 / focal) : 0.0;
++  projection.infinity_depth = alpha;
+   if (!(projection.near_depth > 0.0) || !std::isfinite(projection.near_depth) ||
+       !(projection.far_depth > projection.near_depth) || !(projection.fov_y > 0.0 && projection.fov_y < 3.1)) {
+     return std::nullopt;
+@@ -615,6 +623,16 @@ inline std::optional<CameraProjection> CameraProjectionFor(const Matrix& m, doub
+   return projection;
+ }
+ 
++// The depths camera motion reads (CameraMotion's depth_range) for a profile with depth_partitions: those past the
++// scene's infinite far plane, such as its sky's, as infinitely far, so they move with the camera's turn only.
++inline std::array<float, 2> MotionDepthRange(const std::optional<CameraProjection>& camera, bool inverted) {
++  if (!camera) {
++    return {-FLT_MAX, FLT_MAX};
++  }
++  const float infinity = float(camera->infinity_depth);
++  return inverted ? std::array<float, 2>{infinity, FLT_MAX} : std::array<float, 2>{-FLT_MAX, infinity};
++}
++
+ inline bool NearlyEqual(const CameraProjection& a, const CameraProjection& b) {
+   const auto close = [](double x, double y) {
+     return x == y || std::abs(x - y) <= 1.0e-3 * std::max(std::abs(x), std::abs(y));
+@@ -639,11 +657,23 @@ inline std::optional<CameraProjection> ConsensusCameraProjection(const std::vect
+   return best == SIZE_MAX ? std::nullopt : std::optional<CameraProjection>(projections[best]);
+ }
+ 
+-// xenos::MsaaSamples and xenos::ColorRenderTargetFormat values.
++// xenos::MsaaSamples, xenos::ColorRenderTargetFormat and xenos::DepthRenderTargetFormat values.
+ inline constexpr uint32_t kMsaa2xLog2 = 1;
+ inline constexpr uint32_t kMsaa4xLog2 = 2;
+ inline constexpr uint32_t kColorFormat8888 = 0;
+ inline constexpr uint32_t kColorFormat8888Gamma = 1;
++inline constexpr uint32_t kDepthFormatD24FS8 = 1;
++
++// The one EDRAM surface a renderer draws its scene into, and the scene's size in guest pixels, which isn't the video
++// mode's.
++struct PinnedSceneSurface {
++  uint32_t color_base;
++  uint32_t depth_base;
++  uint32_t depth_format;
++  uint32_t pitch;
++  uint32_t width;
++  uint32_t height;
++};
+ 
+ // How a game's renderer draws its 3D scene: the scene is the multisampled color and depth surface with depth-tested
+ // draws that a frame draws into most, at least min_draws times, in one of color_formats.
+@@ -654,13 +684,46 @@ struct SceneProfile {
+   uint32_t min_draws;
+   // Its Direct3D also draws over the scene's memory at 4x MSAA with the same width in samples, between the scene's
+   // resolves: until the frame's scene is done, those draws are part of it.
+-  bool scene_memory_4x_draws;
++  bool scene_memory_4x_draws = false;
++  // Only this surface is the scene, other surfaces at its bases aren't, and the pass's last resolve, of the whole
++  // surface, gets the output.
++  std::optional<PinnedSceneSurface> pinned_surface = std::nullopt;
++  // Draws before the scene, such as shadow maps, at their smaller PreSceneScale.
++  bool reduce_pre_scene_targets = true;
++  // Its draws keep writing depth after the scene's first resolve (ScenePlanes).
++  bool depth_at_each_resolve = false;
++  // Some scene draws, such as its sky, use another part of the depth range, past the scene's infinite far plane: the
++  // scene's viewport is the one with the widest depth range, and camera motion takes those depths as infinitely far.
++  bool depth_partitions = false;
++  // The upscaler turns off when kCameraMissingFrames scenes in a row have no camera projection.
++  bool camera_required = false;
+ };
+ 
++inline constexpr uint32_t kCameraMissingFrames = 600;
++
+ // The Gold Edition's later Direct3D draws full-surface quads over the scene's memory at 4x MSAA and half the pitch.
++// Marvel Ultimate Alliance 2 draws its scene into a 1040x624 surface that fits the EDRAM at 2x MSAA; its 1280x720
++// composite, also at color base 0, is a pitch 880 surface. Its sky is drawn after the scene's depth resolve, into the
++// depth range below the scene's.
+ inline constexpr std::array kSceneProfiles = {
+-    SceneProfile{"mua1", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20, false},
+-    SceneProfile{"mua1-gold", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20, true},
++    SceneProfile{.key = "mua1",
++                 .min_msaa_samples_log2 = kMsaa2xLog2,
++                 .color_formats = {kColorFormat8888, kColorFormat8888Gamma},
++                 .min_draws = 20},
++    SceneProfile{.key = "mua1-gold",
++                 .min_msaa_samples_log2 = kMsaa2xLog2,
++                 .color_formats = {kColorFormat8888, kColorFormat8888Gamma},
++                 .min_draws = 20,
++                 .scene_memory_4x_draws = true},
++    SceneProfile{.key = "mua2",
++                 .min_msaa_samples_log2 = kMsaa2xLog2,
++                 .color_formats = {kColorFormat8888, kColorFormat8888},
++                 .min_draws = 20,
++                 .pinned_surface = PinnedSceneSurface{0, 1034, kDepthFormatD24FS8, 1040, 1040, 624},
++                 .reduce_pre_scene_targets = false,
++                 .depth_at_each_resolve = true,
++                 .depth_partitions = true,
++                 .camera_required = true},
+ };
+ 
+ inline const SceneProfile* FindSceneProfile(std::string_view key) {
+@@ -678,6 +741,38 @@ inline bool IsSceneSurfaceCandidate(const SceneProfile& profile, uint32_t msaa_s
+              profile.color_formats.end();
+ }
+ 
++// Whether a draw or resolve on a surface of this pitch can be the profile's scene.
++inline bool IsScenePitch(const SceneProfile& profile, uint32_t pitch) {
++  return !profile.pinned_surface || profile.pinned_surface->pitch == pitch;
++}
++
++// Whether a candidate scene surface is the one the profile pins, if it pins one.
++inline bool IsPinnedSceneSurface(const SceneProfile& profile, uint32_t pitch, uint32_t color_base, uint32_t depth_base,
++                                 uint32_t depth_format) {
++  const std::optional<PinnedSceneSurface>& pinned = profile.pinned_surface;
++  return !pinned || (pinned->pitch == pitch && pinned->color_base == color_base &&
++                     pinned->depth_base == depth_base && pinned->depth_format == depth_format);
++}
++
++// The resolve of a pinned scene's pass that gets the output: the last, of the whole surface, with every other covered.
++inline std::optional<size_t> PinnedOutputResolve(const PinnedSceneSurface& pinned,
++                                                 const std::vector<ResolveRect>& rects) {
++  const std::vector<bool> covered = CoveredByLater(rects);
++  if (rects.empty() || std::count(covered.begin(), covered.end(), false) != 1) {
++    return std::nullopt;
++  }
++  const ResolveRect& last = rects.back();
++  if (last.screen_x || last.screen_y || last.width != pinned.width || last.height != pinned.height) {
++    return std::nullopt;
++  }
++  return rects.size() - 1;
++}
++
++// A scene draw's guest viewport z scale replacing the frame's (known_z_scale) for a profile with depth_partitions.
++inline bool IsWiderDepthRange(float z_scale, float known_z_scale) {
++  return std::abs(z_scale) > std::abs(known_z_scale);
++}
++
+ // A surface's width in samples (PreSceneTargets keys): a 4x MSAA pixel is two samples wide.
+ inline uint32_t PitchSamples(uint32_t key) {
+   return PreSceneTargets::Pitch(key) << uint32_t(PreSceneTargets::SamplesLog2(key) >= kMsaa4xLog2);
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index 4a6a0e7..c715f13 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -141,7 +141,9 @@ class SceneUpscaler {
+   void FinishScene();
+   void EvaluateDlss(bool reset, const std::array<float, 2>& jitter);
+   void EvaluateFsr3(bool reset, const std::array<float, 2>& jitter);
+-  void UpdateCameraProjection();
++  bool UpdateCameraProjection();
++  void NoteSceneViewport(const RegisterFile& regs, xenos::EdramMode edram_mode);
++  void LogUnpinnedScene();
+   void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STATES new_state);
+   void EncodeStaging(Encode encode, const SceneResolve* resolve);
+   bool CopyStagingTo(const SceneResolve& resolve);
+@@ -169,9 +171,12 @@ class SceneUpscaler {
+   DlssBridge bridge_;
+   Fsr3Upscaler::Quality fsr3_quality_ = Fsr3Upscaler::kNative;
+ 
+-  // Guest pixels of the scene, and host pixels of the upscaler's input and output.
++  // Guest pixels of the scene, and host pixels of the upscaler's input and output and of the final framebuffer, which
++  // the HUD and menus draw into.
+   uint32_t guest_width_ = 0;
+   uint32_t guest_height_ = 0;
++  uint32_t framebuffer_width_ = 0;
++  uint32_t framebuffer_height_ = 0;
+   uint32_t render_width_ = 0;
+   uint32_t render_height_ = 0;
+   uint32_t output_width_ = 0;
+@@ -219,6 +224,7 @@ class SceneUpscaler {
+   bool fsr3_depth_inverted_ = false;
+   std::optional<scene::CameraProjection> camera_projection_;
+   bool camera_projection_missing_logged_ = false;
++  uint32_t camera_missing_frames_ = 0;
+   std::chrono::steady_clock::time_point last_upscale_time_;
+ 
+   // Surfaces drawn before the scene: their scale, and whether this frame draws the reduced ones at it.
+@@ -235,6 +241,9 @@ class SceneUpscaler {
+   // Per frame.
+   std::optional<Surface> surface_;
+   std::unordered_map<uint64_t, uint32_t> candidate_draws_;
++  // Candidates other than a pinned scene surface, by color base, depth base, pitch and sample count.
++  std::unordered_map<uint64_t, uint32_t> unpinned_draws_;
++  bool unpinned_logged_ = false;
+   bool scene_drawn_ = false;
+   bool scene_captured_ = false;
+   bool scene_drawn_previous_frame_ = false;
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index db21451..6e136ea 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -56,7 +56,8 @@ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_native, true, "GPU/D3D12",
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_STRING(d3d12_scene_profile, "", "GPU/D3D12",
+                       "How the game's renderer draws its 3D scene, for DLSS and FSR 3.1: mua1 (Marvel Ultimate "
+-                      "Alliance), mua1-gold (its Gold Edition); empty leaves both off")
++                      "Alliance), mua1-gold (its Gold Edition), mua2 (Marvel Ultimate Alliance 2); empty leaves both "
++                      "off")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::d3d12 {
+@@ -73,6 +74,7 @@ namespace {
+ static_assert(scene::kMsaa2xLog2 == uint32_t(xenos::MsaaSamples::k2X));
+ static_assert(scene::kColorFormat8888 == uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8));
+ static_assert(scene::kColorFormat8888Gamma == uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA));
++static_assert(scene::kDepthFormatD24FS8 == uint32_t(xenos::DepthRenderTargetFormat::kD24FS8));
+ 
+ constexpr size_t kMaxTrackedMatrices = 2048;
+ constexpr size_t kMaxReprojectionSamples = 256;
+@@ -105,6 +107,7 @@ struct MotionConstants {
+   float render_scale[2];
+   float jitter[2];
+   uint32_t render_size[2];
++  float depth_range[2];
+ };
+ 
+ struct EncodeConstants {
+@@ -204,6 +207,23 @@ uint64_t Mix(uint64_t hash, uint64_t value) {
+   return hash;
+ }
+ 
++// Its x scale, x offset, y scale, y offset, z scale and z offset.
++std::array<float, 6> GuestViewport(const RegisterFile& regs) {
++  const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
++  return {
++      vte.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f,
++      vte.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f,
++      vte.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f,
++      vte.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f,
++      vte.vport_z_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE) : 1.0f,
++      vte.vport_z_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET) : 0.0f,
++  };
++}
++
++const char* DepthFormatName(xenos::DepthRenderTargetFormat format) {
++  return format == xenos::DepthRenderTargetFormat::kD24FS8 ? "D24FS8" : "D24S8";
++}
++
+ }  // namespace
+ 
+ SceneUpscaler::SceneUpscaler(D3D12CommandProcessor& command_processor, D3D12RenderTargetCache& render_target_cache,
+@@ -253,8 +273,12 @@ bool SceneUpscaler::Initialize(uint32_t draw_resolution_scale_x, uint32_t draw_r
+   }
+   resolution_scale_x_ = draw_resolution_scale_x;
+   resolution_scale_y_ = draw_resolution_scale_y;
+-  guest_width_ = VideoModeDimension("video_mode_width", 1280);
+-  guest_height_ = VideoModeDimension("video_mode_height", 720);
++  const uint32_t video_width = VideoModeDimension("video_mode_width", 1280);
++  const uint32_t video_height = VideoModeDimension("video_mode_height", 720);
++  framebuffer_width_ = video_width * resolution_scale_x_;
++  framebuffer_height_ = video_height * resolution_scale_y_;
++  guest_width_ = profile_->pinned_surface ? profile_->pinned_surface->width : video_width;
++  guest_height_ = profile_->pinned_surface ? profile_->pinned_surface->height : video_height;
+   output_width_ = guest_width_ * resolution_scale_x_;
+   output_height_ = guest_height_ * resolution_scale_y_;
+ 
+@@ -355,7 +379,7 @@ bool SceneUpscaler::EnsureRuntime() {
+   if (!(backend_ == Backend::kFsr3 ? StartFsr3() : StartDlss())) {
+     return false;
+   }
+-  const bool pre_scene_scale = REXCVAR_GET(d3d12_dlss_pre_scene_scale);
++  const bool pre_scene_scale = REXCVAR_GET(d3d12_dlss_pre_scene_scale) && profile_->reduce_pre_scene_targets;
+   pre_scene_scale_x_ =
+       pre_scene_scale ? scene::PreSceneScale(render_width_, guest_width_, resolution_scale_x_) : resolution_scale_x_;
+   pre_scene_scale_y_ =
+@@ -377,18 +401,35 @@ bool SceneUpscaler::EnsureRuntime() {
+   LogRuntime();
+   std::string pre_scene_text = ScaleText(pre_scene_scale_x_, pre_scene_scale_y_);
+   if (pre_scene_scale_x_ == resolution_scale_x_ && pre_scene_scale_y_ == resolution_scale_y_) {
+-    pre_scene_text += pre_scene_scale ? " (no smaller whole scale keeps the scene's detail)"
+-                                      : " (d3d12_dlss_pre_scene_scale off)";
++    pre_scene_text += pre_scene_scale                       ? " (no smaller whole scale keeps the scene's detail)"
++                      : !profile_->reduce_pre_scene_targets ? " (the scene profile keeps them)"
++                                                            : " (d3d12_dlss_pre_scene_scale off)";
+   }
+   if (pre_scene_native_) {
+     pre_scene_text += ", 1x for those only the scene samples";
+   }
+-  REXGPU_INFO("{}: scale domains | output, HUD and menus {}x{} ({}) | scene {}x{} ({}) | targets drawn before the "
+-              "scene {}",
+-              Tag(), output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_), render_width_,
+-              render_height_,
+-              ScaleText(double(render_width_) / double(guest_width_), double(render_height_) / double(guest_height_)),
+-              pre_scene_text);
++  const std::string scene_scale_text =
++      ScaleText(double(render_width_) / double(guest_width_), double(render_height_) / double(guest_height_));
++  const std::optional<scene::PinnedSceneSurface>& pinned = profile_->pinned_surface;
++  if (!pinned) {
++    REXGPU_INFO("{}: scale domains | output, HUD and menus {}x{} ({}) | scene {}x{} ({}) | targets drawn before the "
++                "scene {}",
++                Tag(), output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_),
++                render_width_, render_height_, scene_scale_text, pre_scene_text);
++    return true;
++  }
++  REXGPU_INFO("{}: scale domains | final framebuffer, HUD and menus {}x{} ({}) | scene output {}x{} ({}) | scene "
++              "input {}x{} ({}) | targets drawn before the scene {}",
++              Tag(), framebuffer_width_, framebuffer_height_, ScaleText(resolution_scale_x_, resolution_scale_y_),
++              output_width_, output_height_, ScaleText(resolution_scale_x_, resolution_scale_y_), render_width_,
++              render_height_, scene_scale_text, pre_scene_text);
++  REXGPU_INFO("{}: scene profile {} | scene {}x{} guest, its own domain beside the {}x{} framebuffer the game "
++              "composites it into | color EDRAM base {} k_8_8_8_8, depth base {} {}, pitch {}, {}x MSAA | the output "
++              "replaces the pass's last resolve, of the whole scene; earlier ones keep the scene's input stretched",
++              Tag(), profile_->key, guest_width_, guest_height_, framebuffer_width_ / resolution_scale_x_,
++              framebuffer_height_ / resolution_scale_y_, pinned->color_base, pinned->depth_base,
++              DepthFormatName(xenos::DepthRenderTargetFormat(pinned->depth_format)), pinned->pitch,
++              1u << profile_->min_msaa_samples_log2);
+   return true;
+ }
+ 
+@@ -535,7 +576,7 @@ bool SceneUpscaler::IsSceneDraw(const RegisterFile& regs, xenos::EdramMode edram
+     return false;
+   }
+   const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+-  if (surface_info.msaa_samples != surface_->msaa) {
++  if (surface_info.msaa_samples != surface_->msaa || !scene::IsScenePitch(*profile_, surface_info.surface_pitch)) {
+     return false;
+   }
+   if (edram_mode == xenos::EdramMode::kColorDepth && pixel_shader_writes_color) {
+@@ -611,10 +652,16 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+       if (scene::IsSceneSurfaceCandidate(*profile_, uint32_t(surface_info.msaa_samples),
+                                          uint32_t(color_info.color_format))) {
+         const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+-        const uint64_t key = uint64_t(color_info.color_base) | uint64_t(depth_info.depth_base) << 16 |
+-                             uint64_t(surface_info.msaa_samples) << 32 | uint64_t(color_info.color_format) << 40 |
+-                             uint64_t(depth_info.depth_format) << 48;
+-        ++candidate_draws_[key];
++        if (scene::IsPinnedSceneSurface(*profile_, surface_info.surface_pitch, color_info.color_base,
++                                        depth_info.depth_base, uint32_t(depth_info.depth_format))) {
++          const uint64_t key = uint64_t(color_info.color_base) | uint64_t(depth_info.depth_base) << 16 |
++                               uint64_t(surface_info.msaa_samples) << 32 | uint64_t(color_info.color_format) << 40 |
++                               uint64_t(depth_info.depth_format) << 48;
++          ++candidate_draws_[key];
++        } else if (!surface_ && !unpinned_logged_) {
++          ++unpinned_draws_[uint64_t(color_info.color_base) | uint64_t(depth_info.depth_base) << 16 |
++                            uint64_t(surface_info.surface_pitch) << 32 | uint64_t(surface_info.msaa_samples) << 48];
++        }
+       }
+     }
+     if (edram_mode == xenos::EdramMode::kColorDepth || edram_mode == xenos::EdramMode::kDepthOnly) {
+@@ -631,18 +678,7 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+       scene::PreSceneTargets::Key(scene_surface_info.surface_pitch, uint32_t(scene_surface_info.msaa_samples));
+   const auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
+   planes_.NoteSceneDraw(depth_control.z_enable && depth_control.z_write_enable);
+-  if (edram_mode == xenos::EdramMode::kColorDepth && !viewport_known_) {
+-    const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+-    guest_viewport_ = {
+-        vte.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f,
+-        vte.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f,
+-        vte.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f,
+-        vte.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f,
+-        vte.vport_z_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE) : 1.0f,
+-        vte.vport_z_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET) : 0.0f,
+-    };
+-    viewport_known_ = vte.vport_x_scale_ena && vte.vport_y_scale_ena;
+-  }
++  NoteSceneViewport(regs, edram_mode);
+   if (depth_control.z_enable) {
+     depth_inverted_ = depth_control.zfunc == xenos::CompareFunction::kGreater ||
+                       depth_control.zfunc == xenos::CompareFunction::kGreaterEqual;
+@@ -663,6 +699,23 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+   return adjustment;
+ }
+ 
++void SceneUpscaler::NoteSceneViewport(const RegisterFile& regs, xenos::EdramMode edram_mode) {
++  const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
++  const bool scaled = vte.vport_x_scale_ena && vte.vport_y_scale_ena;
++  if (profile_->depth_partitions) {
++    const std::array<float, 6> viewport = GuestViewport(regs);
++    if (scaled && (!viewport_known_ || scene::IsWiderDepthRange(viewport[4], guest_viewport_[4]))) {
++      guest_viewport_ = viewport;
++      viewport_known_ = true;
++    }
++    return;
++  }
++  if (edram_mode == xenos::EdramMode::kColorDepth && !viewport_known_) {
++    guest_viewport_ = GuestViewport(regs);
++    viewport_known_ = scaled;
++  }
++}
++
+ void SceneUpscaler::NoteOtherDraw(const RegisterFile& regs, const Shader& vertex_shader, const Shader* pixel_shader,
+                                   DrawAdjustment& adjustment) {
+   const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+@@ -910,7 +963,8 @@ ID3D12Resource* SceneUpscaler::BeforeResolve(const RegisterFile& regs, const dra
+   const draw_util::ResolveEdramInfo& edram_info = depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+   const uint32_t original_base = depth ? resolve_info.depth_original_base : resolve_info.color_original_base;
+   if (edram_info.msaa_samples != surface_->msaa ||
+-      original_base != (depth ? surface_->depth_base : surface_->color_base)) {
++      original_base != (depth ? surface_->depth_base : surface_->color_base) ||
++      !scene::IsScenePitch(*profile_, surface_info.surface_pitch)) {
+     NoteResolveDest(regs, resolve_info, key, true);
+     return nullptr;
+   }
+@@ -936,7 +990,7 @@ ID3D12Resource* SceneUpscaler::BeforeResolve(const RegisterFile& regs, const dra
+                                            double(render_height_) / double(guest_height_), render_width_,
+                                            render_height_);
+ 
+-  const uint32_t planes = planes_.Take(depth);
++  const uint32_t planes = planes_.Take(depth, profile_->depth_at_each_resolve);
+   if (planes && resolve.region.width && resolve.region.height) {
+     const uint32_t tile_width = kEdramTileWidth * resolution_scale_x_;
+     const uint32_t tile_height = kEdramTileHeight * resolution_scale_y_;
+@@ -1129,6 +1183,17 @@ void SceneUpscaler::FinishScene() {
+   motion.jitter[1] = jitter[1];
+   motion.render_size[0] = render_width_;
+   motion.render_size[1] = render_height_;
++  if (profile_->camera_required) {
++    camera_missing_frames_ = UpdateCameraProjection() ? 0 : camera_missing_frames_ + 1;
++    if (camera_missing_frames_ >= scene::kCameraMissingFrames && structure_mismatch_.empty()) {
++      structure_mismatch_ =
++          fmt::format("no camera projection in the scene's draws for {} frames", scene::kCameraMissingFrames);
++    }
++  }
++  const std::array<float, 2> depth_range =
++      profile_->depth_partitions ? scene::MotionDepthRange(camera_projection_, depth_inverted_)
++                                 : std::array<float, 2>{-FLT_MAX, FLT_MAX};
++  std::copy(depth_range.begin(), depth_range.end(), motion.depth_range);
+   Transition(depth_, depth_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   Transition(color_, color_state_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   Transition(motion_, motion_state_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+@@ -1139,8 +1204,22 @@ void SceneUpscaler::FinishScene() {
+   Transition(output_, output_state_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   command_processor_.SubmitBarriers();
+ 
++  bool pass_matches = true;
++  if (const std::optional<scene::PinnedSceneSurface>& pinned = profile_->pinned_surface) {
++    std::vector<scene::ResolveRect> rects;
++    for (const SceneResolve& resolve : color_resolves_) {
++      rects.push_back(resolve.rect);
++    }
++    pass_matches = scene::PinnedOutputResolve(*pinned, rects).has_value();
++    if (!pass_matches && structure_mismatch_.empty()) {
++      const scene::ResolveRect& last = rects.back();
++      structure_mismatch_ = fmt::format("the scene's last resolve covers {}x{} at {},{}, not its whole {}x{} surface",
++                                        last.width, last.height, last.screen_x, last.screen_y, pinned->width,
++                                        pinned->height);
++    }
++  }
+   // A second scene in a frame would be a second step of the upscaler's history.
+-  const bool upscaled = !UpscalerFailed() && !scenes_finished_this_frame_;
++  const bool upscaled = !UpscalerFailed() && !scenes_finished_this_frame_ && pass_matches;
+   if (scenes_finished_this_frame_) {
+     structure_mismatch_ = "the scene was resolved in more than one pass in a frame";
+   }
+@@ -1225,7 +1304,10 @@ void SceneUpscaler::EvaluateDlss(bool reset, const std::array<float, 2>& jitter)
+ }
+ 
+ void SceneUpscaler::EvaluateFsr3(bool reset, const std::array<float, 2>& jitter) {
+-  UpdateCameraProjection();
++  // FinishScene has already updated it for a profile that requires it.
++  if (!profile_->camera_required) {
++    UpdateCameraProjection();
++  }
+   // The depth convention is part of the context.
+   const bool recreate = fsr3_recreate_ || fsr3_depth_inverted_ != depth_inverted_;
+   if (recreate && fsr3_context_requested_) {
+@@ -1272,7 +1354,31 @@ void SceneUpscaler::EvaluateFsr3(bool reset, const std::array<float, 2>& jitter)
+   fsr3_depth_inverted_ = depth_inverted_;
+ }
+ 
+-void SceneUpscaler::UpdateCameraProjection() {
++// Once, before the pinned scene surface is found: a frame drew a 3D scene into another surface.
++void SceneUpscaler::LogUnpinnedScene() {
++  uint64_t best_key = 0;
++  uint32_t best_draws = 0;
++  for (const auto& [key, draws] : unpinned_draws_) {
++    if (draws > best_draws) {
++      best_key = key;
++      best_draws = draws;
++    }
++  }
++  unpinned_draws_.clear();
++  if (surface_ || unpinned_logged_ || best_draws < profile_->min_draws) {
++    return;
++  }
++  unpinned_logged_ = true;
++  const scene::PinnedSceneSurface& pinned = *profile_->pinned_surface;
++  REXGPU_INFO("{}: a 3D scene of {} draws in color base {}, depth base {}, pitch {}, {}x MSAA isn't scene profile {}'s "
++              "(color base {}, depth base {}, pitch {}) - it renders at full resolution without {}",
++              Tag(), best_draws, best_key & 0xFFFF, (best_key >> 16) & 0xFFFF, (best_key >> 32) & 0xFFFF,
++              1u << uint32_t(best_key >> 48), profile_->key, pinned.color_base, pinned.depth_base, pinned.pitch,
++              Tag());
++}
++
++// Whether this frame's draws hold the projection.
++bool SceneUpscaler::UpdateCameraProjection() {
+   std::vector<scene::CameraProjection> projections;
+   projections.reserve(std::min(matrices_.size(), kMaxProjectionSamples));
+   const double z_scale = guest_viewport_[4] != 0.0f ? guest_viewport_[4] : 1.0;
+@@ -1286,19 +1392,23 @@ void SceneUpscaler::UpdateCameraProjection() {
+   }
+   const std::optional<scene::CameraProjection> consensus = scene::ConsensusCameraProjection(projections);
+   if (consensus && !camera_projection_) {
+-    REXGPU_INFO("FSR 3.1: camera from the game's projection | near {:.4g} | far {} | vertical field of view {:.1f} "
+-                "degrees | depth {}",
+-                consensus->near_depth,
++    REXGPU_INFO("{}: camera from the game's projection | near {:.4g} | far {} | vertical field of view {:.1f} "
++                "degrees | depth {}{}",
++                Tag(), consensus->near_depth,
+                 std::isfinite(consensus->far_depth) ? fmt::format("{:.4g}", consensus->far_depth) : "infinite",
+-                consensus->fov_y * 57.29577951308232, depth_inverted_ ? "1 near, 0 far" : "0 near, 1 far");
++                consensus->fov_y * 57.29577951308232, depth_inverted_ ? "1 near, 0 far" : "0 near, 1 far",
++                profile_->depth_partitions
++                    ? fmt::format(" | motion takes depths past {:.4g} as infinitely far", consensus->infinity_depth)
++                    : std::string());
+   } else if (!consensus && !camera_projection_ && !camera_projection_missing_logged_) {
+     camera_projection_missing_logged_ = true;
+-    REXGPU_INFO("FSR 3.1: no camera projection in this frame's draws yet, near 0.1 and an infinite far plane until "
+-                "one is found");
++    REXGPU_INFO("{}: no camera projection in this frame's draws yet{}", Tag(),
++                backend_ == Backend::kFsr3 ? ", near 0.1 and an infinite far plane until one is found" : "");
+   }
+   if (consensus) {
+     camera_projection_ = consensus;
+   }
++  return consensus.has_value();
+ }
+ 
+ void SceneUpscaler::BeforeSwap() {
+@@ -1338,14 +1448,21 @@ void SceneUpscaler::BeforeSwap() {
+       surface.depth_format = xenos::DepthRenderTargetFormat((best_key >> 48) & 0xFF);
+       surface_ = surface;
+       reset_history_ = true;
++      const std::optional<scene::PinnedSceneSurface>& pinned = profile_->pinned_surface;
+       REXGPU_INFO("{}: scene surface found (scene profile {}): color base {} {}x MSAA, depth base {}, {} draws in a "
+-                  "frame",
++                  "frame{}",
+                   Tag(), profile_->key, surface.color_base, 1u << uint32_t(surface.msaa), surface.depth_base,
+-                  best_draws);
++                  best_draws,
++                  pinned ? fmt::format(" | color k_8_8_8_8, depth {}, pitch {}, {}x{} guest",
++                                       DepthFormatName(surface.depth_format), pinned->pitch, pinned->width,
++                                       pinned->height)
++                         : std::string());
+     }
+   }
+   candidate_draws_.clear();
+-  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_, pre_scene_native_) && runtime_ready_) {
++  LogUnpinnedScene();
++  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_, pre_scene_native_) && runtime_ready_ &&
++      profile_->reduce_pre_scene_targets) {
+     LogPreSceneTargets();
+   }
+   pre_scene_frame_ =
+diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/scene_motion_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/scene_motion_cs.h
+index 134da96..cd065fb 100644
+--- a/src/graphics/shaders/bytecode/d3d12_5_1/scene_motion_cs.h
++++ b/src/graphics/shaders/bytecode/d3d12_5_1/scene_motion_cs.h
+@@ -14,6 +14,7 @@
+ //   float2 render_scale;               // Offset:   88 Size:     8
+ //   float2 jitter;                     // Offset:   96 Size:     8
+ //   uint2 render_size;                 // Offset:  104 Size:     8
++//   float2 depth_range;                // Offset:  112 Size:     8
+ //
+ // }
+ //
+@@ -41,7 +42,7 @@
+ // no Output
+ cs_5_1
+ dcl_globalFlags refactoringAllowed
+-dcl_constantbuffer CB0[0:0][7], immediateIndexed, space=0
++dcl_constantbuffer CB0[0:0][8], immediateIndexed, space=0
+ dcl_resource_texture2d (float,float,float,float) T0[0:0], space=0
+ dcl_uav_typed_texture2d (float,float,float,float) U0[0:0], space=0
+ dcl_input vThreadID.xy
+@@ -61,6 +62,8 @@ div r1.xy, r0.zwzz, CB0[0][4].xzxx
+ mov r2.xy, vThreadID.xyxx
+ mov r2.zw, l(0,0,0,0)
+ ld r0.z, r2.xyzw, T0[0].yzxw
++max r0.z, r0.z, CB0[0][7].x
++min r0.z, r0.z, CB0[0][7].y
+ add r0.z, r0.z, -CB0[0][5].y
+ div r1.z, r0.z, CB0[0][5].x
+ mov r1.w, l(1.000000)
+@@ -77,26 +80,26 @@ else
+ endif
+ store_uav_typed U0[0].xyzw, vThreadID.xyyy, r0.xyxx
+ ret
+-// Approximately 30 instruction slots used
++// Approximately 32 instruction slots used
+ #endif
+ 
+ const BYTE scene_motion_cs[] =
+ {
+-     68,  88,  66,  67,  36, 207,
+-     66, 186,  66, 195,  58, 124,
+-    153, 175, 100,  25, 176, 243,
+-    169,  65,   1,   0,   0,   0,
+-    196,   7,   0,   0,   5,   0,
++     68,  88,  66,  67, 238,   0,
++    179, 186, 155, 189, 214,   8,
++    179,  61, 255, 134, 200, 169,
++    234,  54,   1,   0,   0,   0,
++     64,   8,   0,   0,   5,   0,
+       0,   0,  52,   0,   0,   0,
+-     84,   3,   0,   0, 100,   3,
+-      0,   0, 116,   3,   0,   0,
+-     40,   7,   0,   0,  82,  68,
+-     69,  70,  24,   3,   0,   0,
++    136,   3,   0,   0, 152,   3,
++      0,   0, 168,   3,   0,   0,
++    164,   7,   0,   0,  82,  68,
++     69,  70,  76,   3,   0,   0,
+       1,   0,   0,   0, 212,   0,
+       0,   0,   3,   0,   0,   0,
+      60,   0,   0,   0,   1,   5,
+      83,  67,   0, 133,   0,   0,
+-    240,   2,   0,   0,  19,  19,
++     36,   3,   0,   0,  19,  19,
+      68,  37,  60,   0,   0,   0,
+      24,   0,   0,   0,  40,   0,
+       0,   0,  40,   0,   0,   0,
+@@ -128,290 +131,310 @@ const BYTE scene_motion_cs[] =
+     114, 115,   0,  99, 111, 110,
+     115, 116,  97, 110, 116, 115,
+       0, 171, 201,   0,   0,   0,
+-      6,   0,   0,   0, 236,   0,
+-      0,   0, 112,   0,   0,   0,
++      7,   0,   0,   0, 236,   0,
++      0,   0, 128,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0, 220,   1,   0,   0,
++      0,   0,   4,   2,   0,   0,
+       0,   0,   0,   0,  64,   0,
+       0,   0,   2,   0,   0,   0,
+-    252,   1,   0,   0,   0,   0,
++     36,   2,   0,   0,   0,   0,
+       0,   0, 255, 255, 255, 255,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+-     32,   2,   0,   0,  64,   0,
++     72,   2,   0,   0,  64,   0,
+       0,   0,  16,   0,   0,   0,
+-      2,   0,   0,   0,  60,   2,
++      2,   0,   0,   0, 100,   2,
+       0,   0,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+       0,   0, 255, 255, 255, 255,
+-      0,   0,   0,   0,  96,   2,
++      0,   0,   0,   0, 136,   2,
+       0,   0,  80,   0,   0,   0,
+       8,   0,   0,   0,   2,   0,
+-      0,   0, 128,   2,   0,   0,
++      0,   0, 168,   2,   0,   0,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+-      0,   0, 164,   2,   0,   0,
++      0,   0, 204,   2,   0,   0,
+      88,   0,   0,   0,   8,   0,
+       0,   0,   2,   0,   0,   0,
+-    128,   2,   0,   0,   0,   0,
++    168,   2,   0,   0,   0,   0,
+       0,   0, 255, 255, 255, 255,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+-    177,   2,   0,   0,  96,   0,
++    217,   2,   0,   0,  96,   0,
+       0,   0,   8,   0,   0,   0,
+-      2,   0,   0,   0, 128,   2,
++      2,   0,   0,   0, 168,   2,
+       0,   0,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+       0,   0, 255, 255, 255, 255,
+-      0,   0,   0,   0, 184,   2,
++      0,   0,   0,   0, 224,   2,
+       0,   0, 104,   0,   0,   0,
+       8,   0,   0,   0,   2,   0,
+-      0,   0, 204,   2,   0,   0,
++      0,   0, 244,   2,   0,   0,
+       0,   0,   0,   0, 255, 255,
+     255, 255,   0,   0,   0,   0,
+     255, 255, 255, 255,   0,   0,
+-      0,   0,  99, 108, 105, 112,
+-     95, 116, 111,  95, 112, 114,
+-    101, 118, 105, 111, 117, 115,
+-     95,  99, 108, 105, 112,   0,
+-    102, 108, 111,  97, 116,  52,
+-      0, 171, 171, 171,   1,   0,
+-      3,   0,   1,   0,   4,   0,
+-      4,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
+-    242,   1,   0,   0, 118, 105,
+-    101, 119, 112, 111, 114, 116,
+-     95, 115,  99,  97, 108, 101,
+-     95, 111, 102, 102, 115, 101,
+-    116,  95, 120, 121,   0, 171,
++      0,   0,  24,   3,   0,   0,
++    112,   0,   0,   0,   8,   0,
++      0,   0,   2,   0,   0,   0,
++    168,   2,   0,   0,   0,   0,
++      0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0, 255, 255,
++    255, 255,   0,   0,   0,   0,
++     99, 108, 105, 112,  95, 116,
++    111,  95, 112, 114, 101, 118,
++    105, 111, 117, 115,  95,  99,
++    108, 105, 112,   0, 102, 108,
++    111,  97, 116,  52,   0, 171,
+     171, 171,   1,   0,   3,   0,
+-      1,   0,   4,   0,   0,   0,
++      1,   0,   4,   0,   4,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0, 242,   1,
++      0,   0,   0,   0,  26,   2,
+       0,   0, 118, 105, 101, 119,
+     112, 111, 114, 116,  95, 115,
+      99,  97, 108, 101,  95, 111,
+     102, 102, 115, 101, 116,  95,
+-    122,   0, 102, 108, 111,  97,
+-    116,  50,   0, 171,   1,   0,
+-      3,   0,   1,   0,   2,   0,
+-      0,   0,   0,   0,   0,   0,
++    120, 121,   0, 171, 171, 171,
++      1,   0,   3,   0,   1,   0,
++      4,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-    120,   2,   0,   0, 114, 101,
+-    110, 100, 101, 114,  95, 115,
+-     99,  97, 108, 101,   0, 106,
+-    105, 116, 116, 101, 114,   0,
+-    114, 101, 110, 100, 101, 114,
+-     95, 115, 105, 122, 101,   0,
+-    117, 105, 110, 116,  50,   0,
+-    171, 171,   1,   0,  19,   0,
++      0,   0,  26,   2,   0,   0,
++    118, 105, 101, 119, 112, 111,
++    114, 116,  95, 115,  99,  97,
++    108, 101,  95, 111, 102, 102,
++    115, 101, 116,  95, 122,   0,
++    102, 108, 111,  97, 116,  50,
++      0, 171,   1,   0,   3,   0,
+       1,   0,   2,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0, 196,   2,
+-      0,   0,  77, 105,  99, 114,
+-    111, 115, 111, 102, 116,  32,
+-     40,  82,  41,  32,  72,  76,
+-     83,  76,  32,  83, 104,  97,
+-    100, 101, 114,  32,  67, 111,
+-    109, 112, 105, 108, 101, 114,
+-     32,  49,  48,  46,  49,   0,
+-     73,  83,  71,  78,   8,   0,
++      0,   0,   0,   0, 160,   2,
++      0,   0, 114, 101, 110, 100,
++    101, 114,  95, 115,  99,  97,
++    108, 101,   0, 106, 105, 116,
++    116, 101, 114,   0, 114, 101,
++    110, 100, 101, 114,  95, 115,
++    105, 122, 101,   0, 117, 105,
++    110, 116,  50,   0, 171, 171,
++      1,   0,  19,   0,   1,   0,
++      2,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      8,   0,   0,   0,  79,  83,
++      0,   0,   0,   0,   0,   0,
++      0,   0, 236,   2,   0,   0,
++    100, 101, 112, 116, 104,  95,
++    114,  97, 110, 103, 101,   0,
++     77, 105,  99, 114, 111, 115,
++    111, 102, 116,  32,  40,  82,
++     41,  32,  72,  76,  83,  76,
++     32,  83, 104,  97, 100, 101,
++    114,  32,  67, 111, 109, 112,
++    105, 108, 101, 114,  32,  49,
++     48,  46,  49,   0,  73,  83,
+      71,  78,   8,   0,   0,   0,
+       0,   0,   0,   0,   8,   0,
+-      0,   0,  83,  72,  69,  88,
+-    172,   3,   0,   0,  81,   0,
+-      5,   0, 235,   0,   0,   0,
+-    106,   8,   0,   1,  89,   0,
+-      0,   7,  70, 142,  48,   0,
++      0,   0,  79,  83,  71,  78,
++      8,   0,   0,   0,   0,   0,
++      0,   0,   8,   0,   0,   0,
++     83,  72,  69,  88, 244,   3,
++      0,   0,  81,   0,   5,   0,
++    253,   0,   0,   0, 106,   8,
++      0,   1,  89,   0,   0,   7,
++     70, 142,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   8,   0,
+       0,   0,   0,   0,   0,   0,
+-      7,   0,   0,   0,   0,   0,
+-      0,   0,  88,  24,   0,   7,
+-     70, 126,  48,   0,   0,   0,
++     88,  24,   0,   7,  70, 126,
++     48,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,  85,  85,
++      0,   0,  85,  85,   0,   0,
++      0,   0,   0,   0, 156,  24,
++      0,   7,  70, 238,  49,   0,
+       0,   0,   0,   0,   0,   0,
+-    156,  24,   0,   7,  70, 238,
+-     49,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,  85,  85,   0,   0,
+-      0,   0,   0,   0,  95,   0,
+-      0,   2,  50,   0,   2,   0,
+-    104,   0,   0,   2,   3,   0,
+-      0,   0, 155,   0,   0,   4,
+-      8,   0,   0,   0,   8,   0,
+-      0,   0,   1,   0,   0,   0,
+-     80,   0,   0,   8,  50,   0,
+-     16,   0,   0,   0,   0,   0,
+-     70,   0,   2,   0, 230, 138,
+-     48,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   6,   0,
+-      0,   0,  60,   0,   0,   7,
+-     18,   0,  16,   0,   0,   0,
+-      0,   0,  26,   0,  16,   0,
+-      0,   0,   0,   0,  10,   0,
+-     16,   0,   0,   0,   0,   0,
+-     31,   0,   4,   3,  10,   0,
++     85,  85,   0,   0,   0,   0,
++      0,   0,  95,   0,   0,   2,
++     50,   0,   2,   0, 104,   0,
++      0,   2,   3,   0,   0,   0,
++    155,   0,   0,   4,   8,   0,
++      0,   0,   8,   0,   0,   0,
++      1,   0,   0,   0,  80,   0,
++      0,   8,  50,   0,  16,   0,
++      0,   0,   0,   0,  70,   0,
++      2,   0, 230, 138,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   6,   0,   0,   0,
++     60,   0,   0,   7,  18,   0,
+      16,   0,   0,   0,   0,   0,
+-     62,   0,   0,   1,  21,   0,
+-      0,   1,  86,   0,   0,   4,
+-     50,   0,  16,   0,   0,   0,
+-      0,   0,  70,   0,   2,   0,
+-      0,   0,   0,  10,  50,   0,
++     26,   0,  16,   0,   0,   0,
++      0,   0,  10,   0,  16,   0,
++      0,   0,   0,   0,  31,   0,
++      4,   3,  10,   0,  16,   0,
++      0,   0,   0,   0,  62,   0,
++      0,   1,  21,   0,   0,   1,
++     86,   0,   0,   4,  50,   0,
+      16,   0,   0,   0,   0,   0,
+-     70,   0,  16,   0,   0,   0,
+-      0,   0,   2,  64,   0,   0,
+-      0,   0,   0,  63,   0,   0,
+-      0,  63,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,   0,
++     70,   0,   2,   0,   0,   0,
+       0,  10,  50,   0,  16,   0,
+       0,   0,   0,   0,  70,   0,
+      16,   0,   0,   0,   0,   0,
+-     70, 128,  48, 128,  65,   0,
++      2,  64,   0,   0,   0,   0,
++      0,  63,   0,   0,   0,  63,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   6,   0,
+-      0,   0,  14,   0,   0,   9,
+-    194,   0,  16,   0,   0,   0,
+-      0,   0,   6,   4,  16,   0,
+-      0,   0,   0,   0, 166, 142,
+-     48,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   5,   0,
+       0,   0,   0,   0,   0,  10,
+-    194,   0,  16,   0,   0,   0,
+-      0,   0, 166,  14,  16,   0,
+-      0,   0,   0,   0,  86, 141,
++     50,   0,  16,   0,   0,   0,
++      0,   0,  70,   0,  16,   0,
++      0,   0,   0,   0,  70, 128,
+      48, 128,  65,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   4,   0,   0,   0,
+-     14,   0,   0,   9,  50,   0,
+-     16,   0,   1,   0,   0,   0,
+-    230,  10,  16,   0,   0,   0,
+-      0,   0, 134, 128,  48,   0,
++      0,   0,   6,   0,   0,   0,
++     14,   0,   0,   9, 194,   0,
++     16,   0,   0,   0,   0,   0,
++      6,   4,  16,   0,   0,   0,
++      0,   0, 166, 142,  48,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   4,   0,   0,   0,
+-     54,   0,   0,   4,  50,   0,
+-     16,   0,   2,   0,   0,   0,
+-     70,   0,   2,   0,  54,   0,
+-      0,   8, 194,   0,  16,   0,
+-      2,   0,   0,   0,   2,  64,
++      0,   0,   5,   0,   0,   0,
++      0,   0,   0,  10, 194,   0,
++     16,   0,   0,   0,   0,   0,
++    166,  14,  16,   0,   0,   0,
++      0,   0,  86, 141,  48, 128,
++     65,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
++      4,   0,   0,   0,  14,   0,
++      0,   9,  50,   0,  16,   0,
++      1,   0,   0,   0, 230,  10,
++     16,   0,   0,   0,   0,   0,
++    134, 128,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
++      4,   0,   0,   0,  54,   0,
++      0,   4,  50,   0,  16,   0,
++      2,   0,   0,   0,  70,   0,
++      2,   0,  54,   0,   0,   8,
++    194,   0,  16,   0,   2,   0,
++      0,   0,   2,  64,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-     45,   0,   0,   8,  66,   0,
+-     16,   0,   0,   0,   0,   0,
+-     70,  14,  16,   0,   2,   0,
+-      0,   0, 150, 124,  32,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   0,  10,
+-     66,   0,  16,   0,   0,   0,
+-      0,   0,  42,   0,  16,   0,
+-      0,   0,   0,   0,  26, 128,
+-     48, 128,  65,   0,   0,   0,
++      0,   0,   0,   0,  45,   0,
++      0,   8,  66,   0,  16,   0,
++      0,   0,   0,   0,  70,  14,
++     16,   0,   2,   0,   0,   0,
++    150, 124,  32,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   5,   0,   0,   0,
+-     14,   0,   0,   9,  66,   0,
+-     16,   0,   1,   0,   0,   0,
++     52,   0,   0,   9,  66,   0,
++     16,   0,   0,   0,   0,   0,
+      42,   0,  16,   0,   0,   0,
+       0,   0,  10, 128,  48,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   5,   0,   0,   0,
+-     54,   0,   0,   5, 130,   0,
+-     16,   0,   1,   0,   0,   0,
+-      1,  64,   0,   0,   0,   0,
+-    128,  63,  17,   0,   0,   9,
+-     18,   0,  16,   0,   2,   0,
+-      0,   0,  70, 142,  48,   0,
++      0,   0,   7,   0,   0,   0,
++     51,   0,   0,   9,  66,   0,
++     16,   0,   0,   0,   0,   0,
++     42,   0,  16,   0,   0,   0,
++      0,   0,  26, 128,  48,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   7,   0,   0,   0,
++      0,   0,   0,  10,  66,   0,
++     16,   0,   0,   0,   0,   0,
++     42,   0,  16,   0,   0,   0,
++      0,   0,  26, 128,  48, 128,
++     65,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-     70,  14,  16,   0,   1,   0,
+-      0,   0,  17,   0,   0,   9,
+-     34,   0,  16,   0,   2,   0,
+-      0,   0,  70, 142,  48,   0,
++      5,   0,   0,   0,  14,   0,
++      0,   9,  66,   0,  16,   0,
++      1,   0,   0,   0,  42,   0,
++     16,   0,   0,   0,   0,   0,
++     10, 128,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   1,   0,   0,   0,
+-     70,  14,  16,   0,   1,   0,
+-      0,   0,  17,   0,   0,   9,
+-     66,   0,  16,   0,   0,   0,
+-      0,   0,  70, 142,  48,   0,
++      5,   0,   0,   0,  54,   0,
++      0,   5, 130,   0,  16,   0,
++      1,   0,   0,   0,   1,  64,
++      0,   0,   0,   0, 128,  63,
++     17,   0,   0,   9,  18,   0,
++     16,   0,   2,   0,   0,   0,
++     70, 142,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   3,   0,   0,   0,
+-     70,  14,  16,   0,   1,   0,
+-      0,   0,  49,   0,   0,   7,
+-    130,   0,  16,   0,   0,   0,
+-      0,   0,   1,  64,   0,   0,
+-    189,  55, 134,  53,  42,   0,
+-     16,   0,   0,   0,   0,   0,
+-     31,   0,   4,   3,  58,   0,
+-     16,   0,   0,   0,   0,   0,
+-     14,   0,   0,   7, 194,   0,
+-     16,   0,   0,   0,   0,   0,
+-      6,   4,  16,   0,   2,   0,
+-      0,   0, 166,  10,  16,   0,
+-      0,   0,   0,   0,  50,   0,
+-      0,  13, 194,   0,  16,   0,
+-      0,   0,   0,   0, 166,  14,
++      0,   0,   0,   0,  70,  14,
++     16,   0,   1,   0,   0,   0,
++     17,   0,   0,   9,  34,   0,
++     16,   0,   2,   0,   0,   0,
++     70, 142,  48,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,  70,  14,
++     16,   0,   1,   0,   0,   0,
++     17,   0,   0,   9,  66,   0,
+      16,   0,   0,   0,   0,   0,
+-      6, 136,  48,   0,   0,   0,
++     70, 142,  48,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      4,   0,   0,   0,  86, 141,
++      3,   0,   0,   0,  70,  14,
++     16,   0,   1,   0,   0,   0,
++     49,   0,   0,   7, 130,   0,
++     16,   0,   0,   0,   0,   0,
++      1,  64,   0,   0, 189,  55,
++    134,  53,  42,   0,  16,   0,
++      0,   0,   0,   0,  31,   0,
++      4,   3,  58,   0,  16,   0,
++      0,   0,   0,   0,  14,   0,
++      0,   7, 194,   0,  16,   0,
++      0,   0,   0,   0,   6,   4,
++     16,   0,   2,   0,   0,   0,
++    166,  10,  16,   0,   0,   0,
++      0,   0,  50,   0,   0,  13,
++    194,   0,  16,   0,   0,   0,
++      0,   0, 166,  14,  16,   0,
++      0,   0,   0,   0,   6, 136,
+      48,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   4,   0,
+-      0,   0,  50,   0,   0,  12,
+-     50,   0,  16,   0,   0,   0,
+-      0,   0, 230,  10,  16,   0,
+-      0,   0,   0,   0, 230, 138,
+-     48,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   5,   0,
+-      0,   0,  70,   0,  16, 128,
+-     65,   0,   0,   0,   0,   0,
+-      0,   0,  18,   0,   0,   1,
+-     54,   0,   0,   8,  50,   0,
++      0,   0,  86, 141,  48,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   4,   0,   0,   0,
++     50,   0,   0,  12,  50,   0,
+      16,   0,   0,   0,   0,   0,
+-      2,  64,   0,   0,   0,   0,
++    230,  10,  16,   0,   0,   0,
++      0,   0, 230, 138,  48,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   5,   0,   0,   0,
++     70,   0,  16, 128,  65,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,  21,   0,   0,   1,
+-    164,   0,   0,   7, 242, 224,
+-     33,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,  70,   5,
+-      2,   0,  70,   0,  16,   0,
+-      0,   0,   0,   0,  62,   0,
+-      0,   1,  83,  84,  65,  84,
+-    148,   0,   0,   0,  30,   0,
+-      0,   0,   3,   0,   0,   0,
+-      0,   0,   0,   0,   1,   0,
+-      0,   0,  14,   0,   0,   0,
+-      0,   0,   0,   0,   2,   0,
+-      0,   0,   3,   0,   0,   0,
+-      2,   0,   0,   0,   0,   0,
++     18,   0,   0,   1,  54,   0,
++      0,   8,  50,   0,  16,   0,
++      0,   0,   0,   0,   2,  64,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   1,   0,
++     21,   0,   0,   1, 164,   0,
++      0,   7, 242, 224,  33,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,  70,   5,   2,   0,
++     70,   0,  16,   0,   0,   0,
++      0,   0,  62,   0,   0,   1,
++     83,  84,  65,  84, 148,   0,
++      0,   0,  32,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
++     16,   0,   0,   0,   0,   0,
++      0,   0,   2,   0,   0,   0,
++      3,   0,   0,   0,   2,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   4,   0,   0,   0,
+-      0,   0,   0,   0,   1,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
++      4,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+       0,   0,   0,   0,   0,   0,
+-      0,   0,   0,   0,   1,   0,
+-      0,   0
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,
++      0,   0,   1,   0,   0,   0
+ };
+diff --git a/src/graphics/shaders/scene_motion.cs.hlsl b/src/graphics/shaders/scene_motion.cs.hlsl
+index a287b48..971ba3a 100644
+--- a/src/graphics/shaders/scene_motion.cs.hlsl
++++ b/src/graphics/shaders/scene_motion.cs.hlsl
+@@ -15,6 +15,8 @@ cbuffer constants : register(b0) {
+   float2 render_scale;
+   float2 jitter;
+   uint2 render_size;
++  // The depths read, so that those past the scene's infinite far plane count as at it (scene::MotionDepthRange).
++  float2 depth_range;
+ };
+ 
+ Texture2D<float> depth : register(t0);
+@@ -28,7 +30,8 @@ void main(uint3 id : SV_DispatchThreadID) {
+   float2 render_position = float2(id.xy) + 0.5f - jitter;
+   float2 screen = render_position / render_scale;
+   float3 ndc = float3((screen - viewport_scale_offset_xy.yw) / viewport_scale_offset_xy.xz,
+-                      (depth[id.xy] - viewport_scale_offset_z.y) / viewport_scale_offset_z.x);
++                      (clamp(depth[id.xy], depth_range.x, depth_range.y) - viewport_scale_offset_z.y) /
++                          viewport_scale_offset_z.x);
+   float4 clip = float4(ndc, 1.0f);
+   float4 previous = float4(dot(clip_to_previous_clip[0], clip), dot(clip_to_previous_clip[1], clip),
+                            dot(clip_to_previous_clip[2], clip), dot(clip_to_previous_clip[3], clip));

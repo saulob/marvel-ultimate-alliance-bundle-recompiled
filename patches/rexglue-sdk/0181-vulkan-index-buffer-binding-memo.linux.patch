@@ -1,0 +1,81 @@
+The Vulkan half of 0135: indices read straight from guest memory bind the whole shared memory buffer and
+start at the draw's index base with firstIndex, so consecutive draws keep one binding; the binding is
+recorded only when it differs from the one already in the submission's command buffer. An index base
+not aligned to the index size keeps its own binding.
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 7f9394b..0eae2fd 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -543,6 +543,12 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // What is left of this frame's wait for pipelines created in the background
+   // (async_shader_wait_ms), in microseconds.
+   int64_t pipeline_wait_left_us_ = 0;
++  // The index buffer bound in the current submission's command buffer.
++  struct IndexBufferBinding {
++    VkBuffer buffer = VK_NULL_HANDLE;
++    VkDeviceSize offset = 0;
++    VkIndexType type = VK_INDEX_TYPE_UINT16;
++  } current_index_buffer_;
+   // Guest frame index, since some transient resources can be reused across
+   // submissions. Values updated in the beginning of a frame.
+   uint64_t frame_current_ = 1;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 6da09df..69f08bc 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4183,15 +4183,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       shader_32bit_index_dma) {
+     deferred_command_buffer_.CmdVkDraw(primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
+   } else {
++    VkIndexType index_type = primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16
++                                 ? VK_INDEX_TYPE_UINT16
++                                 : VK_INDEX_TYPE_UINT32;
+     std::pair<VkBuffer, VkDeviceSize> index_buffer;
++    uint32_t first_index = 0;
+     switch (primitive_processing_result.index_buffer_type) {
+       case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
+         if (guest_dma_index_scratch_buffer.buffer() != VK_NULL_HANDLE) {
+           index_buffer.first = guest_dma_index_scratch_buffer.buffer();
+           index_buffer.second = 0;
+         } else {
++          // The whole shared memory stays bound and the draw starts at its index base, so
++          // consecutive draws need no new binding; a base not aligned to the index size keeps its own.
++          uint32_t index_size = index_type == VK_INDEX_TYPE_UINT16 ? 2 : 4;
++          uint32_t index_base = primitive_processing_result.guest_index_base;
+           index_buffer.first = shared_memory_->buffer();
+-          index_buffer.second = primitive_processing_result.guest_index_base;
++          index_buffer.second = index_base % index_size ? index_base : 0;
++          first_index = index_base % index_size ? 0 : index_base / index_size;
+         }
+         break;
+       case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
+@@ -4207,13 +4216,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+         assert_unhandled_case(primitive_processing_result.index_buffer_type);
+         return draw_fail("unexpected_index_buffer_type");
+     }
+-    deferred_command_buffer_.CmdVkBindIndexBuffer(
+-        index_buffer.first, index_buffer.second,
+-        primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16
+-            ? VK_INDEX_TYPE_UINT16
+-            : VK_INDEX_TYPE_UINT32);
++    if (current_index_buffer_.buffer != index_buffer.first ||
++        current_index_buffer_.offset != index_buffer.second || current_index_buffer_.type != index_type) {
++      deferred_command_buffer_.CmdVkBindIndexBuffer(index_buffer.first, index_buffer.second,
++                                                    index_type);
++      current_index_buffer_ = {index_buffer.first, index_buffer.second, index_type};
++    }
+     deferred_command_buffer_.CmdVkDrawIndexed(primitive_processing_result.host_draw_vertex_count, 1,
+-                                              0, 0, 0);
++                                              first_index, 0, 0);
+   }
+ 
+   // Invalidate textures in memexported memory and watch for changes.
+@@ -5263,6 +5273,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+     current_external_compute_pipeline_ = VK_NULL_HANDLE;
+     current_guest_graphics_pipeline_layout_ = nullptr;
+     current_graphics_descriptor_sets_bound_up_to_date_ = 0;
++    current_index_buffer_ = {};
+ 
+     primitive_processor_->BeginSubmission();
+ 

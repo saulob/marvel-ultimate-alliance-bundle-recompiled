@@ -82,8 +82,9 @@ struct GraphicsIdentity {
   int render_height = 0;
   int internal_width = 0;
   int internal_height = 0;
-  int fsr_input_width = 0;
-  int fsr_input_height = 0;
+  std::string upscaler_input;  // the requested present_effect: fsr
+  int upscaler_input_width = 0;
+  int upscaler_input_height = 0;
   std::string present_effect;
   std::string upscaling;
   int guest_width = 0;

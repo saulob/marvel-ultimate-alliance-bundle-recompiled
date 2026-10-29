@@ -231,8 +231,9 @@ void TestUpscaling() {
   diagnostics.graphics.guest_height = 424;
   diagnostics.graphics.internal_width = 1504;
   diagnostics.graphics.internal_height = 848;
-  diagnostics.graphics.fsr_input_width = 1504;
-  diagnostics.graphics.fsr_input_height = 848;
+  diagnostics.graphics.upscaler_input = "fsr";
+  diagnostics.graphics.upscaler_input_width = 1504;
+  diagnostics.graphics.upscaler_input_height = 848;
   diagnostics.graphics.present_effect = "fsr";
   diagnostics.graphics.upscaling = "AMD FSR 1 Balanced";
   std::string text = Join(mua::FormatStartupDiagnostics(diagnostics));
@@ -244,14 +245,15 @@ void TestUpscaling() {
   diagnostics.graphics.guest_height = 720;
   diagnostics.graphics.internal_width = 2560;
   diagnostics.graphics.internal_height = 1440;
-  diagnostics.graphics.fsr_input_width = 0;
-  diagnostics.graphics.fsr_input_height = 0;
+  diagnostics.graphics.upscaler_input.clear();
+  diagnostics.graphics.upscaler_input_width = 0;
+  diagnostics.graphics.upscaler_input_height = 0;
   diagnostics.graphics.present_effect = "bilinear";
   diagnostics.graphics.upscaling = "Off";
   text = Join(mua::FormatStartupDiagnostics(diagnostics));
   CHECK(Has(text, "Runtime renderer: guest=1280x720 | internal=2560x1440 | render resolution=2560x1440 | "
                   "presenter=bilinear | upscaling=Off | "));
-  CHECK(!Has(text, "fsr input="));
+  CHECK(!Has(text, " input="));
 }
 
 int main() {

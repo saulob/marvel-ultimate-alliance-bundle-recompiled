@@ -1,8 +1,9 @@
 // Generic fixes in the patched ReXGlue source: the guest clock, XMA context updates, the SDL audio credit, ImGui mouse
-// events, content results, in-place overwrites, the dot product codegen and zero-size profile settings. Reads the
-// staged source; skipped when it is not there.
+// events, content results, in-place overwrites, the dot product codegen, zero-size profile settings and the guest
+// interrupt lock and its polling. Reads the staged source; skipped when it is not there.
 // Run: mua_sdk_fix_tests
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -217,9 +218,85 @@ void TestZeroSizeProfileSettings(const fs::path& patches, const fs::path& source
   }
 }
 
+// patches/rexglue-sdk/0155-guest-interrupt-lock-thread-state.patch: generated code calls the runtime for its interrupt
+// lock, mfmsr takes no lock, and mtmsrd r13 still enters the global critical region before raising the depth.
+void TestGuestInterruptLock(const fs::path& patches, const fs::path& source) {
+  std::printf("mfmsr reads the calling thread's interrupt state without the global critical region\n");
+  const std::string patch = Read(patches / "0155-guest-interrupt-lock-thread-state.patch");
+  CHECK(!patch.empty());
+  CHECK(Has(patch, "\ndiff --git a/resources/templates/codegen/pch_h.inja b/") &&
+        Has(patch, "\ndiff --git a/src/core/mutex.cpp b/") && Has(patch, "\ndiff --git a/include/rex/thread/mutex.h b/"));
+  CHECK(Has(patch, "+#define REX_CHECK_GLOBAL_LOCK() rex::thread::GuestInterruptMsr()\n"));
+  CHECK(Has(patch, "+#define REX_ENTER_GLOBAL_LOCK() rex::thread::EnterGuestInterruptLock()\n"));
+  CHECK(Has(patch, "+#define REX_LEAVE_GLOBAL_LOCK() rex::thread::LeaveGuestInterruptLock()\n"));
+  CHECK(!Has(patch, "REXCVAR") && !Has(patch, "DEBUG_SAULO"));
+
+  const std::string mutex = Read(source / "src/core/mutex.cpp");
+  if (!Has(mutex, "uint64_t GuestInterruptMsr() {")) {
+    return;
+  }
+  const std::string msr = Body(mutex, "uint64_t GuestInterruptMsr() {");
+  CHECK(!msr.empty() && !Has(msr, "lock(") && !Has(msr, "Acquire"));
+  const std::string enter = Body(mutex, "void EnterGuestInterruptLock() {");
+  CHECK(std::min(enter.find("LockForGuestSection("), enter.find(".lock();")) < enter.find("guest_interrupt_lock_depth"));
+  const std::string leave = Body(mutex, "void LeaveGuestInterruptLock() {");
+  CHECK(leave.find("--guest_interrupt_lock_depth") < leave.find("unlock();"));
+  const std::string pch = Read(source / "resources/templates/codegen/pch_h.inja");
+  CHECK(!Has(pch, "ppc_global_lock_count_") && Has(pch, "rex::thread::GuestInterruptMsr()"));
+}
+
+// patches/rexglue-sdk/0157-guest-interrupt-lock-poll-before-wait.patch: a waiting section polls the same mutex with
+// try_lock for a bounded time and then blocks on it, so it never enters without holding the region.
+void TestGuestInterruptLockPolling(const fs::path& patches, const fs::path& source) {
+  std::printf("a waiting guest section polls the global critical region, then blocks on it\n");
+  const std::string patch = Read(patches / "0157-guest-interrupt-lock-poll-before-wait.patch");
+  CHECK(!patch.empty());
+  CHECK(Has(patch, "\ndiff --git a/src/core/mutex.cpp b/") && !Has(patch, "\ndiff --git a/include/"));
+  CHECK(Has(patch, "+constexpr auto kGuestLockPollTime = std::chrono::microseconds(20);\n"));
+  CHECK(Has(patch, "+  mutex.lock();\n") && Has(patch, "+  LockForGuestSection(global_critical_region::mutex());\n"));
+  CHECK(!Has(patch, "REXCVAR") && !Has(patch, "DEBUG_SAULO"));
+
+  const std::string mutex = Read(source / "src/core/mutex.cpp");
+  const std::string poll = Body(mutex, "void LockForGuestSection(");
+  if (poll.empty()) {
+    return;
+  }
+  CHECK(Has(poll, "if (mutex.try_lock()) {\n    return;\n  }"));
+  CHECK(poll.rfind("mutex.lock();") > poll.rfind("kGuestLockPollTime") && poll.find("unlock") == std::string::npos);
+}
+
+// 0158: a write-watch fault takes the region with the polling of guest sections; the repair it runs is untouched, and
+// faults the callback does not handle still recheck the page under a plain acquire.
+void TestWriteWatchFaultPolling(const fs::path& patches, const fs::path& source) {
+  std::printf("a write-watch fault polls the global critical region like a guest section\n");
+  const std::string patch = Read(patches / "0158-write-watch-fault-poll-for-global-lock.patch");
+  CHECK(!patch.empty());
+  CHECK(Has(patch, "\ndiff --git a/include/rex/thread/global_critical_region_polling.h b/"));
+  CHECK(Has(patch, "\ndiff --git a/src/core/mutex.cpp b/") && Has(patch, "\ndiff --git a/src/system/mmio_handler.cpp b/"));
+  CHECK(!Has(patch, "xmemory") && !Has(patch, "a/include/rex/thread/mutex.h"));
+  CHECK(Has(patch, "+  LockForGuestSection(mutex);\n+  return std::unique_lock<std::recursive_mutex>(mutex, std::adopt_lock);\n"));
+  CHECK(Has(patch, "-        access_violation_callback_(global_critical_region_.Acquire(),\n"));
+  CHECK(Has(patch, "+        access_violation_callback_(rex::thread::AcquireGlobalCriticalRegionPolling(),\n"));
+  CHECK(!Has(patch, "REXCVAR") && !Has(patch, "DEBUG_SAULO"));
+
+  const std::string mmio = Read(source / "src/system/mmio_handler.cpp");
+  const std::string handler = Body(mmio, "bool MMIOHandler::ExceptionCallback(");
+  if (!Has(handler, "AcquireGlobalCriticalRegionPolling")) {
+    return;
+  }
+  const std::string polled_call = "access_violation_callback_(rex::thread::AcquireGlobalCriticalRegionPolling(),";
+  const size_t polled = handler.find(polled_call);
+  const size_t recheck = handler.find("auto lock = global_critical_region_.Acquire();", polled);
+  CHECK(polled != std::string::npos && recheck != std::string::npos);
+  CHECK(handler.find("AcquireGlobalCriticalRegionPolling", polled + polled_call.size()) == std::string::npos);
+}
+
 int main() {
   const fs::path source = MUA_SDK_SOURCE_DIR;
   TestZeroSizeProfileSettings(fs::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk", source);
+  TestGuestInterruptLock(fs::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk", source);
+  TestGuestInterruptLockPolling(fs::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk", source);
+  TestWriteWatchFaultPolling(fs::path(MUA_SRC_DIR) / ".." / "patches" / "rexglue-sdk", source);
   if (!fs::exists(source / "src/core/clock.cpp")) {
     std::printf("skipped: the patched ReXGlue source is not staged (%s)\n", source.string().c_str());
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

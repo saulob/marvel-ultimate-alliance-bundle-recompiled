@@ -258,6 +258,21 @@ void TestPatchesAndLauncher() {
   CHECK(Has(launcher, "scale <= kMaxRenderScale"));
 }
 
+void TestLabels() {
+  std::printf("the launcher's Render resolution labels\n");
+  CHECK(RenderResolutionLabel(AspectRatio::k16x9, 1) == "1x - 1280\xC3\x97" "720 (720p)");
+  CHECK(RenderResolutionLabel(AspectRatio::k16x9, 2) == "2x - 2560\xC3\x97" "1440 (1440p)");
+  CHECK(RenderResolutionLabel(AspectRatio::k16x9, 3) == "3x - 3840\xC3\x97" "2160 (4K)");
+  CHECK(RenderResolutionLabel(AspectRatio::k16x9, 4) == "4x - 5120\xC3\x97" "2880 (5K)");
+  // Other shapes name the height: 5040x2160 isn't 4K.
+  CHECK(RenderResolutionLabel(AspectRatio::k21x9, 3) == "3x - 5040\xC3\x97" "2160 (2160p)");
+  CHECK(RenderResolutionLabel(AspectRatio::k4x3, 1) == "1x - 960\xC3\x97" "720 (720p)");
+  const std::string launcher = ReadFile(std::string(MUA_SRC_DIR) + "/launcher.cpp");
+  CHECK(launcher.find("options.push_back({std::to_string(scale), RenderResolutionLabel(aspect, scale)});") !=
+        std::string::npos);
+  CHECK(launcher.find("Recommended for 1440p") == std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -269,6 +284,7 @@ int main() {
   TestBlockCompressedTail();
   TestScaledPackedLevelExtent();
   TestPatchesAndLauncher();
+  TestLabels();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

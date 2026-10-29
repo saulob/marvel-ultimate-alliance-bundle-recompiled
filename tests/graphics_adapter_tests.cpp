@@ -1,5 +1,5 @@
-// Graphics card: the setting values, the adapter list ReXGlue's d3d12_adapter index refers to, persistence and
-// where the setting is registered.
+// Graphics card: the setting values, the adapter list ReXGlue's d3d12_adapter (Windows) or vulkan_device (Linux) index
+// refers to, persistence and where the setting is registered.
 // Run: mua_graphics_adapter_tests
 
 #include <cstdio>
@@ -17,6 +17,7 @@
 #endif
 
 #include "graphics_adapters.h"
+#include "graphics_backend.h"
 #include "trg/settings.h"
 
 namespace {
@@ -168,7 +169,8 @@ void TestRegistration() {
         Has(settings, "      \"mua_graphics_adapter\",\r\n      \"mua_aspect_ratio\","));
   CHECK(Has(settings, "      kTearingSetting,\n      \"mua_graphics_adapter\",\n") ||
         Has(settings, "      kTearingSetting,\r\n      \"mua_graphics_adapter\",\r\n"));
-  CHECK(Has(settings, "rex::cvar::SetFlagByName(\"d3d12_adapter\", std::to_string(*index));"));
+  CHECK(Has(settings, "rex::cvar::SetFlagByName(kBackendSettings.graphics_card, std::to_string(*index));"));
+  CHECK(!Has(settings, "\"d3d12_adapter\"") && !Has(settings, "\"vulkan_device\""));
 
   const std::string launcher = ReadFile(src + "/launcher.cpp");
   const size_t card = launcher.find("ui.Combo(\"Graphics card\"");
@@ -185,6 +187,23 @@ void TestRegistration() {
   CHECK(load != std::string::npos && apply != std::string::npos && load < apply);
 }
 
+void TestBackendCardSetting() {
+  std::printf("each backend takes the card from its own setting\n");
+  CHECK(std::string(mua::SettingsFor(mua::GraphicsBackend::kDirect3D12).graphics_card) == "d3d12_adapter");
+  CHECK(std::string(mua::SettingsFor(mua::GraphicsBackend::kVulkan).graphics_card) == "vulkan_device");
+#if defined(_WIN32)
+  CHECK(mua::kGraphicsBackend == mua::GraphicsBackend::kDirect3D12);
+#else
+  CHECK(mua::kGraphicsBackend == mua::GraphicsBackend::kVulkan);
+  const std::string adapters = ReadFile(std::string(MUA_SRC_DIR) + "/graphics_adapters.cpp");
+  CHECK(Has(adapters, "dlopen(\"libvulkan.so.1\""));
+#endif
+  for (const mua::GraphicsAdapter& adapter : mua::ListGraphicsAdapters()) {
+    CHECK(adapter.index >= 0 && !adapter.name.empty());
+    CHECK(mua::EffectiveGraphicsAdapter(adapter.index).index == adapter.index);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -194,6 +213,7 @@ int main() {
   TestEnumerationMatchesRuntime();
 #endif
   TestRegistration();
+  TestBackendCardSetting();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

@@ -1,0 +1,409 @@
+Marvel Ultimate Alliance 2's shadow pass at 1x with DLSS and FSR 3.1. Before its scene, MUA2 draws two shadow maps
+into pitch 1040 1x surfaces (D24S8 depth bases 1216 and 1632, 512x512 viewports with the lights' projections, no pixel
+shader except for casters that also write color at base 0), resolves them to 1024x1024 and 1024x512 textures, and
+filters each into a k_16_16 copy at color base 0 that the scene's draws sample; after the scene, the same pitch and
+sample count holds a 1024x32 texture its composite reads. The mua2 profile names that surface
+(native_pre_scene_key): its draws before the scene are one PreSceneTargets surface and its draws after it another
+(kAfterScene), so the 1024x32 texture no longer keeps the shadow pass at the full scale. Once 0162 and 0164's checks
+prove it only an input of the scene, its draws before the scene go to 1x in every mode, with the game's own depth
+bias, and its resolves are stretched to the textures' full size; only after a frame that drew the scene, and back to
+the full scale for the session if a draw after the scene samples one of its textures. Every other surface keeps the
+full scale for mua2, among them the 4x quads that clear the shadow maps (covering the 1x ones) and the scene's memory,
+the bloom chain, the composite, HUD and menus. mua1 and mua1-gold leave native_pre_scene_key unset, so their surfaces,
+scales and logs are 0162 and 0164's. The GPU targets line lists a surface once per scale and adds each one's share of
+host pixels.
+
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index 632a740..659afa8 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -153,11 +153,14 @@ class PreSceneTargets {
+     bool native = false;
+   };
+ 
+-  static uint32_t Key(uint32_t surface_pitch, uint32_t msaa_samples_log2) {
++  // Set on the key of a surface's draws and resolves after the scene, for profiles that tell them apart.
++  static constexpr uint32_t kAfterScene = 1u << 20;
++
++  static constexpr uint32_t Key(uint32_t surface_pitch, uint32_t msaa_samples_log2) {
+     return surface_pitch | msaa_samples_log2 << 16;
+   }
+   static uint32_t Pitch(uint32_t key) { return key & 0xFFFF; }
+-  static uint32_t SamplesLog2(uint32_t key) { return key >> 16; }
++  static uint32_t SamplesLog2(uint32_t key) { return (key >> 16) & 0xF; }
+ 
+   // A draw that isn't part of the scene.
+   void NoteDraw(uint32_t key, bool after_scene) {
+@@ -690,6 +693,10 @@ struct SceneProfile {
+   std::optional<PinnedSceneSurface> pinned_surface = std::nullopt;
+   // Draws before the scene, such as shadow maps, at their smaller PreSceneScale.
+   bool reduce_pre_scene_targets = true;
++  // The PreSceneTargets surface whose draws before the scene only feed the scene, such as shadow maps: drawn at 1x in
++  // every mode once proven native, and only after a frame that drew the scene. Its draws after the scene are another
++  // surface (kAfterScene), and no other surface is reduced.
++  uint32_t native_pre_scene_key = 0;
+   // Its draws keep writing depth after the scene's first resolve (ScenePlanes).
+   bool depth_at_each_resolve = false;
+   // Some scene draws, such as its sky, use another part of the depth range, past the scene's infinite far plane: the
+@@ -704,7 +711,8 @@ inline constexpr uint32_t kCameraMissingFrames = 600;
+ // The Gold Edition's later Direct3D draws full-surface quads over the scene's memory at 4x MSAA and half the pitch.
+ // Marvel Ultimate Alliance 2 draws its scene into a 1040x624 surface that fits the EDRAM at 2x MSAA; its 1280x720
+ // composite, also at color base 0, is a pitch 880 surface. Its sky is drawn after the scene's depth resolve, into the
+-// depth range below the scene's.
++// depth range below the scene's. Its shadow maps (depth bases 1216 and 1632) and their filtered copies are pitch 1040
++// 1x before the scene; after it, the same surface holds a 1024x32 texture the composite reads.
+ inline constexpr std::array kSceneProfiles = {
+     SceneProfile{.key = "mua1",
+                  .min_msaa_samples_log2 = kMsaa2xLog2,
+@@ -721,6 +729,7 @@ inline constexpr std::array kSceneProfiles = {
+                  .min_draws = 20,
+                  .pinned_surface = PinnedSceneSurface{0, 1034, kDepthFormatD24FS8, 1040, 1040, 624},
+                  .reduce_pre_scene_targets = false,
++                 .native_pre_scene_key = PreSceneTargets::Key(1040, 0),
+                  .depth_at_each_resolve = true,
+                  .depth_partitions = true,
+                  .camera_required = true},
+@@ -773,6 +782,31 @@ inline bool IsWiderDepthRange(float z_scale, float known_z_scale) {
+   return std::abs(z_scale) > std::abs(known_z_scale);
+ }
+ 
++// The PreSceneTargets surface of a non-scene draw or resolve.
++inline uint32_t PreSceneKeyFor(const SceneProfile& profile, uint32_t surface_pitch, uint32_t msaa_samples_log2,
++                               bool after_scene) {
++  const uint32_t key = PreSceneTargets::Key(surface_pitch, msaa_samples_log2);
++  return profile.native_pre_scene_key && after_scene ? key | PreSceneTargets::kAfterScene : key;
++}
++
++// Whether a frame drawing reduced pre-scene targets draws and resolves this surface smaller.
++inline bool IsPreSceneReduced(const SceneProfile& profile, const PreSceneTargets& targets, uint32_t key) {
++  if (profile.native_pre_scene_key) {
++    return key == profile.native_pre_scene_key && targets.IsNative(key);
++  }
++  return targets.IsReduced(key);
++}
++
++// Whether pre-scene targets only the scene samples may go to 1x.
++inline bool AllowsNativePreScene(const SceneProfile& profile, bool performance_mode,
++                                 std::array<uint32_t, 2> pre_scene_scale, std::array<uint32_t, 2> output_scale) {
++  if (profile.native_pre_scene_key) {
++    return output_scale[0] > 1 || output_scale[1] > 1;
++  }
++  return performance_mode && (pre_scene_scale[0] > 1 || pre_scene_scale[1] > 1) &&
++         (pre_scene_scale[0] < output_scale[0] || pre_scene_scale[1] < output_scale[1]);
++}
++
+ // A surface's width in samples (PreSceneTargets keys): a 4x MSAA pixel is two samples wide.
+ inline uint32_t PitchSamples(uint32_t key) {
+   return PreSceneTargets::Pitch(key) << uint32_t(PreSceneTargets::SamplesLog2(key) >= kMsaa4xLog2);
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index c715f13..056a93d 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -129,12 +129,14 @@ class SceneUpscaler {
+                      DrawAdjustment& adjustment);
+   void NoteSampledAfterScene(const RegisterFile& regs, const Shader& shader);
+   void NoteSampledByScene(const RegisterFile& regs, const Shader& shader);
++  uint32_t PreSceneKey(const RegisterFile& regs) const;
+   uint32_t PreSceneScaleX(uint32_t key) const;
+   uint32_t PreSceneScaleY(uint32_t key) const;
+   void NoteResolveDest(const RegisterFile& regs, const draw_util::ResolveInfo& resolve_info, uint32_t key,
+                        bool other);
+   ID3D12Resource* StretchPreSceneResolve(const draw_util::ResolveInfo& resolve_info, uint32_t key);
+   void LogPreSceneTargets() const;
++  void LogNativePreSceneTarget();
+   void NoteDirectTransform(const RegisterFile& regs, const Shader& vertex_shader, uint32_t index_base,
+                            uint32_t index_count);
+   std::optional<scene::Matrix> EstimateCameraReprojection(uint32_t& matched_out, uint32_t& agreeing_out) const;
+@@ -231,8 +233,10 @@ class SceneUpscaler {
+   uint32_t pre_scene_scale_x_ = 1;
+   uint32_t pre_scene_scale_y_ = 1;
+   bool pre_scene_frame_ = false;
+-  // Performance modes draw the surfaces only the scene samples at the game's own scale.
++  // Performance modes, or every mode for the profile's native surface, draw the surfaces only the scene samples at
++  // the game's own scale.
+   bool pre_scene_native_ = false;
++  bool native_pre_scene_logged_ = false;
+   scene::PreSceneTargets pre_scene_targets_;
+   std::vector<OtherResolve> other_resolves_;
+   size_t other_resolves_next_ = 0;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index f9c7bec..3877ef9 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -101,7 +101,7 @@ struct GpuTargetStats {
+   uint32_t height = 0;
+   uint32_t draws = 0;
+   uint64_t pixels = 0;
+-  // Of the resolution scale, what the last draw's viewport used.
++  // Of the resolution scale, what its draws' viewports use.
+   float viewport_scale_x = 1.0f;
+   float viewport_scale_y = 1.0f;
+ };
+@@ -124,9 +124,11 @@ struct GpuWorkSummary {
+   uint64_t window_first_idle_ns = 0;
+   std::array<int64_t, 4> window_first_guest{};
+   uint32_t copies = 0;
+-  std::array<GpuTargetStats, 16> targets{};
++  std::array<GpuTargetStats, 32> targets{};
+   size_t target_count = 0;
+-  GpuTargetStats* last_draw_target = nullptr;
++  // The current draw's target, until its scale is known.
++  GpuTargetStats pending_draw;
++  bool draw_pending = false;
+   uint32_t untracked_draws = 0;
+   std::array<GpuResolveStats, 8> resolves{};
+   size_t resolve_count = 0;
+@@ -252,28 +254,18 @@ std::pair<uint32_t, uint32_t> DrawExtent(const RegisterFile& regs, uint32_t pitc
+   return {pitch ? std::min(width, pitch) : width, height};
+ }
+ 
+-void NoteGpuWorkDraw(const RegisterFile& regs, xenos::EdramMode edram_mode) {
+-  GpuWorkSummary& summary = g_gpu_work_summary;
+-  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+-  GpuTargetStats draw;
+-  draw.depth_only = edram_mode == xenos::EdramMode::kDepthOnly;
+-  if (draw.depth_only) {
+-    const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+-    draw.base = depth_info.depth_base;
+-    draw.format = uint32_t(depth_info.depth_format);
+-  } else {
+-    const auto color_info = regs.Get<reg::RB_COLOR_INFO>();
+-    draw.base = color_info.color_base;
+-    draw.format = uint32_t(color_info.color_format);
++// A surface drawn at two scales, such as one reduced only before the scene, is listed once for each.
++void CommitGpuWorkDraw(GpuWorkSummary& summary) {
++  if (!std::exchange(summary.draw_pending, false)) {
++    return;
+   }
+-  draw.msaa = 1u << uint32_t(surface_info.msaa_samples);
+-  draw.pitch = surface_info.surface_pitch;
+-  const auto [width, height] = DrawExtent(regs, draw.pitch);
++  const GpuTargetStats& draw = summary.pending_draw;
+   GpuTargetStats* target = nullptr;
+   for (size_t i = 0; i < summary.target_count; ++i) {
+     GpuTargetStats& known = summary.targets[i];
+     if (known.depth_only == draw.depth_only && known.base == draw.base && known.format == draw.format &&
+-        known.msaa == draw.msaa && known.pitch == draw.pitch) {
++        known.msaa == draw.msaa && known.pitch == draw.pitch && known.viewport_scale_x == draw.viewport_scale_x &&
++        known.viewport_scale_y == draw.viewport_scale_y) {
+       target = &known;
+       break;
+     }
+@@ -285,19 +277,43 @@ void NoteGpuWorkDraw(const RegisterFile& regs, xenos::EdramMode edram_mode) {
+     }
+     target = &summary.targets[summary.target_count++];
+     *target = draw;
++    target->width = target->height = 0;
+   }
+-  target->width = std::max(target->width, width);
+-  target->height = std::max(target->height, height);
++  target->width = std::max(target->width, draw.width);
++  target->height = std::max(target->height, draw.height);
+   ++target->draws;
+-  target->pixels += uint64_t(width) * height;
+-  summary.last_draw_target = target;
++  target->pixels += uint64_t(draw.width) * draw.height;
+ }
+ 
+-void NoteGpuWorkDrawScale(float viewport_scale_x, float viewport_scale_y) {
+-  if (GpuTargetStats* target = std::exchange(g_gpu_work_summary.last_draw_target, nullptr)) {
+-    target->viewport_scale_x = viewport_scale_x;
+-    target->viewport_scale_y = viewport_scale_y;
++void NoteGpuWorkDraw(const RegisterFile& regs, xenos::EdramMode edram_mode) {
++  GpuWorkSummary& summary = g_gpu_work_summary;
++  CommitGpuWorkDraw(summary);
++  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  GpuTargetStats draw;
++  draw.depth_only = edram_mode == xenos::EdramMode::kDepthOnly;
++  if (draw.depth_only) {
++    const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
++    draw.base = depth_info.depth_base;
++    draw.format = uint32_t(depth_info.depth_format);
++  } else {
++    const auto color_info = regs.Get<reg::RB_COLOR_INFO>();
++    draw.base = color_info.color_base;
++    draw.format = uint32_t(color_info.color_format);
+   }
++  draw.msaa = 1u << uint32_t(surface_info.msaa_samples);
++  draw.pitch = surface_info.surface_pitch;
++  const auto [width, height] = DrawExtent(regs, draw.pitch);
++  draw.width = width;
++  draw.height = height;
++  summary.pending_draw = draw;
++  summary.draw_pending = true;
++}
++
++void NoteGpuWorkDrawScale(float viewport_scale_x, float viewport_scale_y) {
++  GpuWorkSummary& summary = g_gpu_work_summary;
++  summary.pending_draw.viewport_scale_x = viewport_scale_x;
++  summary.pending_draw.viewport_scale_y = viewport_scale_y;
++  CommitGpuWorkDraw(summary);
+ }
+ 
+ std::string HostScaleText(float scale_x, float scale_y) {
+@@ -330,9 +346,14 @@ void NoteGpuWorkResolve(const RegisterFile& regs) {
+ std::string GpuTargetsText(GpuWorkSummary& summary, double swaps, uint32_t scale_x, uint32_t scale_y) {
+   std::sort(summary.targets.begin(), summary.targets.begin() + summary.target_count,
+             [](const GpuTargetStats& a, const GpuTargetStats& b) { return a.pixels > b.pixels; });
++  const auto host_pixels = [&](const GpuTargetStats& target) {
++    return double(target.pixels) * scale_x * target.viewport_scale_x * scale_y * target.viewport_scale_y;
++  };
+   uint64_t total = 0;
++  double host_total = 0.0;
+   for (size_t i = 0; i < summary.target_count; ++i) {
+     total += summary.targets[i].pixels;
++    host_total += host_pixels(summary.targets[i]);
+   }
+   std::string text;
+   for (size_t i = 0; i < std::min<size_t>(summary.target_count, 5); ++i) {
+@@ -347,7 +368,9 @@ std::string GpuTargetsText(GpuWorkSummary& summary, double swaps, uint32_t scale
+                      uint32_t(std::lround(target.height * scale_y * target.viewport_scale_y))) +
+             " host at " +
+             HostScaleText(scale_x * target.viewport_scale_x, scale_y * target.viewport_scale_y) + ", " + draws +
+-            " draws/swap, " + std::to_string(total ? target.pixels * 100 / total : 0) + "% of pixels";
++            " draws/swap, " + std::to_string(total ? target.pixels * 100 / total : 0) + "% of pixels, " +
++            std::to_string(host_total > 0.0 ? std::lround(host_pixels(target) * 100.0 / host_total) : 0) +
++            "% of host pixels";
+   }
+   if (summary.untracked_draws) {
+     text += "; " + std::to_string(summary.untracked_draws) + " draws on untracked targets";
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index 6e136ea..a0980ff 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -51,8 +51,8 @@ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_scale, true, "GPU/D3D12",
+                     "resolution scale instead of the full one")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_native, true, "GPU/D3D12",
+-                    "With DLSS Performance or Ultra Performance, draw the targets drawn before the 3D scene that only "
+-                    "the scene samples at the game's own resolution")
++                    "With DLSS Performance or Ultra Performance (any mode for mua2's shadow maps), draw the targets "
++                    "drawn before the 3D scene that only the scene samples at the game's own resolution")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_STRING(d3d12_scene_profile, "", "GPU/D3D12",
+                       "How the game's renderer draws its 3D scene, for DLSS and FSR 3.1: mua1 (Marvel Ultimate "
+@@ -384,9 +384,9 @@ bool SceneUpscaler::EnsureRuntime() {
+       pre_scene_scale ? scene::PreSceneScale(render_width_, guest_width_, resolution_scale_x_) : resolution_scale_x_;
+   pre_scene_scale_y_ =
+       pre_scene_scale ? scene::PreSceneScale(render_height_, guest_height_, resolution_scale_y_) : resolution_scale_y_;
+-  pre_scene_native_ = REXCVAR_GET(d3d12_dlss_pre_scene_native) && PerformanceMode() &&
+-                      (pre_scene_scale_x_ > 1 || pre_scene_scale_y_ > 1) &&
+-                      (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
++  pre_scene_native_ = REXCVAR_GET(d3d12_dlss_pre_scene_native) &&
++                      scene::AllowsNativePreScene(*profile_, PerformanceMode(), {pre_scene_scale_x_, pre_scene_scale_y_},
++                                                  {resolution_scale_x_, resolution_scale_y_});
+   if (!EnsureResources()) {
+     DisableForSession("its textures can't be created");
+     return false;
+@@ -405,7 +405,10 @@ bool SceneUpscaler::EnsureRuntime() {
+                       : !profile_->reduce_pre_scene_targets ? " (the scene profile keeps them)"
+                                                             : " (d3d12_dlss_pre_scene_scale off)";
+   }
+-  if (pre_scene_native_) {
++  if (pre_scene_native_ && profile_->native_pre_scene_key) {
++    pre_scene_text += ", 1x for " + SurfaceText(profile_->native_pre_scene_key) + " (shadow maps) once only the scene "
++                      "samples it";
++  } else if (pre_scene_native_) {
+     pre_scene_text += ", 1x for those only the scene samples";
+   }
+   const std::string scene_scale_text =
+@@ -541,7 +544,8 @@ bool SceneUpscaler::EnsureResources() {
+   const uint64_t tile_bytes = uint64_t(kEdramTileWidth * resolution_scale_x_) *
+                               (kEdramTileHeight * resolution_scale_y_) * sizeof(uint32_t);
+   // Stretched pre-scene resolves sit at their EDRAM addresses.
+-  const bool pre_scene_reduced = pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_;
++  const bool pre_scene_reduced =
++      pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_ || pre_scene_native_;
+   const uint32_t staging_tiles = pre_scene_reduced ? xenos::kEdramTileCount : staging_pitch_tiles_ * staging_rows;
+   D3D12_RESOURCE_DESC staging_desc;
+   ui::d3d12::util::FillBufferResourceDesc(staging_desc, uint64_t(staging_tiles) * tile_bytes,
+@@ -718,8 +722,7 @@ void SceneUpscaler::NoteSceneViewport(const RegisterFile& regs, xenos::EdramMode
+ 
+ void SceneUpscaler::NoteOtherDraw(const RegisterFile& regs, const Shader& vertex_shader, const Shader* pixel_shader,
+                                   DrawAdjustment& adjustment) {
+-  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+-  const uint32_t key = scene::PreSceneTargets::Key(surface_info.surface_pitch, uint32_t(surface_info.msaa_samples));
++  const uint32_t key = PreSceneKey(regs);
+   pre_scene_targets_.NoteDraw(key, scene_drawn_);
+   if (scene_drawn_ && !other_resolves_.empty()) {
+     NoteSampledAfterScene(regs, vertex_shader);
+@@ -727,7 +730,7 @@ void SceneUpscaler::NoteOtherDraw(const RegisterFile& regs, const Shader& vertex
+       NoteSampledAfterScene(regs, *pixel_shader);
+     }
+   }
+-  if (pre_scene_frame_ && pre_scene_targets_.IsReduced(key)) {
++  if (pre_scene_frame_ && scene::IsPreSceneReduced(*profile_, pre_scene_targets_, key)) {
+     adjustment.scale_x = float(PreSceneScaleX(key)) / float(resolution_scale_x_);
+     adjustment.scale_y = float(PreSceneScaleY(key)) / float(resolution_scale_y_);
+     // The game's own depth bias for a target drawn at its own resolution.
+@@ -737,6 +740,12 @@ void SceneUpscaler::NoteOtherDraw(const RegisterFile& regs, const Shader& vertex
+   }
+ }
+ 
++uint32_t SceneUpscaler::PreSceneKey(const RegisterFile& regs) const {
++  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  return scene::PreSceneKeyFor(*profile_, surface_info.surface_pitch, uint32_t(surface_info.msaa_samples),
++                               scene_drawn_);
++}
++
+ uint32_t SceneUpscaler::PreSceneScaleX(uint32_t key) const {
+   return pre_scene_native_ && pre_scene_targets_.IsNative(key) ? 1 : pre_scene_scale_x_;
+ }
+@@ -847,6 +856,24 @@ void SceneUpscaler::LogPreSceneTargets() const {
+               kept.empty() ? "none" : kept);
+ }
+ 
++void SceneUpscaler::LogNativePreSceneTarget() {
++  const uint32_t key = profile_->native_pre_scene_key;
++  const bool native = pre_scene_targets_.IsNative(key);
++  if (native == native_pre_scene_logged_) {
++    return;
++  }
++  native_pre_scene_logged_ = native;
++  const std::string surface = SurfaceText(key) + " before the scene (shadow maps and their filtered copies)";
++  const std::string output_scale = ScaleText(resolution_scale_x_, resolution_scale_y_);
++  if (native) {
++    REXGPU_INFO("{}: {} at 1x - only the scene samples them; its draws after the scene, every other target and the "
++                "final framebuffer, HUD and menus stay at {}",
++                Tag(), surface, output_scale);
++  } else {
++    REXGPU_INFO("{}: {} back at {} for the session - sampled after the scene", Tag(), surface, output_scale);
++  }
++}
++
+ void SceneUpscaler::NoteDirectTransform(const RegisterFile& regs, const Shader& vertex_shader, uint32_t index_base,
+                                         uint32_t index_count) {
+   auto analysis = direct_transforms_.find(vertex_shader.ucode_data_hash());
+@@ -954,8 +981,8 @@ ID3D12Resource* SceneUpscaler::BeforeResolve(const RegisterFile& regs, const dra
+     return nullptr;
+   }
+   const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+-  const uint32_t key = scene::PreSceneTargets::Key(surface_info.surface_pitch, uint32_t(surface_info.msaa_samples));
+-  if (pre_scene_frame_ && pre_scene_targets_.IsReduced(key)) {
++  const uint32_t key = PreSceneKey(regs);
++  if (pre_scene_frame_ && scene::IsPreSceneReduced(*profile_, pre_scene_targets_, key)) {
+     NoteResolveDest(regs, resolve_info, key, true);
+     return StretchPreSceneResolve(resolve_info, key);
+   }
+@@ -1461,12 +1488,16 @@ void SceneUpscaler::BeforeSwap() {
+   }
+   candidate_draws_.clear();
+   LogUnpinnedScene();
+-  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_, pre_scene_native_) && runtime_ready_ &&
+-      profile_->reduce_pre_scene_targets) {
+-    LogPreSceneTargets();
++  if (pre_scene_targets_.EndFrame(scene_drawn_, scene_key_, pre_scene_native_) && runtime_ready_) {
++    if (profile_->native_pre_scene_key) {
++      LogNativePreSceneTarget();
++    } else if (profile_->reduce_pre_scene_targets) {
++      LogPreSceneTargets();
++    }
+   }
+-  pre_scene_frame_ =
+-      runtime_ready_ && (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
++  pre_scene_frame_ = runtime_ready_ && (profile_->native_pre_scene_key ? pre_scene_native_ && scene_drawn_
++                                                                       : pre_scene_scale_x_ < resolution_scale_x_ ||
++                                                                             pre_scene_scale_y_ < resolution_scale_y_);
+   scene_drawn_previous_frame_ = scene_drawn_;
+   scene_drawn_ = false;
+   planes_.EndFrame();

@@ -11,8 +11,10 @@
 # Player data created when the program runs from a source folder
 user_data/
 
-# Downloaded ReXGlue SDK
+# Downloaded ReXGlue SDK, NVIDIA DLSS SDK and AMD FidelityFX SDK files
 /tools/rexglue/
+/tools/nvidia-dlss/
+/tools/amd-fidelityfx/
 
 # Logs, dumps, binaries, console images and game executables
 *.log

@@ -344,7 +344,7 @@ void TestRealCrashAppendsToActiveLog() {
   CHECK(Has(text, "Exception code: 0xC0000374 (STATUS_HEAP_CORRUPTION)"));
   CHECK(Has(text, "Exception address: 0x"));
   CHECK(Has(text, "Product: Marvel Ultimate Alliance"));
-  CHECK(Has(text, "Build: RelWithDebInfo x86-64"));
+  CHECK(Has(text, ("Build: " + std::string(MUA_BUILD_CONFIG) + " x86-64").c_str()));
   CHECK(Has(text, "Uptime: 00:00:00") || Has(text, "Uptime: 00:00:01"));
   CHECK(Has(text, "Faulting module:"));
   CHECK(Has(text, "Thread ID:"));

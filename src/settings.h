@@ -12,6 +12,7 @@
 #include "trg/settings.h"
 
 #include "game_definition.h"
+#include "graphics_backend.h"
 #include "window_placement.h"
 
 REXCVAR_DECLARE(bool, mua_launcher);
@@ -36,6 +37,10 @@ REXCVAR_DECLARE(int32_t, mua_launcher_width);
 REXCVAR_DECLARE(int32_t, mua_launcher_height);
 REXCVAR_DECLARE(bool, mua_launcher_maximized);
 REXCVAR_DECLARE(bool, mua_launcher_fullscreen);
+REXCVAR_DECLARE(bool, mua_cheat_health);
+REXCVAR_DECLARE(bool, mua_cheat_energy);
+REXCVAR_DECLARE(int32_t, mua_cheat_coin_multiplier);
+REXCVAR_DECLARE(int32_t, mua_turbo_attack);
 
 namespace mua {
 
@@ -43,7 +48,7 @@ struct MonitorInfo;
 class GameSettings;
 
 // Allowing tearing is VSync Off.
-inline constexpr char kTearingSetting[] = "d3d12_allow_variable_refresh_rate_and_tearing";
+inline constexpr const char* kTearingSetting = kBackendSettings.tearing[0];
 
 inline constexpr char kSelectedGameKey[] = "mua_game";
 
@@ -75,11 +80,26 @@ void ApplyPlayerNames();
 // Turns on gpu_stream_dynamic_pages for a game runtime, unless the config sets it. Call with ApplyMultisampling.
 void ApplyDynamicPageStreaming(std::optional<GameId> game);
 
-// Sets present_effect for the game's Upscaling choice. Call before the presenter is created (OnPreSetup).
+// The upscalers this runtime runs: FSR 1 needs a presenter whose present_effect accepts it.
+UpscalerMask RuntimeUpscalers();
+
+// The active game's Upscaling choice; Off for a choice that game doesn't offer, or before a game is active.
+Upscaler ActiveUpscaler();
+
+// Sets present_effect for the game's Upscaling choice. Call before the presenter is created
+// (OnPreSetup).
 void ApplyUpscaler(const GameSettings& settings);
 
 // Logs the internal and output render sizes of the Upscaling choice. Call after ApplyGameSettings.
 void LogUpscaling();
+
+// Sets the Direct3D 12 runtime's DLSS mode from the Upscaling choice, with the DLSS bridge beside the program; NGX keeps
+// its files in the game's cache folder. Call after ApplyGameSettings and before the GPU starts.
+void ApplyDlss(const std::filesystem::path& cache_root);
+
+// Sets the Direct3D 12 runtime's AMD FSR 3.1 mode and sharpness from the Upscaling choice, with AMD's DLL beside the
+// program; any other choice turns it off.
+void ApplyFsr3();
 
 // Keeps the guest video mode off the window size, which ReXGlue otherwise reports. Call once the window exists and
 // before the guest starts.
@@ -89,9 +109,13 @@ void PinGuestVideoMode();
 // PinGuestVideoMode.
 void ApplyAspectRatio();
 
-// Sets d3d12_adapter from the launcher's Graphics card choice. Call once the player settings are loaded and
-// before the graphics device is created; Automatic leaves the SDK's own preference alone.
+// Sets the backend's graphics card index from the launcher's Graphics card choice. Call once the player settings are
+// loaded and before the graphics device is created.
 void ApplyGraphicsAdapter();
+
+// Sets every presenter setting that allows tearing to the saved VSync choice. Call once the player settings are loaded
+// and before the presenter is created.
+void ApplyVsync();
 
 struct StartupWindowInfo {
   int selected_width = -1;

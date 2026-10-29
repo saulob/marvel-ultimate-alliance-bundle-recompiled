@@ -185,6 +185,8 @@ void TestRenderResolution() {
   CHECK(RenderResolutionText(2, AspectRatio::k16x9, Upscaler::kFsr1, UpscaleQuality::kPerformance) ==
         "1280x720 (AMD FSR 1 Performance)");
   CHECK(RenderResolutionText(2, AspectRatio::k16x9, Upscaler::kOff, UpscaleQuality::kPerformance) == "2560x1440");
+  CHECK(RenderResolutionText(2, AspectRatio::k16x9, Upscaler::kDlss, UpscaleQuality::kPerformance) ==
+        "2560x1440 (NVIDIA DLSS Performance)");
   CHECK(RenderResolutionText(1, AspectRatio::k5x4) == "896x720");
 }
 

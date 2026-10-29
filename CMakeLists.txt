@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(marvel_ultimate_alliance VERSION 0.1.0 LANGUAGES C CXX)
+project(marvel_ultimate_alliance VERSION 0.2.0 LANGUAGES C CXX)
 set(MUA_VERSION_SUFFIX "")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -186,6 +186,7 @@ set(MUA_HOST_SOURCES
     src/crash_report.cpp
     src/diagnostics.cpp
     src/disc_identity.cpp
+    src/dlss_support.cpp
     src/game_definition.cpp
     src/game_files.cpp
     src/game_install.cpp
@@ -241,12 +242,16 @@ set(MUA_RUNTIME_SOURCES
     src/aspect_render.cpp
     src/audio_mixer_priority.cpp
     src/audio_pcm_firewall.cpp
+    src/cheat_menu.cpp
+    src/cheats.cpp
     src/crt_native.cpp
     src/d3d_state_filter.cpp
     src/frame_limiter.cpp
     src/frame_pacing.cpp
     src/gpu_fence_wait.cpp
+    src/guest_atomics.cpp
     src/guest_hook_report.cpp
+    src/guest_semaphore.cpp
     src/indirect_tail_calls.cpp
     src/main_menu.cpp
     src/main_menu_mua2.cpp
@@ -339,6 +344,8 @@ function(mua_add_game_executable target module_key icon_key)
             endif()
         endforeach()
     else()
+        # glibc 2.31 keeps dlopen in libdl, which the graphics card list loads the Vulkan loader with.
+        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:rex::runtime>" "$<TARGET_FILE_DIR:${target}>"
             VERBATIM
@@ -391,6 +398,42 @@ if(WIN32)
     target_link_options(trg-updater PRIVATE -static)
     set_property(TARGET trg-updater PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     set_target_properties(trg-updater PROPERTIES OUTPUT_NAME "trg-updater")
+endif()
+
+# NVIDIA DLSS Super Resolution (Windows): mua_dlss_bridge.dll is the only code built against NVIDIA's DLSS SDK, which
+# tools/setup-dlss-sdk.ps1 downloads. The GPU plugin (patches/rexglue-sdk/0160, 0161) and the launcher's support check
+# load it from beside the program, and everything runs without it.
+set(MUA_DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/nvidia-dlss/310.9.16")
+if(WIN32 AND EXISTS "${MUA_DLSS_SDK_DIR}/include/nvsdk_ngx_helpers.h"
+        AND EXISTS "${MUA_DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
+    set(MUA_DLSS_BRIDGE ON CACHE INTERNAL "Whether mua_dlss_bridge.dll is built")
+    add_library(mua_dlss_bridge SHARED src/dlss_bridge/dlss_bridge.cpp)
+    target_include_directories(mua_dlss_bridge PRIVATE "${MUA_DLSS_SDK_DIR}/include")
+    target_compile_definitions(mua_dlss_bridge PRIVATE MUA_DLSS_ENGINE_VERSION="${PROJECT_VERSION}")
+    # NVIDIA's nvsdk_ngx_s libraries are built for the static CRT, which also keeps the bridge free of runtime DLLs.
+    set_property(TARGET mua_dlss_bridge PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(mua_dlss_bridge PRIVATE
+        "${MUA_DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s$<$<CONFIG:Debug>:_dbg>.lib" version advapi32 user32)
+    add_custom_command(TARGET mua_dlss_bridge POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MUA_DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll"
+            "$<TARGET_FILE_DIR:mua_dlss_bridge>"
+        VERBATIM
+    )
+else()
+    set(MUA_DLSS_BRIDGE OFF CACHE INTERNAL "Whether mua_dlss_bridge.dll is built")
+endif()
+
+# AMD FSR 3.1 (Windows): AMD's signed amd_fidelityfx_dx12.dll, which tools/setup-fidelityfx.ps1 downloads, goes beside the
+# programs unmodified; the GPU plugin (patches/rexglue-sdk/0165) loads it from there.
+set(MUA_FIDELITYFX_DLL "${CMAKE_CURRENT_SOURCE_DIR}/tools/amd-fidelityfx/1.1.4/PrebuiltSignedDLL/amd_fidelityfx_dx12.dll")
+if(WIN32 AND EXISTS "${MUA_FIDELITYFX_DLL}")
+    set(MUA_FSR3_RUNTIME ON CACHE INTERNAL "Whether amd_fidelityfx_dx12.dll is staged")
+    add_custom_target(mua_fidelityfx_runtime ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MUA_FIDELITYFX_DLL}" "${CMAKE_BINARY_DIR}"
+        VERBATIM
+    )
+else()
+    set(MUA_FSR3_RUNTIME OFF CACHE INTERNAL "Whether amd_fidelityfx_dx12.dll is staged")
 endif()
 
 mua_add_game_executable(marvel_ultimate_alliance_bundle "" launcher)

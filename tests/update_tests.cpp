@@ -844,7 +844,7 @@ void TestBundleDefinitions() {
   for (const char* required :
        {"marvel_ultimate_alliance_bundle.exe", "marvel_ultimate_alliance_mua1.exe", "marvel_ultimate_alliance_mua1_gold.exe",
         "marvel_ultimate_alliance_mua2.exe", "trg-updater.exe", "rexruntime.dll", "rexgpu-xenos.dll",
-        "marvel_ultimate_alliance.toml", "assets/launcher/header-art-mua1.png",
+        "amd_fidelityfx_dx12.dll", "marvel_ultimate_alliance.toml", "assets/launcher/header-art-mua1.png",
         "assets/launcher/header-art-mua1-gold.png", "assets/launcher/header-art-mua2.png",
         "licenses/THIRD-PARTY-LICENSES.txt"}) {
     CHECK(std::find(bundle.begin(), bundle.end(), required) != bundle.end());
@@ -913,7 +913,7 @@ void TestSourceWiring() {
     const std::string_view name = file;
     if (name == "licenses/THIRD-PARTY-LICENSES.txt") {
       CHECK(Contains(package, "'THIRD-PARTY-LICENSES.txt'"));
-    } else if (name.rfind("assets/", 0) == 0) {
+    } else if (name.rfind("assets/", 0) == 0 || name.rfind("licenses/", 0) == 0) {
       std::string windows_path(name);
       std::replace(windows_path.begin(), windows_path.end(), '/', '\\');
       CHECK(Contains(package, "'" + windows_path + "'"));

@@ -1,0 +1,119 @@
+The DLSS depth (0161) comes from the first resolve after depth was written, once between depth clears; color still
+comes from every resolve after scene draws, so the last one wins. MUA1 resolves each predicated tile twice, and the
+draws between cover the whole tile with depth at the clear value, so the second resolve gave DLSS the clear value
+everywhere. A frame that writes no depth takes what the EDRAM holds at the first resolve after each clear.
+scene::ScenePlanes holds the rule. Builds on 0162.
+
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index 5c9873a..83ecee9 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -258,6 +258,41 @@ inline StagingPlacement StagingPlacementFor(uint32_t screen_x, uint32_t screen_y
+           (screen_x % kTileWidthSamples) >> 3, (screen_y % kTileHeightSamples) >> 3};
+ }
+ 
++// Which planes of the scene surface a resolve copies into the DLSS input. Color: at each resolve after scene draws,
++// before a resolve clears it, so the last one wins. Depth: once between depth clears, at the first resolve after draws
++// wrote it (or after any scene draw in a frame that writes none): MUA1 resolves each tile twice, and the draws between
++// cover the whole tile with depth at the clear value.
++class ScenePlanes {
++ public:
++  static constexpr uint32_t kColor = 1;
++  static constexpr uint32_t kDepth = 2;
++
++  void NoteSceneDraw(bool writes_depth) {
++    color_drawn_ = true;
++    depth_written_ |= writes_depth;
++    depth_written_in_frame_ |= writes_depth;
++  }
++  // Marks what it returns as taken.
++  uint32_t Take(bool depth_resolve) {
++    const bool depth = !depth_taken_ && (depth_written_ || !depth_written_in_frame_);
++    depth_taken_ |= depth;
++    return (!depth_resolve && color_drawn_ ? kColor : 0) | (depth ? kDepth : 0);
++  }
++  void AfterResolve(bool clears_color, bool clears_depth) {
++    color_drawn_ &= !clears_color;
++    if (clears_depth) {
++      depth_written_ = depth_taken_ = false;
++    }
++  }
++  void EndFrame() { *this = {}; }
++
++ private:
++  bool color_drawn_ = false;
++  bool depth_written_ = false;
++  bool depth_written_in_frame_ = false;
++  bool depth_taken_ = false;
++};
++
+ // Resolves whose whole rectangle later ones in the list cover again: their textures hold earlier content of the frame.
+ inline std::vector<bool> CoveredByLater(const std::vector<ResolveRect>& rects) {
+   std::vector<bool> covered(rects.size(), false);
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index 5fbd9a2..9a2c584 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -198,9 +198,7 @@ class SceneUpscaler {
+   bool scene_captured_ = false;
+   bool scene_drawn_previous_frame_ = false;
+   bool scene_pending_ = false;
+-  // Whether the EDRAM holds scene color or depth drawn since a resolve last cleared it.
+-  bool color_fresh_ = false;
+-  bool depth_fresh_ = false;
++  scene::ScenePlanes planes_;
+   std::optional<SceneResolve> resolving_;
+   uint32_t scenes_finished_this_frame_ = 0;
+   std::string structure_mismatch_;
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index 17f2b2d..08c63fc 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -448,7 +448,8 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+   const auto scene_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+   scene_key_ =
+       scene::PreSceneTargets::Key(scene_surface_info.surface_pitch, uint32_t(scene_surface_info.msaa_samples));
+-  color_fresh_ = depth_fresh_ = true;
++  const auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
++  planes_.NoteSceneDraw(depth_control.z_enable && depth_control.z_write_enable);
+   if (edram_mode == xenos::EdramMode::kColorDepth && !viewport_known_) {
+     const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+     guest_viewport_ = {
+@@ -461,7 +462,6 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+     };
+     viewport_known_ = vte.vport_x_scale_ena && vte.vport_y_scale_ena;
+   }
+-  const auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
+   if (depth_control.z_enable) {
+     depth_inverted_ = depth_control.zfunc == xenos::CompareFunction::kGreater ||
+                       depth_control.zfunc == xenos::CompareFunction::kGreaterEqual;
+@@ -724,8 +724,7 @@ ID3D12Resource* SceneUpscaler::BeforeResolve(const RegisterFile& regs, const dra
+                                            double(render_height_) / double(guest_height_), render_width_,
+                                            render_height_);
+ 
+-  // Each plane is taken at the first resolve after it was drawn, before a resolve clears it.
+-  const uint32_t planes = uint32_t(!depth && color_fresh_) | uint32_t(depth_fresh_) << 1;
++  const uint32_t planes = planes_.Take(depth);
+   if (planes && resolve.region.width && resolve.region.height) {
+     const uint32_t tile_width = kEdramTileWidth * resolution_scale_x_;
+     const uint32_t tile_height = kEdramTileHeight * resolution_scale_y_;
+@@ -767,8 +766,8 @@ void SceneUpscaler::AfterResolve() {
+   }
+   const SceneResolve resolve = *resolving_;
+   resolving_.reset();
+-  color_fresh_ &= !resolve.info.rb_copy_control.color_clear_enable;
+-  depth_fresh_ &= !resolve.info.rb_copy_control.depth_clear_enable;
++  const auto copy_control = resolve.info.rb_copy_control;
++  planes_.AfterResolve(copy_control.color_clear_enable, copy_control.depth_clear_enable);
+   // The game's own copy holds the smaller scene in a corner of the texture; whatever reads it before the scene is done
+   // gets it stretched to full size instead.
+   EncodeStaging(resolve.depth ? Encode::kStretchedDepth : Encode::kStretchedColor, &resolve);
+@@ -1048,7 +1047,7 @@ void SceneUpscaler::BeforeSwap() {
+       runtime_ready_ && (pre_scene_scale_x_ < resolution_scale_x_ || pre_scene_scale_y_ < resolution_scale_y_);
+   scene_drawn_previous_frame_ = scene_drawn_;
+   scene_drawn_ = false;
+-  color_fresh_ = depth_fresh_ = false;
++  planes_.EndFrame();
+   resolving_.reset();
+   viewport_known_ = false;
+   previous_matrices_.swap(matrices_);

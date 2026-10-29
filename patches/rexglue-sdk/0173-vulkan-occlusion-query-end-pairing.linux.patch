@@ -1,0 +1,85 @@
+The Vulkan half of 0108 (with the begin block zeroing 0075 does on Direct3D 12): Direct3D 9 gives a
+query's BEGIN and END their own sample count blocks, but the END handler required the BEGIN's address, so
+the first END disabled host occlusion queries for the rest of the session. END now pairs with the active
+query, and a BEGIN without an END, or a nested BEGIN, abandons only that query.
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 136c095..7f9394b 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -444,6 +444,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // if wait is true, awaits the rest.
+   void CompleteOcclusionQueries(bool wait);
+   bool AcquireOcclusionQueryIndex(uint32_t& host_index_out);
++  void AbandonActiveOcclusionQuery();
+   void DisableHostOcclusionQueries();
+   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
+   void WriteGuestOcclusionResult(uint32_t sample_count_address, uint64_t samples);
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 51ebe08..43bf855 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -630,7 +630,7 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
+   auto* sample_counts =
+       memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_addr);
+   if (!sample_counts) {
+-    DisableHostOcclusionQueries();
++    AbandonActiveOcclusionQuery();
+     return true;
+   }
+ 
+@@ -658,20 +658,20 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
+   bool is_end = is_end_via_z_pass || is_end_via_z_fail;
+ 
+   if (!is_end) {
+-    if (active_occlusion_query_.valid &&
+-        active_occlusion_query_.sample_count_address != sample_count_addr) {
+-      DisableHostOcclusionQueries();
+-      return write_fallback_result();
+-    }
++    // Direct3D 9 snapshots the counters into separate begin and end blocks and subtracts them, so
++    // the begin block reads as zero (as in the fallback result) and only the end block carries the
++    // host result, written once its submission completes. A BEGIN that never got its END is
++    // abandoned.
++    AbandonActiveOcclusionQuery();
++    std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
+     if (!BeginGuestOcclusionQuery(sample_count_addr)) {
+       return write_fallback_result();
+     }
+     return true;
+   }
+ 
+-  if (!active_occlusion_query_.valid ||
+-      active_occlusion_query_.sample_count_address != sample_count_addr) {
+-    DisableHostOcclusionQueries();
++  // END has its own block, so it pairs with the active query whatever its address.
++  if (!active_occlusion_query_.valid) {
+     return write_fallback_result();
+   }
+ 
+@@ -4826,6 +4826,16 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
+   return true;
+ }
+ 
++void VulkanCommandProcessor::AbandonActiveOcclusionQuery() {
++  // An active query's submission is open: EndSubmission ends and drops it.
++  if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE && submission_open_) {
++    EndRenderPass();
++    deferred_command_buffer_.CmdVkEndQuery(occlusion_query_pool_,
++                                           active_occlusion_query_.host_index);
++  }
++  active_occlusion_query_ = {};
++}
++
+ void VulkanCommandProcessor::DisableHostOcclusionQueries() {
+   if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
+     if (BeginSubmission(true)) {
+@@ -4847,7 +4857,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+   if (active_occlusion_query_.valid) {
+     REXGPU_WARN(
+         "VulkanCommandProcessor: Occlusion query begin issued while another query is active");
+-    DisableHostOcclusionQueries();
++    AbandonActiveOcclusionQuery();
+     return false;
+   }
+ 

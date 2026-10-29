@@ -1,0 +1,159 @@
+Marvel Ultimate Alliance Gold Edition's scene profile for the scene upscaler of 0161 to 0166. The Gold Edition links a
+later Direct3D, which also draws full-surface quads over the scene surface's EDRAM at 4x MSAA with half the pitch (the
+same width in samples), on its color (base 0) and depth (base 1128), between the scene's draws and resolves. Draws at
+another sample count end the scene's pass, so the mua1-gold profile keeps 0166's rule and adds scene_memory_4x_draws:
+until the frame's scene is done, those draws are part of its pass, drawn at the scene's scale without jitter, and the
+planes they write over count as cleared for the depth taken once between clears (ScenePlanes::Clear, which a
+resolve's clears go through too). Any other draw between the scene's resolves still ends its pass, and a second pass
+in a frame still turns the upscaler off. mua1 leaves it off, so Marvel Ultimate Alliance is unchanged.
+
+diff --git a/include/rex/graphics/d3d12/scene_layout.h b/include/rex/graphics/d3d12/scene_layout.h
+index 8c7cd42..a35a6bb 100644
+--- a/include/rex/graphics/d3d12/scene_layout.h
++++ b/include/rex/graphics/d3d12/scene_layout.h
+@@ -308,8 +308,12 @@ class ScenePlanes {
+     return (!depth_resolve && color_drawn_ ? kColor : 0) | (depth ? kDepth : 0);
+   }
+   void AfterResolve(bool clears_color, bool clears_depth) {
+-    color_drawn_ &= !clears_color;
+-    if (clears_depth) {
++    Clear((clears_color ? kColor : 0) | (clears_depth ? kDepth : 0));
++  }
++  // A resolve's clears, or a draw over the planes at another sample count.
++  void Clear(uint32_t planes) {
++    color_drawn_ &= !(planes & kColor);
++    if (planes & kDepth) {
+       depth_written_ = depth_taken_ = false;
+     }
+   }
+@@ -637,6 +641,7 @@ inline std::optional<CameraProjection> ConsensusCameraProjection(const std::vect
+ 
+ // xenos::MsaaSamples and xenos::ColorRenderTargetFormat values.
+ inline constexpr uint32_t kMsaa2xLog2 = 1;
++inline constexpr uint32_t kMsaa4xLog2 = 2;
+ inline constexpr uint32_t kColorFormat8888 = 0;
+ inline constexpr uint32_t kColorFormat8888Gamma = 1;
+ 
+@@ -647,11 +652,15 @@ struct SceneProfile {
+   uint32_t min_msaa_samples_log2;
+   std::array<uint32_t, 2> color_formats;
+   uint32_t min_draws;
++  // Its Direct3D also draws over the scene's memory at 4x MSAA with the same width in samples, between the scene's
++  // resolves: until the frame's scene is done, those draws are part of it.
++  bool scene_memory_4x_draws;
+ };
+ 
+-// Marvel Ultimate Alliance and its Gold Edition draw with one renderer and the same assets and shaders.
++// The Gold Edition's later Direct3D draws full-surface quads over the scene's memory at 4x MSAA and half the pitch.
+ inline constexpr std::array kSceneProfiles = {
+-    SceneProfile{"mua1", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20},
++    SceneProfile{"mua1", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20, false},
++    SceneProfile{"mua1-gold", kMsaa2xLog2, {kColorFormat8888, kColorFormat8888Gamma}, 20, true},
+ };
+ 
+ inline const SceneProfile* FindSceneProfile(std::string_view key) {
+@@ -669,4 +678,23 @@ inline bool IsSceneSurfaceCandidate(const SceneProfile& profile, uint32_t msaa_s
+              profile.color_formats.end();
+ }
+ 
++// A surface's width in samples (PreSceneTargets keys): a 4x MSAA pixel is two samples wide.
++inline uint32_t PitchSamples(uint32_t key) {
++  return PreSceneTargets::Pitch(key) << uint32_t(PreSceneTargets::SamplesLog2(key) >= kMsaa4xLog2);
++}
++
++// Whether a draw into a surface of key at base, which isn't a scene draw, is one of the profile's 4x MSAA draws over
++// the scene's memory: base is its color base when it writes color, its depth base otherwise, as for scene draws.
++inline bool IsSceneMemoryDraw(const SceneProfile& profile, uint32_t scene_key, uint32_t key, uint32_t base,
++                              uint32_t scene_color_base, uint32_t scene_depth_base) {
++  return profile.scene_memory_4x_draws && PreSceneTargets::SamplesLog2(key) == kMsaa4xLog2 &&
++         PreSceneTargets::SamplesLog2(scene_key) < kMsaa4xLog2 && PitchSamples(key) == PitchSamples(scene_key) &&
++         (base == scene_color_base || base == scene_depth_base);
++}
++
++// The scene's planes (ScenePlanes bits) a write at base lands in.
++inline uint32_t ScenePlanesAt(uint32_t base, uint32_t scene_color_base, uint32_t scene_depth_base) {
++  return (base == scene_color_base ? ScenePlanes::kColor : 0) | (base == scene_depth_base ? ScenePlanes::kDepth : 0);
++}
++
+ }  // namespace rex::graphics::d3d12::scene
+diff --git a/include/rex/graphics/d3d12/scene_upscaler.h b/include/rex/graphics/d3d12/scene_upscaler.h
+index afe70c8..4a6a0e7 100644
+--- a/include/rex/graphics/d3d12/scene_upscaler.h
++++ b/include/rex/graphics/d3d12/scene_upscaler.h
+@@ -122,6 +122,9 @@ class SceneUpscaler {
+   void ReleaseResources();
+   void DisableForSession(const std::string& reason);
+   bool IsSceneDraw(const RegisterFile& regs, xenos::EdramMode edram_mode, bool pixel_shader_writes_color) const;
++  bool IsSceneMemoryDraw(const RegisterFile& regs, xenos::EdramMode edram_mode, bool pixel_shader_writes_color) const;
++  void NoteSceneMemoryDraw(const RegisterFile& regs, xenos::EdramMode edram_mode, bool pixel_shader_writes_color,
++                           DrawAdjustment& adjustment);
+   void NoteOtherDraw(const RegisterFile& regs, const Shader& vertex_shader, const Shader* pixel_shader,
+                      DrawAdjustment& adjustment);
+   void NoteSampledAfterScene(const RegisterFile& regs, const Shader& shader);
+diff --git a/src/graphics/d3d12/scene_upscaler.cpp b/src/graphics/d3d12/scene_upscaler.cpp
+index fbd0de8..db21451 100644
+--- a/src/graphics/d3d12/scene_upscaler.cpp
++++ b/src/graphics/d3d12/scene_upscaler.cpp
+@@ -56,7 +56,7 @@ REXCVAR_DEFINE_BOOL(d3d12_dlss_pre_scene_native, true, "GPU/D3D12",
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_STRING(d3d12_scene_profile, "", "GPU/D3D12",
+                       "How the game's renderer draws its 3D scene, for DLSS and FSR 3.1: mua1 (Marvel Ultimate "
+-                      "Alliance and its Gold Edition); empty leaves both off")
++                      "Alliance), mua1-gold (its Gold Edition); empty leaves both off")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::d3d12 {
+@@ -544,6 +544,42 @@ bool SceneUpscaler::IsSceneDraw(const RegisterFile& regs, xenos::EdramMode edram
+   return regs.Get<reg::RB_DEPTH_INFO>().depth_base == surface_->depth_base;
+ }
+ 
++bool SceneUpscaler::IsSceneMemoryDraw(const RegisterFile& regs, xenos::EdramMode edram_mode,
++                                      bool pixel_shader_writes_color) const {
++  if (!profile_->scene_memory_4x_draws || !surface_ || scenes_finished_this_frame_ ||
++      (edram_mode != xenos::EdramMode::kColorDepth && edram_mode != xenos::EdramMode::kDepthOnly)) {
++    return false;
++  }
++  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  const uint32_t base = edram_mode == xenos::EdramMode::kColorDepth && pixel_shader_writes_color
++                            ? uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_base)
++                            : uint32_t(regs.Get<reg::RB_DEPTH_INFO>().depth_base);
++  return scene::IsSceneMemoryDraw(
++      *profile_, scene_key_,
++      scene::PreSceneTargets::Key(surface_info.surface_pitch, uint32_t(surface_info.msaa_samples)), base,
++      surface_->color_base, surface_->depth_base);
++}
++
++// It lands where the scene's draws do, unjittered, and what it writes over is no longer the scene's.
++void SceneUpscaler::NoteSceneMemoryDraw(const RegisterFile& regs, xenos::EdramMode edram_mode,
++                                        bool pixel_shader_writes_color, DrawAdjustment& adjustment) {
++  uint32_t planes = 0;
++  if (edram_mode == xenos::EdramMode::kColorDepth && pixel_shader_writes_color) {
++    planes |= scene::ScenePlanesAt(regs.Get<reg::RB_COLOR_INFO>().color_base, surface_->color_base,
++                                   surface_->depth_base);
++  }
++  const auto depth_control = regs.Get<reg::RB_DEPTHCONTROL>();
++  if (depth_control.z_enable && depth_control.z_write_enable) {
++    planes |= scene::ScenePlanesAt(regs.Get<reg::RB_DEPTH_INFO>().depth_base, surface_->color_base,
++                                   surface_->depth_base);
++  }
++  planes_.Clear(planes);
++  if (runtime_ready_) {
++    adjustment.scale_x = float(render_width_) / float(output_width_);
++    adjustment.scale_y = float(render_height_) / float(output_height_);
++  }
++}
++
+ std::array<float, 2> SceneUpscaler::JitterForFrame() const {
+   const uint32_t index = uint32_t(jitter_index_ % jitter_phases_) + 1;
+   return {scene::Halton(index, 2) - 0.5f, scene::Halton(index, 3) - 0.5f};
+@@ -559,6 +595,10 @@ SceneUpscaler::DrawAdjustment SceneUpscaler::BeginDraw(const RegisterFile& regs,
+   const bool pixel_shader_writes_color = pixel_shader != nullptr;
+   const bool scene = IsSceneDraw(regs, edram_mode, pixel_shader_writes_color);
+   if (!scene) {
++    if (IsSceneMemoryDraw(regs, edram_mode, pixel_shader_writes_color)) {
++      NoteSceneMemoryDraw(regs, edram_mode, pixel_shader_writes_color, adjustment);
++      return adjustment;
++    }
+     if (scene_pending_) {
+       FinishScene();
+     }
