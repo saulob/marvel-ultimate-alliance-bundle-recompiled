@@ -75,6 +75,8 @@ PLAYING
 - F11 switches between Windowed and Borderless Fullscreen.
 - F7 opens the achievements list. Achievements are kept on this PC only.
 - F2 shows or hides a frame counter in the corner of the window.
+- F10 opens the Cheats menu, which changes the cheats for the current session
+  only. Their saved values are on the launcher's Cheats page.
 - Each game saves and loads as on the console. There is no Xbox Live
   connection and no online play.
 - To open the launcher again after turning it off, hold Shift while starting.

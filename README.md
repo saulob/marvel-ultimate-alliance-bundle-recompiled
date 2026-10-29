@@ -18,19 +18,20 @@
 
 - **Three games in one bundle**: Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2, each recompiled from its own game code into its own program, chosen from one launcher.
 - **Native static recompilation**: the games' own code, not an emulator. Windows (Direct3D 12), plus an experimental Linux / Steam Deck AppImage (Vulkan).
-- **TRG launcher** with a game selector, a disc image installer per game, and Display, Graphics, Gameplay, Achievements, Controls and About pages for the selected game.
+- **TRG launcher** with a game selector, a disc image installer per game, and Display, Graphics, Gameplay, Cheats, Achievements, Controls and About pages for the selected game.
 - **Launcher updates**: the launcher checks GitHub releases once per start and installs a newer release only when you choose UPDATE NOW. Game files, saves, settings and logs are kept.
 - **Display**: Windowed or Borderless Fullscreen (**F11**), window size, monitor and VSync.
 - **Native aspect ratios**: 16:9, 16:10, 21:9 and 32:9 ultrawide, 4:3 and 5:4. The games render at the chosen shape instead of stretching a 16:9 picture.
 - **Render resolution** from the original 720p picture up to 4x, independent of the window size.
-- **Upscaling (Windows)**: AMD FSR 1, with Native, Quality, Balanced and Performance modes that draw the game below the Render resolution and scale it up. All three games also have temporal upscaling of the 3D scene, with the HUD and menus kept at the Render resolution: AMD FSR 3.1 on any graphics card (Native, Quality, Balanced, Performance, Ultra Performance) and NVIDIA DLSS Super Resolution on GeForce RTX cards (DLAA, Quality, Balanced, Performance); see [docs/fsr3.md](docs/fsr3.md) and [docs/dlss.md](docs/dlss.md).
+- **Upscaling**: AMD FSR 1 on Windows and Linux, with Native, Quality, Balanced and Performance modes that draw the game below the Render resolution and scale it up. On Windows all three games also have temporal upscaling of the 3D scene, with the HUD and menus kept at the Render resolution: AMD FSR 3.1 on any graphics card (Native, Quality, Balanced, Performance, Ultra Performance) and NVIDIA DLSS Super Resolution on GeForce RTX cards (DLAA, Quality, Balanced, Performance); see [docs/fsr3.md](docs/fsr3.md) and [docs/dlss.md](docs/dlss.md).
 - **HD Text (Marvel Ultimate Alliance and Gold Edition)**: the games' text and controller icons rebuilt at higher resolution to match the Render resolution.
 - **Frame rate**: 30 (the games' original rate), 60 (default), 90, 120, 144, 165, 240 or Unlimited, chosen per game.
-- **Graphics card selection (Windows), anti-aliasing and texture filtering** choices.
+- **Graphics card selection, anti-aliasing and texture filtering** choices.
 - **Local saves and profiles** for each game, and **player names** for up to four local players.
 - **Offline achievements**: each game's achievements are kept on this PC, listed with **F7** and in the launcher. There is no Xbox Live connection.
 - **Xbox controller support** with no setup, and remappable keyboard play.
 - **Skip intro**: start directly at the title screen.
+- **Cheats**: Infinite Health, Infinite Energy and Turbo Attack in all three games, and a Coin Multiplier (2x, 5x or 10x) in Marvel Ultimate Alliance and Gold Edition. They are off by default, chosen per game in the launcher, and **F10** changes them for the current session while you play.
 - **In-game frame counter** (**F2**) and optional frame rate or render resolution in the window title.
 - **Diagnostics**: one log per session with the system, settings and frame timing, and a `CRASH REPORT` section after a crash on Windows.
 - **Portable user data**: saves, settings and achievements are in a `user_data` folder beside the program.
@@ -71,7 +72,7 @@ The launcher checks the Title ID and Media ID when you pick the disc image and c
 
 ### Linux and Steam Deck
 
-**Experimental.** This is a native Linux build (ReXGlue's patched Linux runtime and Vulkan GPU plugin), not Proton or Wine, with the launcher and the three games in one x86_64 AppImage. It is built and checked by script on Ubuntu 20.04 (it needs glibc 2.31 or newer), but it has not been broadly validated on real Linux PCs or Steam Deck hardware: Steam Deck is expected to work through the AppImage, and reports are welcome. Upscaling and the Graphics card selector are Windows only.
+**Experimental.** This is a native Linux build (ReXGlue's patched Linux runtime and Vulkan GPU plugin), not Proton or Wine, with the launcher and the three games in one x86_64 AppImage. It is built and checked by script on Ubuntu 20.04 (it needs glibc 2.31 or newer), but it has not been broadly validated on real Linux PCs or Steam Deck hardware: Steam Deck is expected to work through the AppImage, and reports are welcome. The launcher offers the same settings as on Windows; the Graphics card selector lists the Vulkan devices and Upscaling offers AMD FSR 1. AMD FSR 3.1 and NVIDIA DLSS run in the Direct3D 12 graphics plugin and are Windows only.
 
 1. Download **MarvelUltimateAlliance-v0.1.0-x86_64.AppImage** from the release and mark it executable (right-click > **Properties** > **Permissions** > **Is executable**, or `chmod +x`).
 2. Run it from a folder you can write to, then install each game from its disc image on the **Play** page as above. The launcher works as on Windows.
@@ -89,17 +90,20 @@ The selector under the header chooses the game, and the pages beside it belong t
 
 - **Play**: disc image install and reinstall, status
 - **Display**: Display mode, Window size, Monitor, Aspect Ratio and VSync
-- **Graphics**: Graphics card (Windows), Render resolution, Upscaling (Windows), Anti-aliasing, Multisampling where it applies, Texture filtering, and HD Text (Marvel Ultimate Alliance and Gold Edition)
+- **Graphics**: Graphics card, Render resolution, Upscaling, Anti-aliasing, Multisampling where it applies, Texture filtering, and HD Text (Marvel Ultimate Alliance and Gold Edition)
 - **Gameplay**: Skip intro, Frame rate, frame rate and render resolution in the title, frame counter, and Player names
+- **Cheats**: Infinite Health, Infinite Energy, Coin Multiplier (Marvel Ultimate Alliance and Gold Edition) and Turbo Attack
 - **Achievements**: the selected game's unlocked achievements and gamerscore
 - **Controls**: keyboard on or off, every key remappable, and **Keyboard defaults** to restore the standard layout
 - **About**: versions, folders (game files, saves and settings, logs), the settings file, **Detailed logging** and **Open logs folder**
 
-**Render resolution** draws the game at a multiple of its own picture (Original, 2x, 3x or 4x, sized for the chosen aspect ratio) and then scales it to the window. **Upscaling** uses AMD FSR 1 to scale the picture to the window; Quality, Balanced and Performance draw the game 1.5, 1.7 and 2 times smaller along each axis than the Render resolution, which costs less GPU time. In all three games, **AMD FSR 3.1** (NVIDIA, AMD and Intel graphics) and **NVIDIA DLSS** (GeForce RTX) draw only the 3D scene below the Render resolution and rebuild it there from several frames with motion and depth; AMD's `amd_fidelityfx_dx12.dll` ships beside the programs. FSR 3.1 and DLSS are Windows only; Linux offers FSR 1.
+**Render resolution** draws the game at a multiple of its own picture (Original, 2x, 3x or 4x, sized for the chosen aspect ratio) and then scales it to the window. **Upscaling** uses AMD FSR 1 to scale the picture to the window; Quality, Balanced and Performance draw the game 1.5, 1.7 and 2 times smaller along each axis than the Render resolution, which costs less GPU time. In all three games, **AMD FSR 3.1** (NVIDIA, AMD and Intel graphics) and **NVIDIA DLSS** (GeForce RTX) draw only the 3D scene below the Render resolution and rebuild it there from several frames with motion and depth; AMD's `amd_fidelityfx_dx12.dll` ships beside the programs. FSR 3.1 and DLSS run in the Direct3D 12 graphics plugin and are Windows only; Linux offers FSR 1.
 
 **HD Text** (Marvel Ultimate Alliance and Gold Edition, On by default) rebuilds the games' font atlases at 2x the size at Render resolution 2x, and at 4x the size at 3x and 4x, when the game starts. The layout, colours and animation stay the game's, the game files are not changed, and nothing taken from the game ships with the port. It uses about 6 MB of memory at 2x and 24 MB at 3x and 4x. HD Text is not available for Marvel Ultimate Alliance 2.
 
 **Frame rate** 30 is the games' original rate; 60 is the default, and the higher rates and Unlimited are for high refresh rate displays. The setting is kept per game.
+
+**Cheats** are saved per game and take effect the next time that game starts. Infinite Health and Infinite Energy keep every party hero at their own maximum; Coin Multiplier multiplies the coins the game awards (it is not offered for Marvel Ultimate Alliance 2); Turbo Attack repeats the basic attack while the attack button stays held. Press **F10** while playing to open the Cheats menu: what it changes applies to the current session only and is not saved.
 
 **Player names** are shared by the three games: player N is the controller in port N. They only change the names the games show; profiles, saves and achievements stay where they are.
 
@@ -110,6 +114,7 @@ The selector under the header chooses the game, and the pages beside it belong t
 | **F11** | Windowed or Borderless Fullscreen (in the launcher too) |
 | **F2** | Show or hide the frame counter |
 | **F7** | Achievements |
+| **F10** | Cheats menu (session only) |
 | **F9** | Write the last seconds of audio activity to the log, for an audio problem report |
 
 During gameplay the mouse cursor follows the last input device: mouse activity shows it, keyboard or controller activity hides it, and overlays show it.

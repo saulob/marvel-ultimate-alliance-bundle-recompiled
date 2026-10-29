@@ -199,6 +199,7 @@ void TestSettingsFlow() {
   CHECK(Has(scoped_block, "\"mua_cheat_health\""));
   CHECK(Has(scoped_block, "\"mua_cheat_energy\""));
   CHECK(Has(scoped_block, "\"mua_cheat_coin_multiplier\""));
+  CHECK(Has(scoped_block, "\"mua_turbo_attack\""));
 }
 
 void TestRuntimeSources() {
@@ -238,19 +239,9 @@ void TestRuntimeSources() {
   CHECK(Has(cheats_source, "kMoneyArrayOffset"));
   CHECK(Has(cheats_source, "REXCVAR_GET(mua_cheat_health)"));
   CHECK(Has(cheats_source, "MUA_RUNTIME_MUA1_GOLD"));
-  CHECK(Has(cheats_source, "DEBUG_SAULO"));
-  CHECK(Has(cheats_source, "CHEATS INIT"));
-  CHECK(Has(cheats_source, "CHEATS HOOKS"));
-  CHECK(Has(cheats_source, "CHEAT STATE"));
-  CHECK(Has(cheats_source, "HERO ACCEPTED"));
-  CHECK(Has(cheats_source, "HERO REJECTED"));
-  CHECK(Has(cheats_source, "HEALTH BLOCKED"));
-  CHECK(Has(cheats_source, "HEALTH LIFECYCLE PASS"));
-  CHECK(Has(cheats_source, "HEALTH REFILL"));
-  CHECK(Has(cheats_source, "ENERGY BLOCKED"));
-  CHECK(Has(cheats_source, "ENERGY REFILL"));
-  CHECK(Has(cheats_source, "CHEAT SUMMARY"));
-  CHECK(Has(cheats_source, "FINAL CHEAT SUMMARY"));
+  CHECK(!Has(cheats_source, "DEBUG_SAULO"));
+  CHECK(!Has(menu, "DEBUG_SAULO"));
+  CHECK(!Has(cheats_source, "REXLOG"));
 }
 
 // Each executable is compiled with one guest map, so its hooks and structure offsets must be selected at compile
@@ -302,17 +293,12 @@ void TestGameIsolation() {
   CHECK(!Has(source, "IsPartyHandle"));
   CHECK(Has(source, "t_in_party_tick"));
   CHECK(Has(source, "CommitPartySnapshot"));
-  CHECK(Has(source, "PARTY SNAPSHOT"));
-  CHECK(Has(source, "HERO REMOVED"));
   CHECK(Count(source, "#define MUA_CHEAT_PARTY_RESOLVER_LR 0x82600774u") == 1);
   CHECK(Has(source, "IsPartyResolverCaller(caller, MUA_CHEAT_PARTY_RESOLVER_LR)"));
-  CHECK(Has(source, "resolver_nested_ignored"));
-  CHECK(Has(source, "party_resolver_direct_hits"));
-  // Turbo Attack is MUA1-only.
+  // Turbo Attack hooks the one pad-state wrapper of every game.
   CHECK(Has(source, "#define MUA_CHEAT_GET_PAD_STATE sub_82467DD0"));
   CHECK(Has(source, "#define MUA_CHEAT_GET_PAD_STATE sub_82480338"));
   CHECK(Has(source, "#define MUA_CHEAT_GET_PAD_STATE sub_829AD238"));
-  CHECK(Count(source, "#define MUA_CHEAT_GUEST_GET_PAD_STATE ") == 3);
   CHECK(Count(source, "#define MUA_CHEAT_USES_TURBO_ATTACK 1") == 3);
   CHECK(Count(source, "#define MUA_CHEAT_USES_TURBO_ATTACK 0") == 0);
   CHECK(Has(source, "#define MUA_CHEAT_GET_PAD_STATE sub_82467DD0"));
@@ -494,6 +480,25 @@ void TestTurboAttack() {
   CHECK(TurboPressEdges(true, 0.3, false) == 1);
 }
 
+// The cheats are guest-memory and input hooks, so Windows and Linux run the same code: nothing in them may name a
+// platform or a graphics backend.
+void TestPlatformNeutral() {
+  for (const char* file : {"cheats.h", "cheats.cpp", "cheat_menu.h", "cheat_menu.cpp"}) {
+    const std::string text = ReadSource(file);
+    CHECK(!text.empty());
+    for (const char* forbidden : {"_WIN32", "__linux__", "WIN32_", "windows.h", "d3d12", "D3D12", "vulkan", "Vulkan",
+                                  "XInputGetState", "GetAsyncKeyState", "SDL_", "DEBUG_SAULO"}) {
+      CHECK(!Has(text, forbidden));
+    }
+  }
+  const std::string launcher = ReadSource("launcher.cpp");
+  const size_t page = launcher.find("void PageCheats(trg::Ui& ui)");
+  const size_t end = launcher.find("void PageAchievements", page);
+  CHECK(page != std::string::npos && end != std::string::npos);
+  const std::string body = launcher.substr(page, end - page);
+  CHECK(!Has(body, "#if") && !Has(body, "kGraphicsBackend") && !Has(body, "_WIN32"));
+}
+
 }  // namespace
 
 int main() {
@@ -510,6 +515,7 @@ int main() {
   TestPartySnapshot();
   TestTurboSession();
   TestTurboAttack();
+  TestPlatformNeutral();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

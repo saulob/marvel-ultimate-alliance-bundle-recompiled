@@ -234,7 +234,9 @@ void TestApp() {
   CHECK(Has(settings, "rex::cvar::SetFlagByName(\"d3d12_fsr3_mode\", Fsr3ModeFor(quality));"));
   CHECK(Has(settings, "rex::cvar::SetFlagByName(\"d3d12_fsr3_sharpness\", std::to_string(sharpness));"));
   CHECK(Has(settings, "REXCVAR_DEFINE_INT32(mua_fsr3_sharpness, mua::kDefaultFsr3Sharpness,"));
-  CHECK(Has(settings, "\"mua_fsr3_sharpness\"};"));
+  const size_t scoped = settings.find("kGameScopedKeys[]");
+  CHECK(scoped != std::string::npos);
+  CHECK(Has(settings.substr(scoped, settings.find("};", scoped) - scoped), "\"mua_fsr3_sharpness\""));
   const std::string app = ReadFile(kRoot + "src/marvel_ultimate_alliance_app.h");
   CHECK(Has(app, "mua::ApplyDlss(routed.cache_root);\n      mua::ApplyFsr3();"));
   const std::string launcher = ReadFile(kRoot + "src/launcher.cpp");

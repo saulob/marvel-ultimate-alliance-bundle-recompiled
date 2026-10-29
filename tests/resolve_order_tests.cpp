@@ -51,17 +51,24 @@ void TestResolveBody(const fs::path& source) {
   std::printf("a resolve copies, marks the range written, then clears behind a state transition\n");
   const std::string cache = Read(source / "src/graphics/d3d12/render_target_cache.cpp");
   const std::string resolve = Body(cache, "bool D3D12RenderTargetCache::Resolve(");
+  // The Windows runtime source moves the copy into CopyResolveToMemory (patch 0123); the Linux staged source keeps it
+  // in Resolve.
+  const std::string split_copy = Body(cache, "bool D3D12RenderTargetCache::CopyResolveToMemory(");
+  const std::string& copy = split_copy.empty() ? resolve : split_copy;
   CHECK(!resolve.empty());
-  const size_t dispatch = Find(resolve, "D3DDispatch(copy_group_count_x");
-  const size_t mark = Find(resolve, "MarkRangeAsResolved(");
+  const size_t transition = Find(copy, "TransitionEdramBuffer(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)");
+  const size_t dispatch = Find(copy, "D3DDispatch(copy_group_count_x");
+  const size_t mark = Find(copy, "MarkRangeAsResolved(");
+  CHECK(transition != std::string::npos && dispatch != std::string::npos && mark != std::string::npos);
+  CHECK(transition < dispatch);
+  CHECK(dispatch < mark);
+  const size_t copying = split_copy.empty() ? Find(resolve, "MarkRangeAsResolved(") : Find(resolve, "CopyResolveToMemory(");
   const size_t clearing = Find(resolve, "// Clearing.");
   const size_t rov_transition = Find(resolve, "TransitionEdramBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)", clearing);
   const size_t rov_clear = Find(resolve, "resolve_rov_clear_root_signature_", clearing);
-  CHECK(dispatch != std::string::npos && mark != std::string::npos && clearing != std::string::npos);
-  CHECK(dispatch < mark);
-  CHECK(mark < clearing);
+  CHECK(copying != std::string::npos && clearing != std::string::npos);
+  CHECK(copying < clearing);
   CHECK(rov_transition != std::string::npos && rov_clear != std::string::npos && rov_transition < rov_clear);
-  CHECK(Find(resolve, "TransitionEdramBuffer(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)") < dispatch);
 }
 
 void TestCommandProcessor(const fs::path& source) {

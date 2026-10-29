@@ -6,6 +6,10 @@ Status: **verified in all three games.** At Render resolution
 [Games](#games)), stays playable and stable with FSR 3.1 and DLSS. MUA2's picture is correct with both, with its
 shadow pass at 1x.
 
+Platform: Windows only. FSR 3.1 here is a second backend of the Direct3D 12 GPU plugin's scene upscaler and calls AMD's
+`amd_fidelityfx_dx12.dll`; the Linux Vulkan GPU plugin has no scene upscaler, so the Linux launcher offers AMD FSR 1
+only.
+
 All three games on Windows offer AMD FSR 3.1 in the launcher's Upscaling choice (Off, AMD FSR 1, AMD FSR 3.1, NVIDIA
 DLSS). It runs on any Direct3D 12 graphics card that uses the rasterizer-ordered view (ROV) render path (NVIDIA, AMD
 and Intel), with nothing to install: AMD's signed `amd_fidelityfx_dx12.dll` ships beside the programs. It is temporal

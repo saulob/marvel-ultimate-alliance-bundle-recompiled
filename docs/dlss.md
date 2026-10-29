@@ -9,6 +9,9 @@ FPS and its GPU wait from 23.67 to 19.66 ms (log 250). The fifth version takes t
 (0163; it was the clear value in every gameplay frame, see "Fourth run") and, in Performance, draws the pre-scene
 targets only the scene samples at the game's own 1x (0164).
 
+Platform: Windows only. DLSS here is a scene upscaler inside the Direct3D 12 GPU plugin (patches 0160 to 0169) that calls
+NVIDIA's Direct3D 12 NGX path; the Linux Vulkan GPU plugin has no scene upscaler, so the Linux launcher does not offer it.
+
 AMD FSR 3.1 ([fsr3.md](fsr3.md)) is a second backend of the same scene upscaler, with the same scene, depth, motion
 vectors, jitter, pre-scene targets and write-back.
 
