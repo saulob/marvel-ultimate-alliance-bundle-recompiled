@@ -14,6 +14,7 @@
 
 <img width="940" height="529" alt="MarvelBundle" src="https://github.com/user-attachments/assets/698fc8fc-23c1-4b56-9309-6330b743f5d0" />
 
+<<<<<<< HEAD
 ## What's new in v0.2.0
 
 ### Super Resolution and Graphics
@@ -41,6 +42,8 @@ New **Cheats** page in the launcher, saved separately for each game, and an in-g
 - Vulkan graphics-device selection, Vulkan VSync handling, AMD FSR 1, dynamic page streaming, shader handling and rendering correctness fixes, and performance improvements.
 - Linux and Steam Deck remain experimental. Broader testing on real Steam Deck and Linux hardware is welcome.
 
+=======
+>>>>>>> origin/main
 ## Features
 
 - **Three games in one bundle**: Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2, each recompiled from its own game code into its own program, chosen from one launcher.
@@ -160,6 +163,7 @@ Achievements are unlocked offline and kept on this PC: 46 in Marvel Ultimate All
 
 The launcher checks the latest GitHub release once per start. A newer release shows a banner in the header; nothing is installed until **UPDATE NOW** has downloaded and verified the package and **RESTART TO UPDATE** is pressed. On Windows the update is `MarvelUltimateAlliance-v<version>-windows-x64.zip`: its SHA-256 must match the release's checksum before anything is unpacked, and `trg-updater.exe` replaces the launcher, the three game programs, the runtime and the other bundle files together, backs up what it replaces, rolls back on any failure and restarts the launcher. On Linux the AppImage downloads `MarvelUltimateAlliance-v<version>-x86_64.AppImage`, checks it the same way, replaces itself and starts the new AppImage. `game`, `user_data`, saves, settings and logs are never replaced.
 
+<<<<<<< HEAD
 ## Checksums and security
 
 The v0.2.0 release files have these SHA-256 values, also published with the release as `MarvelUltimateAlliance-v0.2.0-windows-x64.sha256` and `MarvelUltimateAlliance-v0.2.0-x86_64.sha256`:
@@ -171,6 +175,8 @@ The v0.2.0 release files have these SHA-256 values, also published with the rele
 
 The final release artifacts were scanned with VirusTotal before publication: [Windows ZIP](https://www.virustotal.com/gui/file/2bcab1cee6afedcfd5ebaf366a81a798c454792742d9fae9f0c2fa4065adb8a6), [AppImage](https://www.virustotal.com/gui/file/d3aa486c227aafa6067b9b9c2137bcbac760225bcbfaf77f1e8edc4b01ee2256). A scan is a useful extra check, not a guarantee of safety; verify the SHA-256 of your download.
 
+=======
+>>>>>>> origin/main
 ## Screenshots
 
 <img width="1288" height="774" alt="2026-10-25_22-23" src="https://github.com/user-attachments/assets/3c5a6bd3-fa0e-48f3-b973-7ec885fff9c0" />
