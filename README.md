@@ -197,14 +197,8 @@ The recompiled C++ is generated from your own game files, so the repository does
 - The ReXGlue runtime and Xenos GPU plugin in `tools\rexglue` are built from the pinned ReXGlue SDK v0.10.0 source with the patches in `patches\rexglue-sdk`. `tools\build.ps1` rebuilds them whenever the patches or the compiler change and refuses to start with other copies next to the executable.
 - The Linux AppImage is built on Ubuntu 20.04 with `tools/package-linux.sh`, from the code `tools/codegen.ps1` generated on Windows. See [docs/linux.md](docs/linux.md).
 
-## Sponsoring
-
-Marvel Ultimate Alliance Bundle Recompiled is maintained and developed in my free time. If you enjoy the project or find it useful, consider supporting its continued development.
-
-<p align="center">
-<a href="https://github.com/sponsors/saulob" target="_blank"><img src="https://img.shields.io/badge/GitHub%20Sponsors-Sponsor-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
-</p>
 ## Credits
+
 - Marvel Ultimate Alliance, Marvel Ultimate Alliance Gold Edition and Marvel Ultimate Alliance 2 are games by their original rights holders. This is an unofficial fan-made PC port. It is not affiliated with or endorsed by them, and it contains none of their files.
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) for the recompiler and runtime (BSD 3-Clause)
 - [TRG Launcher](https://github.com/TekRantGaming/trg-launcher), the launcher interface, pinned at v1.1.0 (revision b384a28), licensed under the MIT License
