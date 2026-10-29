@@ -225,6 +225,11 @@ void DrawFailure(trg::Ui& ui, const std::string& title, const std::string& text)
   ui.Spacer(4);
 }
 
+constexpr char kNvidiaDlssCredit[] =
+    "NVIDIA DLSS Super Resolution by NVIDIA Corporation, from NVIDIA DLSS SDK 310.9.16. NVIDIA, NVIDIA RTX, GeForce "
+    "RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation. This port is not sponsored or "
+    "endorsed by NVIDIA.";
+
 std::string Size(int width, int height) {
   return std::to_string(width) + " \xC3\x97 " + std::to_string(height);
 }
@@ -1308,6 +1313,9 @@ class LauncherDialog final : public rex::ui::ImGuiDialog {
     }
     ui.Info("Port version", PortVersion().c_str());
     ui.Info("Libraries", "ReXGlue SDK " REXGLUE_VERSION_STRING "   \xC2\xB7   TRG Launcher " MUA_TRG_VERSION);
+    if (UpscalerOnBackend(Upscaler::kDlss)) {
+      ui.Info("NVIDIA DLSS", kNvidiaDlssCredit);
+    }
     const std::string game =
         std::format("Xbox 360 disc, title {}, {}", HexId(ProfileOf(*state.game).title_id), state.game->display_name);
     ui.Info("Game", game.c_str());

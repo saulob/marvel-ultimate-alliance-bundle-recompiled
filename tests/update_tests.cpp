@@ -913,7 +913,7 @@ void TestSourceWiring() {
     const std::string_view name = file;
     if (name == "licenses/THIRD-PARTY-LICENSES.txt") {
       CHECK(Contains(package, "'THIRD-PARTY-LICENSES.txt'"));
-    } else if (name.rfind("assets/", 0) == 0) {
+    } else if (name.rfind("assets/", 0) == 0 || name.rfind("licenses/", 0) == 0) {
       std::string windows_path(name);
       std::replace(windows_path.begin(), windows_path.end(), '/', '\\');
       CHECK(Contains(package, "'" + windows_path + "'"));

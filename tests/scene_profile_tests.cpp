@@ -361,12 +361,11 @@ void TestRuntimeFiles() {
   size_t fidelityfx = 0;
   for (const char* file : mua::kBundleFiles) {
     fidelityfx += std::string_view(file) == "amd_fidelityfx_dx12.dll";
-    CHECK(!Has(file, "nvngx") && !Has(file, "mua_dlss_bridge"));
   }
   CHECK(fidelityfx == 1);
   const std::string package = ReadFile(kRoot + "tools/package-release.ps1");
   CHECK(Count(package, "'amd_fidelityfx_dx12.dll'") == 1);
-  CHECK(!Has(package, "nvngx_dlss") && !Has(package, "mua_dlss_bridge"));
+  CHECK(Has(package, "'mua_dlss_bridge.dll', 'nvngx_dlss.dll'"));
   const std::string cmake = ReadFile(kRoot + "CMakeLists.txt");
   CHECK(Count(cmake, "add_library(mua_dlss_bridge SHARED") == 1);
 }

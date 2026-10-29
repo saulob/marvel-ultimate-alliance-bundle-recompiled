@@ -3,8 +3,8 @@
 // list from the scene's own color, depth and motion, 0162 draws the targets drawn only before the scene at the scene's
 // whole scale and stretches their resolves back, 0163 takes the scene's depth once between depth clears, 0164 draws
 // the pre-scene targets only the scene samples at 1x in Performance, the app sets the DLSS mode only for the DLSS
-// choice, MUA1 and its Gold Edition offer it, the SDK comes only from NVIDIA's pinned commit, releases carry no DLSS
-// file yet, and no patch carries diagnostics. With the NVIDIA DLSS SDK, it also loads the built mua_dlss_bridge.dll and
+// choice, MUA1 and its Gold Edition offer it, the SDK comes only from NVIDIA's pinned commit, the release package
+// carries the bridge, nvngx_dlss.dll and both licenses, and no patch carries diagnostics. With the NVIDIA DLSS SDK, it also loads the built mua_dlss_bridge.dll and
 // calls its interface without a GPU.
 // Run: mua_dlss_bridge_tests
 
@@ -274,10 +274,40 @@ void TestSdkSource() {
   CHECK(Has(ReadFile(kRoot + ".gitignore"), "\n/tools/nvidia-dlss/\n"));
 }
 
-void TestNotReleased() {
+void TestReleased() {
   const std::string package = ReadFile(kRoot + "tools/package-release.ps1");
   CHECK(!package.empty());
-  CHECK(!Has(package, "nvngx_dlss") && !Has(package, "mua_dlss_bridge"));
+  CHECK(Has(package, "'mua_dlss_bridge.dll', 'nvngx_dlss.dll'"));
+  CHECK(Has(package, R"('licenses\nvidia-dlss\LICENSE.txt', 'licenses\mua-dlss-bridge\LICENSE.txt')"));
+  CHECK(Has(package, "$Dlss = Test-DlssRelease"));
+  CHECK(Has(package, "Get-AuthenticodeSignature"));
+  CHECK(Has(package, "'nvngx_dlssg.dll'"));
+  CHECK(Has(package, "'nvngx_dlssg.dll', 'nvngx_dlssd.dll')"));
+  const std::string setup = ReadFile(kRoot + "tools/setup-dlss-sdk.ps1");
+  CHECK(Has(setup, "$version = '310.9.16'"));
+  CHECK(Has(ReadFile(kRoot + "src/dlss_bridge/LICENSE.txt"), "MIT License"));
+  const std::string notices = ReadFile(kRoot + "packaging/licenses/THIRD-PARTY-LICENSES.txt");
+  CHECK(Has(notices, "NVIDIA DLSS Super Resolution") && Has(notices, "licenses/nvidia-dlss/LICENSE.txt"));
+  CHECK(Has(notices, "mua_dlss_bridge.dll") && Has(notices, "licenses/mua-dlss-bridge/LICENSE.txt"));
+  for (const char* runtime_notice : {"--- CURL", "--- 8x13 bitmap font", "--- d3dx12.h", "--- pugixml", "--- libnpy", "--- stb",
+                                     "--- DirectX-Graphics-Samples", "--- Vulkan-Headers"}) {
+    CHECK(Has(notices, runtime_notice));
+  }
+  CHECK(Has(notices, "not sponsored or endorsed by NVIDIA"));
+  CHECK(!Has(notices, "Frame Generation is supported"));
+  const std::string launcher = ReadFile(kRoot + "src/launcher.cpp");
+  CHECK(Has(launcher, "if (UpscalerOnBackend(Upscaler::kDlss)) {\n      ui.Info(\"NVIDIA DLSS\", kNvidiaDlssCredit);"));
+  CHECK(Has(launcher, "NVIDIA DLSS Super Resolution by NVIDIA Corporation, from NVIDIA DLSS SDK 310.9.16."));
+  CHECK(Has(launcher, "RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation."));
+  CHECK(Has(launcher, "endorsed by NVIDIA."));
+  CHECK(!Has(launcher, "_WIN32"));
+  const std::string readme = ReadFile(kRoot + "README.md");
+  CHECK(Has(readme, "NVIDIA, NVIDIA RTX, GeForce RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation"));
+  const std::string header = ReadFile(kRoot + "src/update_bundle.h");
+  for (const char* file : {"mua_dlss_bridge.dll", "nvngx_dlss.dll", "licenses/nvidia-dlss/LICENSE.txt",
+                           "licenses/mua-dlss-bridge/LICENSE.txt"}) {
+    CHECK(Has(header, (std::string("\"") + file + "\"").c_str()));
+  }
 }
 
 void TestNoDiagnostics() {
@@ -354,7 +384,7 @@ int main() {
   TestApp();
   TestGames();
   TestSdkSource();
-  TestNotReleased();
+  TestReleased();
   TestNoDiagnostics();
 #if defined(_WIN32) && defined(MUA_DLSS_BRIDGE_DLL)
   TestBuiltBridge();

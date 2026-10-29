@@ -258,10 +258,13 @@ the rest stale or cleared) in each scene texture until the end of the scene, wro
 resolves replaced, took depth only at color resolves, and read the single-sampled staging buffer with a two-sample
 average. The black rectangles and displaced pieces came from the first of these. The second version fixed all four.
 
-## Licensing before DLSS ships
+## Licensing and packaging
 
-Releases do not include the bridge or `nvngx_dlss.dll`. `tools/package-release.ps1` copies a fixed file list, and
-`mua_dlss_bridge_tests` checks that the list names no DLSS file. Shipping is governed by the NVIDIA RTX SDKs License
+The Windows release ships `mua_dlss_bridge.dll` and `nvngx_dlss.dll`, with NVIDIA's license in
+`licenses/nvidia-dlss/LICENSE.txt` and the bridge's MIT license (`src/dlss_bridge/LICENSE.txt`) in
+`licenses/mua-dlss-bridge/LICENSE.txt`. `tools/package-release.ps1` stops when a file is missing, `nvngx_dlss.dll` is not
+the pinned release file with a valid NVIDIA signature, or the bridge is older than its source or a debug build; it ships no
+`nvngx_dlssg.dll` (Frame Generation is not used), header or library. Shipping is governed by the NVIDIA RTX SDKs License
 (`tools\nvidia-dlss\310.9.16\LICENSE.txt`):
 
 - Ship only `lib/Windows_x86_64/rel/nvngx_dlss.dll`, unmodified, with NVIDIA's signature intact. Never ship the
@@ -269,5 +272,4 @@ Releases do not include the bridge or `nvngx_dlss.dll`. `tools/package-release.p
 - Never commit or ship the headers or libraries.
 - Include NVIDIA's license text with the DLL.
 - Add the Programming Guide's third-party notices (section 9.6) to `packaging/licenses/THIRD-PARTY-LICENSES.txt`.
-- Follow the attribution and trademark terms (license supplement section 7).
-- Read the supplement's notification clause before a public release.
+- Follow the attribution and trademark terms (license supplement section 7): plain-text credit in the README, the third-party notices and the launcher's About page.

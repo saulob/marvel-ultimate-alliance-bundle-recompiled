@@ -39,16 +39,19 @@ $Sdk = Join-Path $SdkRoot 'bin'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $BuildFiles = @('marvel_ultimate_alliance_bundle.exe', 'marvel_ultimate_alliance_mua1.exe', 'marvel_ultimate_alliance_mua1_gold.exe',
     'marvel_ultimate_alliance_mua2.exe', 'rexruntime.dll', 'rexgpu-xenos.dll', 'amd_fidelityfx_dx12.dll',
-    'marvel_ultimate_alliance.toml')
+    'mua_dlss_bridge.dll', 'nvngx_dlss.dll', 'marvel_ultimate_alliance.toml')
 $RootFiles = $BuildFiles + @('trg-updater.exe', 'README.txt')
 $LicenseFiles = @('ReXGlue-LICENSE.txt', 'THIRD-PARTY-LICENSES.txt')
+$DlssLicenseFiles = @('licenses\nvidia-dlss\LICENSE.txt', 'licenses\mua-dlss-bridge\LICENSE.txt')
+$DlssSetup = Join-Path $PSScriptRoot 'setup-dlss-sdk.ps1'
+$DlssBridgeSource = Join-Path $Root 'src\dlss_bridge'
 $AssetFiles = @('assets\launcher\header-art-mua1.png', 'assets\launcher\header-art-mua1-gold.png', 'assets\launcher\header-art-mua2.png')
 # Names that mean game data, a package, saves, settings, caches, logs, an update workspace, symbols or debugging tools.
 $ForbiddenNames = @('default.xex', 'game', 'extracted', 'user_data', 'user_data.migrating', 'content', 'cache', 'logs',
     'settings.toml', 'settings.toml.bak', 'game_settings.toml', 'mua1', 'mua1_gold', 'mua2', '415607DA', '4156082F',
-    'manifest.txt', 'job.txt', 'updater.log', 'staging', 'backup', 'vulkan-1.dll', 'marvel_ultimate_alliance.exe')
+    'manifest.txt', 'job.txt', 'updater.log', 'staging', 'backup', 'vulkan-1.dll', 'marvel_ultimate_alliance.exe', 'nvngx_dlssg.dll', 'nvngx_dlssd.dll')
 $ForbiddenPatterns = @('*.xex', '*.iso', '*.log', '*.dmp', '*.pdb', '*.debug', '*.xsh', '*.xpso', '*.bak', '*.tmp', '*.sav', '*.part',
-    'trg-update-*', 'update.zip', '*DEBUG_SAULO*', 'VkLayer_*', 'renderdoc*')
+    'trg-update-*', 'update.zip', '*DEBUG_SAULO*', 'VkLayer_*', 'renderdoc*', '*.lib', '*.exp', '*.h', '*.hpp', '*.cpp')
 # First bytes of an Xbox 360 package or executable.
 $ForbiddenMagic = @('LIVE', 'PIRS', 'CON ', 'XEX2')
 
@@ -89,7 +92,13 @@ function Test-ReleaseFolder([string]$Dir) {
             } elseif ($AssetFiles -notcontains $relative) {
                 $problems.Add("unexpected item: $relative")
             }
-        } elseif ($parts[0] -ne 'licenses' -or $parts.Count -gt 2 -or $item.PSIsContainer -or $LicenseFiles -notcontains $item.Name) {
+        } elseif ($parts[0] -ne 'licenses') {
+            $problems.Add("unexpected item: $relative")
+        } elseif ($item.PSIsContainer) {
+            if ($DlssLicenseFiles -notcontains ($relative + '\LICENSE.txt')) { $problems.Add("unexpected folder: $relative") }
+        } elseif ($parts.Count -eq 2) {
+            if ($LicenseFiles -notcontains $item.Name) { $problems.Add("unexpected item: $relative") }
+        } elseif ($DlssLicenseFiles -notcontains $relative) {
             $problems.Add("unexpected item: $relative")
         }
     }
@@ -98,6 +107,9 @@ function Test-ReleaseFolder([string]$Dir) {
     }
     foreach ($leaf in $LicenseFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $base "licenses\$leaf") -PathType Leaf)) { $problems.Add("missing: licenses\$leaf") }
+    }
+    foreach ($leaf in $DlssLicenseFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $base $leaf) -PathType Leaf)) { $problems.Add("missing: $leaf") }
     }
     foreach ($asset in $AssetFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $base $asset) -PathType Leaf)) { $problems.Add("missing: $asset") }
@@ -126,6 +138,64 @@ function Expand-ReleaseZip([string]$Zip) {
         }
     } finally { $archive.Dispose() }
     return $target
+}
+
+function Get-DlssSetupValue([string]$Pattern, [string]$What) {
+    $setup = Get-Content -LiteralPath $DlssSetup -Raw
+    if ($setup -notmatch $Pattern) { throw "$What not found in setup-dlss-sdk.ps1" }
+    return $Matches[1]
+}
+
+# NVIDIA DLSS is a shipped feature, so the release stops unless every runtime file it needs is present and genuine.
+function Test-DlssRelease {
+    $version = Get-DlssSetupValue '(?m)^\$version\s*=\s*''([\d.]+)''' 'DLSS SDK version'
+    $pinned = @{}
+    foreach ($relative in 'LICENSE.txt', 'lib/Windows_x86_64/rel/nvngx_dlss.dll') {
+        $pinned[$relative] = Get-DlssSetupValue ("'" + [regex]::Escape($relative) + "'\s*=\s*'([0-9A-Fa-f]{64})'") "$relative hash"
+    }
+    $sdk = Join-Path $Root "tools\nvidia-dlss\$version"
+    $problems = New-Object System.Collections.Generic.List[string]
+
+    $header = Get-Content -LiteralPath (Join-Path $Root 'src\dlss_support.h') -Raw
+    if ($header -notmatch 'kDlssBridgeFile\[\]\s*=\s*"([^"]+)"' -or $Matches[1] -ne 'mua_dlss_bridge.dll') {
+        $problems.Add('src\dlss_support.h names a bridge other than mua_dlss_bridge.dll')
+    }
+
+    $bridge = Join-Path $ReleaseBuild 'mua_dlss_bridge.dll'
+    if (-not (Test-Path -LiteralPath $bridge -PathType Leaf)) {
+        $problems.Add('mua_dlss_bridge.dll was not built: the NVIDIA DLSS SDK is missing (run tools\setup-dlss-sdk.ps1, then build without -SkipBuild)')
+    } else {
+        $bridgeTime = (Get-Item -LiteralPath $bridge).LastWriteTimeUtc
+        $newer = @(Get-ChildItem -LiteralPath $DlssBridgeSource -File | Where-Object { $_.Name -ne 'LICENSE.txt' -and $_.LastWriteTimeUtc -gt $bridgeTime })
+        if ($newer.Count) { $problems.Add("mua_dlss_bridge.dll is older than src\dlss_bridge\$($newer[0].Name) (run without -SkipBuild)") }
+        $bridgeText = $Latin1.GetString([IO.File]::ReadAllBytes($bridge))
+        foreach ($debug in 'ucrtbased.dll', 'VCRUNTIME140D.dll', 'MSVCP140D.dll', 'nvsdk_ngx_s_dbg') {
+            if ($bridgeText.IndexOf($debug, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $problems.Add("mua_dlss_bridge.dll is a debug build ($debug)") }
+        }
+    }
+
+    $runtime = Join-Path $ReleaseBuild 'nvngx_dlss.dll'
+    if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
+        $problems.Add('missing: nvngx_dlss.dll in the Release build')
+    } else {
+        if ((Get-FileHash -LiteralPath $runtime -Algorithm SHA256).Hash -ne $pinned['lib/Windows_x86_64/rel/nvngx_dlss.dll']) {
+            $problems.Add("nvngx_dlss.dll is not the release file of NVIDIA DLSS SDK $version")
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $runtime
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'NVIDIA') {
+            $problems.Add("nvngx_dlss.dll has no valid NVIDIA signature ($($signature.Status))")
+        }
+    }
+
+    $nvidiaLicense = Join-Path $sdk 'LICENSE.txt'
+    if (-not (Test-Path -LiteralPath $nvidiaLicense -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $nvidiaLicense -Algorithm SHA256).Hash -ne $pinned['LICENSE.txt']) {
+        $problems.Add("NVIDIA DLSS SDK $version LICENSE.txt is missing or not the pinned file")
+    }
+    $bridgeLicense = Join-Path $DlssBridgeSource 'LICENSE.txt'
+    if (-not (Test-Path -LiteralPath $bridgeLicense -PathType Leaf)) { $problems.Add('src\dlss_bridge\LICENSE.txt is missing') }
+    if ($problems.Count) { Write-Problems $problems; throw 'NVIDIA DLSS cannot be packaged' }
+    return [pscustomobject]@{ Version = $version; NvidiaLicense = $nvidiaLicense; BridgeLicense = $bridgeLicense }
 }
 
 if ($VerifyOnly) {
@@ -172,6 +242,7 @@ if ($runtimeProblems.Count) { Write-Problems $runtimeProblems; throw 'tools\rexg
 foreach ($leaf in $BuildFiles) {
     if (-not (Test-Path (Join-Path $ReleaseBuild $leaf))) { throw "Release build output is missing $leaf (run without -SkipBuild)" }
 }
+$Dlss = Test-DlssRelease
 $Updater = Join-Path $UpdaterBuild 'trg-updater.exe'
 $UpdaterDebug = Join-Path $UpdaterBuild 'trg-updater.debug'
 foreach ($file in $Updater, $UpdaterDebug) {
@@ -200,6 +271,11 @@ foreach ($leaf in $LicenseFiles) {
     $source = Join-Path $Packaging "licenses\$leaf"
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing license file: $source" }
     Copy-Item -LiteralPath $source (Join-Path $Stage 'licenses')
+}
+foreach ($license in @(@('licenses\nvidia-dlss', $Dlss.NvidiaLicense), @('licenses\mua-dlss-bridge', $Dlss.BridgeLicense))) {
+    $folder = Join-Path $Stage $license[0]
+    New-Item -ItemType Directory -Force $folder | Out-Null
+    Copy-Item -LiteralPath $license[1] (Join-Path $folder 'LICENSE.txt')
 }
 $asset_dir = Join-Path $Stage 'assets\launcher'
 New-Item -ItemType Directory -Force $asset_dir | Out-Null
